@@ -285,6 +285,8 @@ impl Controls {
             (self.filters.choose_folder, "filter.choose_folder"),
             (self.panels.sides[0].retry, "panel.retry"),
             (self.panels.sides[1].retry, "panel.retry"),
+            (self.panels.sides[0].choose_drive, "panel.choose_drive"),
+            (self.panels.sides[1].choose_drive, "panel.choose_drive"),
         ] {
             control.set_icon(ButtonIcon::of(key, false));
         }

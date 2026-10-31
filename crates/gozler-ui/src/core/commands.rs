@@ -2065,12 +2065,21 @@ mod tests {
         for language in LANGUAGES {
             let strings = Strings::load(language);
             let mut bar_keys = HashSet::new();
+            let mut commander_keys = HashSet::new();
             assert_unique(
                 language.tag,
                 menu_bar(Mode::Commander)
                     .iter()
                     .map(|m| strings.text(m.label)),
-                &mut HashSet::new(),
+                &mut commander_keys,
+            );
+            assert_unique(
+                language.tag,
+                [
+                    strings.text("panel.retry"),
+                    strings.text("panel.choose_drive"),
+                ],
+                &mut commander_keys,
             );
             let bar = menu_bar(Mode::Search);
             assert_unique(

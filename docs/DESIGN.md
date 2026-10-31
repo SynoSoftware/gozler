@@ -1322,10 +1322,12 @@ What the list area shows:
 | Reading | "Reading…" | empty |
 | The folder | its rows | the counts |
 | An empty folder | the `..` row only | "0 items" |
-| The shown drive is removed, or stops answering | "Drive E:\ is not ready. Insert it again, then select Retry.", with Retry | empty |
+| The shown drive is removed, or stops answering | "Drive E:\ is not ready. Reconnect it and try again.", with Retry and Choose drive below it | empty |
 | The shown folder is deleted | the nearest folder above it that exists, as File Explorer does | its counts |
 
 A folder that cannot be opened, from the path box, a navigation key or the drive menu, is not a state: the panel stays in its folder, and a message box says why, as File Explorer and Total Commander do (see "Feedback", a failed action that the person started). After a navigation key or the drive menu, the path box shows the panel's folder again; after a typed path, it keeps the typed text, as above.
+
+Choose drive opens the same menu as the drive selector above the list, with its volume names and recent folders. The failed path stays until another folder opens. The recovery buttons fit the panel at its minimum size, wrapping when needed; the window reserves no room for a list of drive letters.
 
 ### Moving around
 
