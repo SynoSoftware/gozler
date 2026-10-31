@@ -428,7 +428,10 @@ impl CaptionWidths {
             .list_buttons
             .iter()
             .map(|(caption, shielded)| (caption, *shielded || captions.icons))
-            .chain([(&captions.retry, captions.icons)]);
+            .chain([
+                (&captions.retry, captions.icons),
+                (&captions.choose_drive, captions.icons),
+            ]);
         CaptionWidths {
             transfers_height: Px(0),
             match_label: measure(&captions.match_label),
@@ -496,9 +499,6 @@ const BUTTON_PADDING: Dip = Dip(24);
 /// The narrowest push button, as Windows' guidelines size OK and Cancel.
 const BUTTON_MIN_WIDTH: Dip = Dip(75);
 
-/// The space above a panel's message, under its list's header, as the
-/// prototype draws it.
-const MESSAGE_TOP: Dip = Dip(18);
 /// The room a button needs for a caption `caption` wide, with an image
 /// before it when `with_image`: an icon, or the administrator shield of a
 /// button that runs as administrator, which is as large.
@@ -718,29 +718,49 @@ impl MessageArea {
         width: Px,
         centred: bool,
     ) -> (Rect, Vec<Rect>) {
-        let px = |dip: Dip| dip.to_px(self.dpi);
         let text = Rect {
             height: text_height.min(self.text.height),
             ..self.text
         };
-        let row = Px(width.0 * buttons as i32 + px(RELATED).0 * (buttons as i32 - 1).max(0));
-        let mut x = match centred {
-            true => text.x + Px((text.width.0 - row.0) / 2),
-            false => text.x,
-        };
-        let buttons = (0..buttons)
-            .map(|_| {
-                let button = Rect {
-                    x,
-                    y: text.bottom() + px(GROUP),
+        (
+            text,
+            self.buttons(text.bottom(), font_height, buttons, width, centred),
+        )
+    }
+
+    /// Buttons below `after`, wrapping to fit the message's width.
+    fn buttons(
+        &self,
+        after: Px,
+        font_height: Px,
+        count: usize,
+        width: Px,
+        centred: bool,
+    ) -> Vec<Rect> {
+        let gap = RELATED.to_px(self.dpi);
+        let width = width.min(self.text.width);
+        let height = font_height + CONTROL_PADDING.to_px(self.dpi);
+        let columns = ((self.text.width.0 + gap.0) / (width.0 + gap.0)).max(1) as usize;
+        (0..count)
+            .map(|index| {
+                let row = index / columns;
+                let column = index % columns;
+                let in_row = (count - row * columns).min(columns) as i32;
+                let row_width = Px(in_row * width.0 + (in_row - 1) * gap.0);
+                Rect {
+                    x: self.text.x
+                        + if centred {
+                            Px((self.text.width.0 - row_width.0) / 2)
+                        } else {
+                            Px(0)
+                        }
+                        + Px(column as i32 * (width.0 + gap.0)),
+                    y: after + GROUP.to_px(self.dpi) + Px(row as i32 * (height.0 + gap.0)),
                     width,
-                    height: font_height + px(CONTROL_PADDING),
-                };
-                x = button.right() + px(RELATED);
-                button
+                    height,
+                }
             })
-            .collect();
-        (text, buttons)
+            .collect()
     }
 }
 
@@ -1406,15 +1426,7 @@ impl Layout {
         let control_height = font_height + px(CONTROL_PADDING);
         let line_height = font_height + px(ROW_PADDING);
         let list_min_width = LIST_MIN_WIDTH.to_px(dpi);
-        // Tall enough for the header, the message and Retry.
-        let list_min_height = Px(line_height.0 * LIST_MIN_ROWS).max(
-            line_height
-                + px(MESSAGE_TOP)
-                + Px(font_height.0 * 2)
-                + related
-                + control_height
-                + related,
-        );
+        let list_min_height = Px(line_height.0 * LIST_MIN_ROWS);
         // The memory group shows as in Search; Show details does not,
         // because Commander mode has no inspector.
         let mut status = StatusLayout::compute(
@@ -1450,6 +1462,28 @@ impl Layout {
             + look_in_width
             + margin;
         let panel_min_width = list_min_width.max(search_row);
+        let recovery_buttons = MessageArea::new(
+            Rect {
+                width: panel_min_width,
+                ..Rect::default()
+            },
+            Px(0),
+            dpi,
+        )
+        .buttons(
+            line_height + margin + Px(font_height.0 * 2),
+            font_height,
+            2,
+            captions.message_button_width(dpi),
+            true,
+        );
+        let list_min_height = list_min_height.max(
+            recovery_buttons
+                .last()
+                .expect("recovery has two buttons")
+                .bottom()
+                + margin,
+        );
         let inspector_min = if show_inspector {
             captions.transfers_height + px(GROUP)
         } else {
@@ -2691,17 +2725,21 @@ mod tests {
                         }
                         fits(&placed, client, status_height, dpi, stretch);
                     }
-                    // The message and Retry lie over the list, which is
-                    // empty while they show: a "not ready" message of two
-                    // lines and Retry under it fit in the list.
+                    // Recovery controls lie over the empty list and must
+                    // stay reachable even at the minimum window size.
                     let area = MessageArea::new(panel.list, font_height + Dip(7).to_px(dpi), dpi);
                     let button = captions.message_button_width(dpi);
-                    let (_, retry) =
-                        area.place(Px(font_height.0 * 2), font_height, 1, button, true);
-                    assert!(
-                        retry[0].bottom() <= panel.list.bottom(),
-                        "{retry:?} at {dpi:?}"
-                    );
+                    let (_, buttons) =
+                        area.place(Px(font_height.0 * 2), font_height, 2, button, true);
+                    for button in &buttons {
+                        assert!(
+                            button.x >= panel.list.x
+                                && button.right() <= panel.list.right()
+                                && button.bottom() <= panel.list.bottom(),
+                            "{button:?} at {dpi:?}"
+                        );
+                    }
+                    assert!(!overlaps(buttons[0], buttons[1]));
                     controls.extend([
                         panel.drive,
                         panel.path,

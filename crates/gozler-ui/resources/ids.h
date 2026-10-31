@@ -50,8 +50,8 @@
 #define IDC_LEFT_PANEL 79
 #define IDC_RIGHT_PANEL 80
 // Each panel's other controls: the drive button, the path box, the list's
-// message and Retry, and the status line's counts, quick search box and
-// free space.
+// message and recovery buttons, and the status line's counts, quick search
+// box and free space.
 #define IDC_LEFT_DRIVE 81
 #define IDC_LEFT_PATH 82
 #define IDC_LEFT_MESSAGE 83
@@ -82,6 +82,8 @@
 #define IDC_RIGHT_LOOK_IN_LABEL 106
 #define IDC_RIGHT_LOOK_IN 107
 #define IDC_RIGHT_FOLDER 108
+#define IDC_LEFT_CHOOSE_DRIVE 109
+#define IDC_RIGHT_CHOOSE_DRIVE 110
 
 // The filter pane, a window of its own that scrolls, and its controls.
 #define IDC_FILTER_PANE 20

@@ -103,6 +103,7 @@ pub(crate) struct WindowCaptions {
     /// word and its tooltip.
     pub(crate) key_bar: [[(String, String, Option<String>); 6]; 2],
     pub(crate) retry: String,
+    pub(crate) choose_drive: String,
     /// The widest free space a status line shows, which the layout sizes
     /// the status line's right end for.
     pub(crate) free_widest: Vec<String>,
@@ -161,7 +162,7 @@ impl DialogItem {
 /// caption shows the same icon on every button that has it (DESIGN.md:
 /// Look). A fix that needs administrator permission shows the
 /// administrator shield instead, so its caption has no icon here.
-const BUTTON_GLYPHS: [(&str, Glyph); 26] = [
+const BUTTON_GLYPHS: [(&str, Glyph); 27] = [
     ("button.ok", Glyph::Accept),
     ("button.cancel", Glyph::Cancel),
     ("button.close", Glyph::Cancel),
@@ -188,6 +189,7 @@ const BUTTON_GLYPHS: [(&str, Glyph); 26] = [
     ("fix.downgrade", Glyph::Download),
     ("fix.open_services", Glyph::Processing),
     ("panel.retry", Glyph::Refresh),
+    ("panel.choose_drive", Glyph::HardDrive),
 ];
 
 /// The icon of a push button whose caption is the catalogue text `key`.
@@ -867,6 +869,7 @@ impl WindowCaptions {
                 .to_vec(),
             key_bar: [key_bar(strings, false), key_bar(strings, true)],
             retry: strings.text("panel.retry").to_owned(),
+            choose_drive: strings.text("panel.choose_drive").to_owned(),
             free_widest: (2..=5)
                 .flat_map(|unit| {
                     [9.99, 99.9, 999.0].map(move |value| (value * 1024f64.powi(unit)) as u64)

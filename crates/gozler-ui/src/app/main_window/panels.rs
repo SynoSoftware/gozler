@@ -60,7 +60,7 @@ const AGAIN_MS: u32 = 2_000;
 const DRIVE_IDS: u16 = 0x900;
 const FOLDER_IDS: u16 = 0x940;
 
-/// One panel's controls, created in Tab order. The message and Retry come
+/// One panel's controls, created in Tab order. The message and its buttons come
 /// before the list, so they lie above it (`ListView::create`). A search
 /// panel shows its search box and Look in in the path box's place
 /// (DESIGN.md: Search in a panel).
@@ -75,6 +75,7 @@ pub(super) struct PanelControls {
     pub(super) look_in: DropDownList,
     pub(super) message: Label,
     pub(super) retry: Button,
+    pub(super) choose_drive: Button,
     pub(super) list: ListView,
     pub(super) counts: Label,
     /// The quick search box, in the status line's place while it is open.
@@ -101,6 +102,7 @@ impl PanelControls {
                 C::LeftLookIn,
                 C::LeftMessage,
                 C::LeftRetry,
+                C::LeftChooseDrive,
                 C::LeftPanel,
                 C::LeftCounts,
                 C::LeftQuick,
@@ -115,6 +117,7 @@ impl PanelControls {
                 C::RightLookIn,
                 C::RightMessage,
                 C::RightRetry,
+                C::RightChooseDrive,
                 C::RightPanel,
                 C::RightCounts,
                 C::RightQuick,
@@ -130,6 +133,7 @@ impl PanelControls {
             look_in,
             message,
             retry,
+            choose_drive,
             list,
             counts,
             quick,
@@ -146,6 +150,7 @@ impl PanelControls {
             look_in: DropDownList::create(parent, look_in)?,
             message: Label::create_centred(parent, message)?,
             retry: Button::create(parent, retry)?,
+            choose_drive: Button::create(parent, choose_drive)?,
             list: ListView::create(parent, list)?,
             counts: Label::create_heading(parent, counts)?,
             quick: Edit::create_echo(parent, quick)?,
@@ -169,7 +174,7 @@ impl PanelControls {
     }
 
     /// Every control, which the window shows only in Commander mode.
-    pub(super) fn hwnds(&self) -> [Hwnd; 12] {
+    pub(super) fn hwnds(&self) -> [Hwnd; 13] {
         [
             self.drive.hwnd(),
             self.path.hwnd(),
@@ -178,6 +183,7 @@ impl PanelControls {
             self.look_in.hwnd(),
             self.message.hwnd(),
             self.retry.hwnd(),
+            self.choose_drive.hwnd(),
             self.list.hwnd(),
             self.counts.hwnd(),
             self.quick.hwnd(),
@@ -188,7 +194,7 @@ impl PanelControls {
 
     /// Where each control goes, the quick search box over the whole status
     /// line, and the counts in its left half while the panel searches all
-    /// drives. The message and Retry go where their text needs
+    /// drives. The message and its buttons go where their text needs
     /// ([`Panels::show_panel`]).
     pub(super) fn placed(&self, layout: &PanelLayout) -> [(Hwnd, Rect); 10] {
         let line = Rect {
@@ -353,10 +359,10 @@ impl Panels {
         {
             self.activate_panel(window, side, true);
             self.panel_message_clicked(window, hwnd, side);
-        } else if let Some(side) = Side::BOTH
-            .into_iter()
-            .find(|side| self.panel(*side).drive.clicked(event))
-        {
+        } else if let Some(side) = Side::BOTH.into_iter().find(|side| {
+            let panel = self.panel(*side);
+            panel.drive.clicked(event) || panel.choose_drive.clicked(event)
+        }) {
             self.drive_menu(window, hwnd, side);
         } else {
             return false;
@@ -564,7 +570,7 @@ impl Panels {
             == Some(Waiting::Slow);
         let slow_request = window.slow_list_work(List::Panel(side));
         let slow = folder_slow || slow_request.is_some();
-        let (message, button, key, caption) = {
+        let (message, button, choose_drive, key, caption, choose_caption) = {
             let model = window.model.borrow();
             let panel = model.panels().panel(side);
             let (mut message, retry) = captions::panel_message(&model, side);
@@ -583,8 +589,10 @@ impl Panels {
             (
                 message,
                 slow || retry && panel.reading_generation().is_none(),
+                !slow && matches!(panel.view(), View::NotReady { .. }),
                 key,
                 model.strings().text(key).to_owned(),
+                model.strings().text("panel.choose_drive").to_owned(),
             )
         };
         let visible = self.panel_visible(window);
@@ -592,25 +600,32 @@ impl Panels {
         let text = message.as_deref().unwrap_or_default();
         show_text(c.message.hwnd(), text);
         show_text(c.retry.hwnd(), &caption);
+        show_text(c.choose_drive.hwnd(), &choose_caption);
         c.retry.set_glyph(captions::button_glyph(key));
         if visible
             && message.is_some()
             && let Some(placed) = placed
         {
             let header = c.list.header().screen_rect().height;
-            let retry = [c.retry.hwnd()];
-            let buttons = if button { &retry[..] } else { &[] };
+            let mut buttons = Vec::new();
+            if button {
+                buttons.push(c.retry.hwnd());
+            }
+            if choose_drive {
+                buttons.push(c.choose_drive.hwnd());
+            }
             moves.extend(window.message_moves(
                 placed.list,
                 header,
                 c.message.hwnd(),
                 text,
-                buttons,
+                &buttons,
                 true,
             ));
         }
         shown.push((c.message.hwnd(), visible && message.is_some()));
         shown.push((c.retry.hwnd(), visible && button));
+        shown.push((c.choose_drive.hwnd(), visible && choose_drive));
     }
 
     pub(super) fn panel_message_clicked(&self, window: &MainWindow, hwnd: Hwnd, side: Side) {
