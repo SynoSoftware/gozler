@@ -494,6 +494,17 @@ The window is per-monitor DPI aware (manifest `PerMonitorV2`). It opens at its s
 
 The window is made of plain Windows controls, with only the tweaks that cost one call or a few lines, so Windows keeps each control's keyboard behavior, focus, accessibility and high contrast.
 
+Virtual list views expose only visible items during an accessibility tree walk.
+`win::controls::list_view::accessibility` hosts Windows' visible-item list proxy
+as a server-side provider and delegates properties and control patterns to it.
+This bounds UI Automation's bulk traversal, which otherwise enumerates every
+offscreen cell on the window thread (issue #158). Native control patterns,
+including access to selected offscreen rows, remain available. Provider callbacks stay on the
+control's thread, and retained providers stop accessing a destroyed control.
+Windows does not document which of its list proxies walks only visible items,
+so when that proxy is not found, the list keeps Windows' own provider and
+still opens.
+
 - The list keeps Windows' default list style, and its selected rows are light blue as in File Explorer, without a border (see "Selecting entries"). The "Explorer" visual style is not set, because it draws a border around each selected row, which doubles between adjacent rows (**Owner decision**). `LVS_EX_DOUBLEBUFFER`, `LVS_EX_FULLROWSELECT` and `LVS_EX_HEADERDRAGDROP` give no flicker, whole-row selection and column reorder.
 - The font is the message font from `SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS)`, with one larger semibold font for the inspector's heading.
 - `WM_CTLCOLORSTATIC` returns the window color, so labels and check boxes have no gray dialog background. Every color comes from `GetSysColor`, so high contrast works.

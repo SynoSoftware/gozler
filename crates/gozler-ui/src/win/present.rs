@@ -128,6 +128,10 @@ pub(crate) fn set_main_window(main: Hwnd) {
     }));
 }
 
+pub(super) fn is_cover(window: Hwnd) -> bool {
+    MAIN.get().and_then(|main| main.cover) == Some(window)
+}
+
 /// Makes the cover: a static control as a popup that `main` owns, which
 /// shows a copy of the main window's client while a paint pass runs
 /// ([`raise_cover`]). It stays hidden and cloaked between passes, so the
@@ -244,7 +248,7 @@ pub(super) unsafe fn enter(window: HWND, message: u32, lparam: LPARAM) -> Scope 
     // The cover asks its owner for colours too, and paints only itself.
     // SAFETY: the caller's promise.
     if let Some(control) = unsafe { painting(message, lparam) }
-        && MAIN.get().and_then(|main| main.cover) != Some(control)
+        && !is_cover(control)
         && UPDATES.with_borrow(Updates::is_open)
     {
         OPEN.with_borrow_mut(|OpenUpdate { early, .. }| {
@@ -1066,5 +1070,51 @@ fn copy_client(main: Hwnd, width: i32, height: i32) -> Option<HBITMAP> {
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::window::{self, Background, Message, WindowProc};
+    use super::*;
+    use std::rc::Rc;
+    use windows::Win32::Foundation::LRESULT;
+    use windows::Win32::Graphics::Gdi::{COLOR_BTNFACE, GetBkColor, GetSysColor};
+
+    struct WhiteWindow;
+
+    impl WindowProc for WhiteWindow {
+        fn message(&self, _: Hwnd, message: Message<'_>) -> Option<LRESULT> {
+            match message {
+                Message::CtlColorStatic { colors, .. } => Some(colors.window_background()),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn cover_keeps_native_background_in_a_white_window() {
+        let class = "gozler.test.cover-colours";
+        window::register_class::<WhiteWindow>(class, 0, Background::Window).unwrap();
+        let main = window::create_window(class, Rc::new(WhiteWindow), None).unwrap();
+        set_main_window(main);
+        let cover = MAIN.get().unwrap().cover.unwrap();
+        // SAFETY: this thread owns both hidden windows; the DC is released
+        // before its window is destroyed.
+        let (background, expected) = unsafe {
+            let dc = GetDC(Some(cover.0));
+            assert!(!dc.is_invalid());
+            SendMessageW(
+                main.0,
+                WM_CTLCOLORSTATIC,
+                Some(WPARAM(dc.0 as usize)),
+                Some(LPARAM(cover.0.0 as isize)),
+            );
+            let background = GetBkColor(dc);
+            ReleaseDC(Some(cover.0), dc);
+            (background, GetSysColor(COLOR_BTNFACE))
+        };
+        main.destroy();
+        assert_eq!(background.0, expected);
     }
 }

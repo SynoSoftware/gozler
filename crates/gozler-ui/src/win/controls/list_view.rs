@@ -32,6 +32,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::PWSTR;
 
+mod accessibility;
+
 /// The results list: a list view in report and virtual mode, drawn as File
 /// Explorer draws its virtual list (DESIGN.md: Look).
 #[derive(Clone, Copy)]
@@ -105,6 +107,9 @@ impl ListView {
         // A virtual list keeps only the selection and the focus, so it asks
         // the window which row a drop would go to (DispInfo::set_drop_target).
         send(list, LVM_SETCALLBACKMASK, LVIS_DROPHILITED.0 as usize, 0);
+        // Without the visible-item proxy, Windows' own provider still serves
+        // the list; only a full tree walk is slower.
+        let _ = accessibility::attach(ListView(list));
     }
 
     pub(crate) fn hwnd(self) -> Hwnd {
@@ -786,6 +791,7 @@ mod tests {
 
     #[test]
     fn a_column_resize_reselects_the_full_or_short_header() {
+        crate::win::shell::initialize_com();
         crate::win::controls::initialize();
         let class = "gozler.test.short-header";
         window::register_class::<HeaderProbe>(class, 0, Background::Window).unwrap();
