@@ -48,7 +48,7 @@ becomes unresponsive. If Gozler becomes unresponsive too, it has no reason to
 exist. So a wait in the window is a defect to remove, never a limit to
 document: find what the slow step reads, and use what the index already holds
 instead. When the task at hand cannot fix such a wait, file it at once as a
-GitHub issue (`gh issue create --repo SynoSoftware/goz`), so it is never
+GitHub issue (`gh issue create --repo SynoSoftware/gozler`), so it is never
 lost. This holds for a wait that was measured and for one found or suspected
 while reading code, such as in a review. The issue names the slow step and
 what it reads, and says whether its cost was measured or is suspected.

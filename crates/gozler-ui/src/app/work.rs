@@ -43,8 +43,6 @@ pub(crate) use settings::write_settings;
 pub(super) use settings::{RegistryAnswer, RegistryRead, Transparency, load_settings};
 pub(super) use shell::{OpenTarget, Opened, ShellPurpose, ShellTarget};
 
-pub(super) const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
-
 type Diagnostics = LinkedList<(PathBuf, String)>;
 
 #[derive(Clone, Copy)]

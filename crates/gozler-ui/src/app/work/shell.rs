@@ -1,6 +1,6 @@
 //! Purpose-local shell invocations retain their STA execution and source.
 
-use super::{REPOSITORY, Surface};
+use super::Surface;
 use crate::core::clipboard::folder_of;
 use crate::core::fetch::List;
 use crate::core::open::{Commands, Entries, EntryAction, Selected};
@@ -27,7 +27,7 @@ pub(in crate::app) enum ShellTarget {
 impl ShellTarget {
     pub(in crate::app) fn address(self) -> &'static str {
         match self {
-            Self::Repository => REPOSITORY,
+            Self::Repository => env!("CARGO_PKG_REPOSITORY"),
             Self::Company => "https://synapse.sr",
             Self::Credits => concat!(
                 env!("CARGO_PKG_REPOSITORY"),

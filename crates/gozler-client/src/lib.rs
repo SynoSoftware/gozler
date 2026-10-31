@@ -72,7 +72,7 @@ pub enum NotRunning {
 }
 
 /// Where the gozler setup is published.
-pub const RELEASES: &str = "https://github.com/SynoSoftware/goz/releases";
+pub const RELEASES: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/releases");
 
 /// What makes a failed request work again. `gozler` prints it and the window
 /// runs it.

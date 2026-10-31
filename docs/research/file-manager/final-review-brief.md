@@ -29,7 +29,7 @@ finding. Report also what can be removed with no change in behavior.
 - Native-control conversions: what the removed drawing used to show
   (taken entries, folder sizes, `..`, section headings) must still show.
 - Waits in the window: by owner ruling each wait is a defect; a suspected
-  one goes to a GitHub issue (`--repo SynoSoftware/goz`) if not fixed.
+  one goes to a GitHub issue (`--repo SynoSoftware/gozler`) if not fixed.
 
 ## Rules
 

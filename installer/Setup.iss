@@ -5,6 +5,8 @@
   #error Run installer\Build.ps1, which supplies the version from Cargo.toml.
 #endif
 
+#define AppName "Gozler"
+
 ; The service name, gozler_core::proto::SERVICE_NAME. It stays "gozler" across
 ; versions, and it is not "goz", the upstream service installed beside it.
 #define ServiceName "gozler"
@@ -22,12 +24,14 @@
 
 [Setup]
 AppId=gozler
-AppName=Gozler
+AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppCopyright=Copyright (C) 2026 Synapse N.V. and Mustafa Ahci
 AppPublisherURL={#AppUrl}
 AppUpdatesURL={#AppUrl}/releases/latest
+; Installed apps shows this icon; without it, the uninstaller's generic one.
+UninstallDisplayIcon={app}\gozler-ui.exe
 VersionInfoVersion={#AppVersion}
 DefaultDirName={#AppFolder}
 ; Every install goes to the default folder, so an upgrade from a setup that
@@ -55,22 +59,22 @@ ChangesEnvironment=yes
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-UninstallAppRunningError=Gozler is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to stop uninstalling.
+UninstallAppRunningError={#AppName} is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to stop uninstalling.
 
 [CustomMessages]
-StartService=Starting the Gozler service...
-ServiceFailed=The Gozler service could not be installed (exit code %1). Search does not work until it runs. Run "gozlerd install" in an elevated terminal to retry.
+StartService=Starting the {#AppName} service...
+ServiceFailed=The {#AppName} service could not be installed (exit code %1). Search does not work until it runs. Run "gozlerd install" in an elevated terminal to retry.
 CleanupCaption=Keep or remove other programs
-CleanupDescription=Gozler works with or without these programs.
+CleanupDescription={#AppName} works with or without these programs.
 CleanupText=For each program you select, Setup deletes its files and removes its folder from PATH. Other files in that folder stay.
 CleanGoz=Remove goz from %1
-CleanOldGozler=Remove the other copy of Gozler from %1
+CleanOldGozler=Remove the other copy of {#AppName} from %1
 CleaningUp=Finishing installation...
 SeeEveryFileCaption=Choose who sees every file
-SeeEveryFileDescription=Gozler shows each user only the files in folders they can open.
+SeeEveryFileDescription={#AppName} shows each user only the files in folders they can open.
 SeeEveryFileText=When this is checked, %1 also sees the names of files in folders they can't open, and folder sizes. It doesn't let them open those files. When it's cleared, %1 sees no folder sizes.%n%nTo change who sees every file later, open Settings > Visibility.
 SeeEveryFileItem=Let %1 see the names of every file on this PC
-WindowStays=Gozler is still running, so Setup can't replace it.%n%nExit Gozler, then select Back and Install again.
+WindowStays={#AppName} is still running, so Setup can't replace it.%n%nExit {#AppName}, then select Back and Install again.
 GozFailed=Setup couldn't remove goz (error code %1).%n%nTo remove goz's service, open a terminal as administrator and run:%n  pushd "%2"%n  .\gozd.exe uninstall%n%nIf the command succeeds, delete goz.exe and gozd.exe from that folder.
 
 [Files]
@@ -81,13 +85,13 @@ Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Gozler"; Filename: "{app}\gozler-ui.exe"
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\gozler-ui.exe"
 
 [Run]
 ; The window runs as the person who started the setup, not as administrator,
 ; so its settings, its sign-in entry and its File Explorer command are that
 ; person's.
-Filename: "{app}\gozler-ui.exe"; Description: "{cm:LaunchProgram,Gozler}"; Flags: postinstall nowait skipifsilent runasoriginaluser
+Filename: "{app}\gozler-ui.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallRun]
 Filename: "{app}\gozler-ui.exe"; Parameters: "--unregister-shortcut"; Flags: runhidden waituntilterminated; RunOnceId: "RestoreWindowsShortcut"

@@ -5,17 +5,17 @@
 
 /// Finds the hash in the file; `installer\Pair.ps1` holds the same text, and
 /// the file must hold it once.
-const MARKER: [u8; 32] = *b"gozler-ui: paired gozlerd sha256";
+const MARKER: &[u8; 32] = b"gozler-ui: paired gozlerd sha256";
 
 #[repr(C)]
 struct Pairing {
-    marker: [u8; 32],
+    marker: [u8; MARKER.len()],
     /// All zeros until `installer\Pair.ps1` writes the hash.
     sha256: [u8; 32],
 }
 
 static PAIRING: Pairing = Pairing {
-    marker: MARKER,
+    marker: *MARKER,
     sha256: [0; 32],
 };
 

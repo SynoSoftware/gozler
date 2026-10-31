@@ -264,7 +264,7 @@ at 00:50 on 2026-10-21.
   RegisterDeviceNotificationW. All sent as round 3 (the waits are fixed, not
   filed, because this task can fix them). The same reviewer rechecks.
 - Fix round 3 (08:55): all fixed, check.ps1 green (559 tests); one wait
-  filed as SynoSoftware/goz#105 (re-sort of folders on the window thread
+  filed as SynoSoftware/gozler#105 (re-sort of folders on the window thread
   when sizes arrive under Size sort). Lead: the task can fix it, so the
   implementer fixes it now; the verdict reviewer rechecks round 3 in
   parallel.

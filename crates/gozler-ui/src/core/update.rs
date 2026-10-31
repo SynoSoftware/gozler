@@ -7,10 +7,6 @@ use jiff::civil::DateTime;
 use jiff::tz::TimeZone;
 use serde::Deserialize;
 
-/// Where the check asks.
-pub(crate) const LATEST_RELEASE_HOST: &str = "api.github.com";
-pub(crate) const LATEST_RELEASE_PATH: &str = "/repos/SynoSoftware/goz/releases/latest";
-
 /// How long after a check the next start checks again.
 pub(crate) const CHECK_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 

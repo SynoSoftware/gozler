@@ -18,4 +18,4 @@ gozler's index holds every file name, and the daemon shows each user only the na
 
 ## Reporting a vulnerability
 
-Please report security issues privately rather than opening a public issue, using GitHub's [private vulnerability reporting](https://github.com/SynoSoftware/goz/security/advisories/new) (the "Report a vulnerability" button under the repository's Security tab). You will get an acknowledgement, and a fix or mitigation plan once the report is confirmed.
+Please report security issues privately rather than opening a public issue, using GitHub's [private vulnerability reporting](https://github.com/SynoSoftware/gozler/security/advisories/new) (the "Report a vulnerability" button under the repository's Security tab). You will get an acknowledgement, and a fix or mitigation plan once the report is confirmed.
