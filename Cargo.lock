@@ -420,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-cli"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "gozler-client",
  "gozler-core",
@@ -432,7 +432,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-client"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "gozler-core",
  "gozler-winfs",
@@ -441,7 +441,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-core"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "criterion",
  "gozler-winfs",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-daemon"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-fileops"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "gozler-client",
  "gozler-core",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-ui"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "embed-resource",
  "gozler-client",
@@ -511,7 +511,7 @@ dependencies = [
 
 [[package]]
 name = "gozler-winfs"
-version = "0.5.8"
+version = "0.5.9"
 dependencies = [
  "windows-sys",
 ]
