@@ -294,7 +294,7 @@ fn find(stop: &CancelToken, report: &dyn Fn(SetupEvent)) {
         return;
     }
     let Some(reply) = reply else {
-        return report(SetupEvent::End(SetupResult::DownloadFailed));
+        return report(SetupEvent::End(SetupResult::CheckFailed));
     };
     report(
         match update::setup_to_install(&reply, gozler_core::escompat::version()) {

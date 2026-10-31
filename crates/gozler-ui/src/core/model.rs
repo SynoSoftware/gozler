@@ -14,7 +14,7 @@ use super::fetch::{
     Outcome, Programs, Purpose, WriteFailure,
 };
 use super::file_operations::{self, StatusOperation};
-use super::fixer::{FixEvent, FixWork, Fixer};
+use super::fixer::{FixEvent, FixWork, Fixer, SetupEvent, SetupFix, SetupResult};
 pub(crate) use super::inspector::AgeTimer;
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
@@ -2374,7 +2374,7 @@ impl Model {
         for job in [Job::Export, Job::Fix, Job::Operation] {
             let transient = match job {
                 Job::Export => matches!(self.export, Export::Done { .. }),
-                Job::Fix => false,
+                Job::Fix => self.fix.succeeded(),
                 Job::Operation => self
                     .operation
                     .as_ref()
@@ -2542,6 +2542,23 @@ impl Model {
             self.retired.push(event, 1);
             return Accepted::default();
         }
+        // Update offers a release no newer than the window only to repair
+        // a service older than the window; otherwise Gozler is up to date.
+        let event = match event {
+            FixEvent::Setup(SetupEvent::Found(setup))
+                if matches!(
+                    self.fix,
+                    Fixer::Setup {
+                        fix: SetupFix::Update,
+                        ..
+                    }
+                ) && !matches!(self.failure, Some(DaemonFailure::TooOld { .. }))
+                    && !update::is_newer(&setup.version, gozler_core::escompat::version()) =>
+            {
+                FixEvent::Setup(SetupEvent::End(SetupResult::UpToDate))
+            }
+            event => event,
+        };
         if !self.fix.accept(event) {
             return Accepted::default();
         }
@@ -2579,9 +2596,7 @@ impl Model {
         };
         self.accept_fix(
             generation,
-            FixEvent::Setup(super::fixer::SetupEvent::End(
-                super::fixer::SetupResult::Failed(error),
-            )),
+            FixEvent::Setup(SetupEvent::End(SetupResult::Failed(error))),
         )
     }
 
@@ -5582,6 +5597,77 @@ pub(crate) mod tests {
             }
         );
         assert!(model.awaits_fix(Generation(2)));
+    }
+
+    /// Check for updates must not offer the window's own version again,
+    /// but Update must still offer it to repair a service older than the
+    /// window (DESIGN.md: The General page).
+    #[test]
+    fn a_release_no_newer_than_the_window_updates_only_an_older_service() {
+        use crate::core::fixer::FixState;
+        use crate::core::update::Setup;
+
+        let mut model = model();
+        let check = |model: &mut Model| {
+            model.start_fix(&Fix::Update);
+            let generation = model.fix_generation.expect("the fix started");
+            let found = Setup {
+                version: gozler_core::escompat::version().into(),
+                older: false,
+                name: String::new(),
+                host: String::new(),
+                path: String::new(),
+                size: 1,
+                sha256: [0; 32],
+            };
+            model.accept_fix(generation, FixEvent::Setup(SetupEvent::Found(found)));
+        };
+        check(&mut model);
+        assert_eq!(
+            model.fix(),
+            &Fixer::Setup {
+                fix: SetupFix::Update,
+                state: FixState::Ended(SetupResult::UpToDate),
+            }
+        );
+        model.failure = Some(DaemonFailure::TooOld {
+            programs: Programs::UNKNOWN,
+        });
+        check(&mut model);
+        assert!(model.fix().confirming().is_some());
+    }
+
+    /// "Gozler is up to date." stayed in both status bars for good; a
+    /// fix's success clears as an export's does, and a failure stays
+    /// (DESIGN.md: Status bar).
+    #[test]
+    fn a_fix_success_clears_after_five_seconds_and_a_failure_stays() {
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let mut model = model();
+        let end = |model: &mut Model, result| {
+            model.start_fix(&Fix::Update);
+            let generation = model.fix_generation.expect("the fix started");
+            model.accept_fix(generation, FixEvent::Setup(SetupEvent::End(result)));
+        };
+        end(&mut model, SetupResult::UpToDate);
+        assert_eq!(
+            model.refresh_job_notice(start),
+            Some(Duration::from_secs(5))
+        );
+        model.refresh_job_notice(start + Duration::from_secs(5));
+        assert!(!model.job_notice_visible(Job::Fix));
+        assert_eq!(
+            captions::settings_job(&model, model.strings(), &English, true),
+            captions::JobCaption::default()
+        );
+        end(&mut model, SetupResult::CheckFailed);
+        assert_eq!(
+            model.refresh_job_notice(start + Duration::from_secs(6)),
+            None
+        );
+        assert!(model.job_notice_visible(Job::Fix));
     }
 
     /// A service that answers again before its commands end stops the

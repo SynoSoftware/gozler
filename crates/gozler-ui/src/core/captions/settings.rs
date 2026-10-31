@@ -3,7 +3,7 @@ use super::{CaptionTable, DialogItem, MessageButton, failure_text};
 use crate::core::fetch::{Beside, Local, ProgramFile, Programs};
 use crate::core::glyph::Glyph;
 use crate::core::ids::ControlId;
-use crate::core::model::Model;
+use crate::core::model::{Job, Model};
 use crate::core::results::{Fix, ListButton};
 use crate::core::settings::SettingsPage;
 use crate::core::text::{self, Numbers, Strings};
@@ -371,7 +371,7 @@ pub(crate) fn settings_job(
     numbers: &dyn Numbers,
     follow_fix: bool,
 ) -> JobCaption {
-    if !follow_fix {
+    if !follow_fix || !model.job_notice_visible(Job::Fix) {
         return JobCaption::default();
     }
     let (text, progress) = fix_status(strings, numbers, model.fix());

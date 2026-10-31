@@ -4582,7 +4582,11 @@ impl MainWindow {
                 self.controls().panels.ask_panel_sizes(self, side);
             }
             Timer::Status => self.ask_status(),
-            Timer::StatusNotice => self.update_status(),
+            Timer::StatusNotice => {
+                self.update_status();
+                // Settings shows the same fix's message (DESIGN.md: Status bar).
+                self.settings.post_settings_reply();
+            }
             Timer::Age => {
                 self.controls().inspector.show_age(self);
                 self.controls().inspector.fit_inspector(self);

@@ -17,7 +17,15 @@ pub(crate) const CHECK_INTERVAL_SECONDS: i64 = 24 * 60 * 60;
 pub(crate) fn newer_release(reply: &str, current: &str) -> Option<String> {
     let release: Release = serde_json::from_str(reply).ok()?;
     let version = release.version();
-    (numbers(version)? > numbers(current)?).then(|| version.to_owned())
+    is_newer(version, current).then(|| version.to_owned())
+}
+
+/// Whether `version`'s numbers are higher than those of this window's
+/// version `current`; `false` when either has none.
+pub(crate) fn is_newer(version: &str, current: &str) -> bool {
+    numbers(version)
+        .zip(numbers(current))
+        .is_some_and(|(release, window)| release > window)
 }
 
 /// The most bytes a setup may have, far more than Gozler's, so a wrong reply
