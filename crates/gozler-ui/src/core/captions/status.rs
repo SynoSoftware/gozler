@@ -293,6 +293,8 @@ fn fix_widest(strings: &Strings, numbers: &dyn Numbers, sizes: &[u64]) -> [Vec<S
         .chain(
             [
                 SetupResult::Cancelled,
+                SetupResult::UpToDate,
+                SetupResult::CheckFailed,
                 SetupResult::DownloadFailed,
                 SetupResult::Damaged,
             ]
@@ -654,6 +656,8 @@ fn setup_result(strings: &Strings, result: &SetupResult) -> String {
         // The person said no, or a message box said why there is no
         // setup, so the status bar adds nothing.
         SetupResult::Declined | SetupResult::NoSetup => String::new(),
+        SetupResult::UpToDate => text("fixing.up_to_date"),
+        SetupResult::CheckFailed => text("fixing.check_failed"),
         SetupResult::DownloadFailed => text("fixing.download_failed"),
         SetupResult::NotSaved { folder, why } => {
             strings.format("fixing.not_saved", &[&folder.display().to_string(), why])

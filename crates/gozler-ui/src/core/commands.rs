@@ -224,16 +224,7 @@ impl CommandId {
                     None,
                 ),
                 C::About => ("command.about", &[], always, None),
-                C::Update => (
-                    "command.update",
-                    &[],
-                    |s| {
-                        s.model.choices().check_for_updates
-                            && s.model.newer_release().is_some()
-                            && !s.model.fix().running()
-                    },
-                    None,
-                ),
+                C::Update => ("command.update", &[], |s| !s.model.fix().running(), None),
                 C::ShowSearch => ("command.show_search", &[], always, None),
                 C::ShowCommander => ("command.show_commander", &[], always, None),
                 // Delete, Cut and Paste are keys of the list (control_key).
@@ -2279,13 +2270,8 @@ mod tests {
     }
 
     #[test]
-    fn update_requires_a_newer_release_and_waits_for_the_running_installer() {
+    fn check_for_updates_needs_no_earlier_check_and_waits_for_the_running_installer() {
         let mut model = showing(10);
-        assert!(!enabled(&model, CommandId::Update));
-        let mut choices = model.choices().clone();
-        choices.check_for_updates = true;
-        model.set_choices(choices);
-        model.set_newer_release("0.6.0".into());
         assert!(enabled(&model, CommandId::Update));
         model.start_fix(&Fix::Update);
         assert!(!enabled(&model, CommandId::Update));

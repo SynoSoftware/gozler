@@ -114,10 +114,15 @@ pub(crate) enum SetupResult {
     Cancelled,
     /// The person chose not to download the setup.
     Declined,
+    /// The latest release is not newer than the window, and the service
+    /// is not older than it, so Update has nothing to install.
+    UpToDate,
     /// The latest release has no setup whose SHA-256 GitHub gives, and a
     /// setup that cannot be checked is not run.
     NoSetup,
-    /// GitHub or the connection failed.
+    /// GitHub or the connection failed before the release was known.
+    CheckFailed,
+    /// GitHub or the connection failed during the download.
     DownloadFailed,
     /// The setup could not be written to `folder`, for the reason `why`
     /// in Windows' words.
@@ -277,6 +282,21 @@ impl Fixer {
                 ..
             } | Fixer::Setup {
                 state: FixState::Running(_),
+                ..
+            }
+        )
+    }
+
+    /// Whether the fix ended well, so its message clears as a finished
+    /// export's does (DESIGN.md: Status bar).
+    pub(crate) fn succeeded(&self) -> bool {
+        matches!(
+            self,
+            Fixer::Commands {
+                state: FixState::Ended(CommandResult::Done),
+                ..
+            } | Fixer::Setup {
+                state: FixState::Ended(SetupResult::UpToDate),
                 ..
             }
         )
