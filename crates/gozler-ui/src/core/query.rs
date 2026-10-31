@@ -709,6 +709,7 @@ mod tests {
     #[test]
     fn filename_wildcards_work_with_match_path_without_changing_explicit_paths() {
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -741,6 +742,7 @@ mod tests {
     #[test]
     fn the_window_keeps_positive_words_in_their_typed_order() {
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -763,6 +765,7 @@ mod tests {
     #[test]
     fn each_filter_group_searches_as_its_gozler_query() {
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: "2026-03-04T12:00:00Z".parse().expect("an instant"),
             time_zone: jiff::tz::TimeZone::UTC,
         };

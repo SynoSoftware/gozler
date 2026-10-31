@@ -54,7 +54,7 @@ pub enum Command {
     Help(HelpScreen),
     /// `-version`: print the version.
     Version,
-    /// Search, or with `--status` report the daemon's state.
+    /// Search, or print the requested daemon report.
     Run(EsPlan),
 }
 
@@ -130,8 +130,8 @@ pub struct EsPlan {
     /// Native `--json`: print the results to stdout as JSON, whatever the
     /// format; an export file keeps its format.
     pub json: bool,
-    /// Native `--status`: report daemon/index status instead of searching.
-    pub status: bool,
+    /// The daemon report to print instead of searching; the last one wins.
+    pub report: Option<Report>,
     /// Native `--insecure-no-server-check`: skip the pipe-server owner-SID
     /// verification (dev escape hatch).
     pub insecure_no_server_check: bool,
@@ -162,7 +162,7 @@ impl Default for EsPlan {
             no_result_error: false,
             timeout: None,
             json: false,
-            status: false,
+            report: None,
             insecure_no_server_check: false,
         }
     }
@@ -240,6 +240,12 @@ pub enum Count {
     /// `-get-total-size` or `-get-folder-size`: the summed size of the
     /// matching files in bytes.
     TotalSize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Report {
+    Status,
+    ServerVersion,
 }
 
 /// How many results a command line asks for.
@@ -402,8 +408,7 @@ pub(super) enum SwitchAction {
     Regex,
     /// `--json`: print results as JSON.
     Json,
-    /// `--status`: report the daemon's state instead of searching.
-    Status,
+    Report(Report),
     /// `--insecure-no-server-check`: skip the pipe server's trust check.
     InsecureNoServerCheck,
     /// `-h` / `-?` / `--h` / `-help` / `--help`: stop parsing and print that
@@ -440,7 +445,7 @@ impl SwitchAction {
             | SwitchAction::WholeWord
             | SwitchAction::NoResultError
             | SwitchAction::Json
-            | SwitchAction::Status
+            | SwitchAction::Report(_)
             | SwitchAction::InsecureNoServerCheck
             | SwitchAction::Help(_)
             | SwitchAction::Version => None,
@@ -493,7 +498,7 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Es {
-            names: &["ww", "whole-word", "whole-words"],
+            names: &["ww", "w", "whole-word", "whole-words"],
             action: SwitchAction::WholeWord,
         },
         group: Group::Search,
@@ -510,12 +515,11 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Family {
-            usage: "/aLETTERS, /a-LETTERS",
+            usage: "/aLETTERS, /a-h-s",
             parse: parse_attribute_switch,
         },
         group: Group::Search,
-        help: "Find results that have every attribute in LETTERS and none of the \
-               attributes after a `-`; `/ad` finds folders, `/a-d` files",
+        help: "Require letters; prefix each unwanted letter with `-`",
     },
     Switch {
         spelling: Spelling::Es {
@@ -531,8 +535,19 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::SortParam,
         },
         group: Group::LimitAndSort,
-        help: "Sort by KEY: name, path, size, dm or extension; add `-ascending` \
+        help: "Sort by KEY (listed below); add `-ascending` \
                or `-descending` to KEY to set the order, as in `size-ascending`",
+    },
+    Switch {
+        spelling: Spelling::Es {
+            names: &["s"],
+            action: SwitchAction::SortFixed(SortSpec {
+                key: SortKey::Path,
+                dir: SortDir::Asc,
+            }),
+        },
+        group: Group::LimitAndSort,
+        help: "Sort by path, A to Z",
     },
     Switch {
         spelling: Spelling::Family {
@@ -581,7 +596,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Json,
         },
         group: Group::Output,
-        help: "Print the results, or the `--status` report, as JSON",
+        help: "Print the results or daemon report as JSON",
     },
     Switch {
         spelling: Spelling::Es {
@@ -626,7 +641,7 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Es {
-            names: &["full-path-and-name", "filename-column"],
+            names: &["full-path-and-name", "filename-column", "full-path"],
             action: SwitchAction::Column(EsColumn::FullPath),
         },
         group: Group::Output,
@@ -732,10 +747,18 @@ pub(super) const SWITCHES: &[Switch] = &[
     Switch {
         spelling: Spelling::Native {
             name: "status",
-            action: SwitchAction::Status,
+            action: SwitchAction::Report(Report::Status),
         },
         group: Group::Other,
         help: "Show whether gozlerd and each volume are ready, instead of searching",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "server-version",
+            action: SwitchAction::Report(Report::ServerVersion),
+        },
+        group: Group::Other,
+        help: "Show the service's name and version; with `--json`, a JSON string",
     },
     Switch {
         spelling: Spelling::Es {
@@ -921,7 +944,7 @@ pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
 }
 
 /// Resolves a name without its `--` against the gozler options.
-fn match_native(name: &str) -> Option<SwitchAction> {
+pub(super) fn match_native(name: &str) -> Option<SwitchAction> {
     SWITCHES.iter().find_map(|switch| match switch.spelling {
         Spelling::Native {
             name: native,
@@ -934,7 +957,7 @@ fn match_native(name: &str) -> Option<SwitchAction> {
 /// Resolves a name without its `-` or `/` against the es switches, then the
 /// families. Returns `None` when nothing matches (caller decides fatal vs
 /// fallthrough).
-fn match_switch(name: &str) -> Option<SwitchAction> {
+pub(super) fn match_switch(name: &str) -> Option<SwitchAction> {
     let exact = SWITCHES.iter().find_map(|switch| match switch.spelling {
         Spelling::Es { names, action } => names
             .iter()
@@ -1127,7 +1150,7 @@ fn apply_switch(
             .regexes
             .push(take_param(rest, token, action)?.to_owned()),
         SwitchAction::Json => plan.json = true,
-        SwitchAction::Status => plan.status = true,
+        SwitchAction::Report(report) => plan.report = Some(report),
         SwitchAction::InsecureNoServerCheck => plan.insecure_no_server_check = true,
         SwitchAction::Help(_) | SwitchAction::Version | SwitchAction::Attributes(_) => {
             unreachable!("parse_argv handles -help, -version and search text")
@@ -1293,7 +1316,7 @@ mod tests {
                 no_result_error: false,
                 timeout: None,
                 json: false,
-                status: false,
+                report: None,
                 insecure_no_server_check: false,
             }
         );
@@ -1369,6 +1392,8 @@ mod tests {
             plan(&["/as-r-hd", "x"]).query,
             "folder: attrib:S !attrib:R !attrib:H x"
         );
+        assert_eq!(plan(&["/a-h-s"]).query, "!attrib:H !attrib:S");
+        assert_eq!(plan(&["/a-hs"]).query, "attrib:S !attrib:H");
         for refused in ["/a", "/ad-d", "/a1", "/a-", "/ah-", "/a--h", "/ab"] {
             assert_eq!(
                 fatal(&[refused]).exit_code,
@@ -1675,10 +1700,47 @@ mod tests {
     #[test]
     fn native_namespace_flags() {
         assert!(plan(&["--json"]).json);
-        assert!(plan(&["--status"]).status);
+        assert_eq!(plan(&["--status"]).report, Some(Report::Status));
         assert!(plan(&["--insecure-no-server-check"]).insecure_no_server_check);
         let all = plan(&["--json", "--status"]);
-        assert!(all.json && all.status);
+        assert!(all.json);
+        assert_eq!(all.report, Some(Report::Status));
+    }
+
+    #[test]
+    fn compatibility_aliases_keep_existing_operations() {
+        let parsed = plan(&[
+            "report",
+            "-filename-column",
+            "-size",
+            "-full-path",
+            "-sort",
+            "size",
+            "-s",
+            "-w",
+        ]);
+        assert_eq!(parsed.query, "report");
+        assert_eq!(parsed.columns, vec![EsColumn::Size, EsColumn::FullPath]);
+        assert_eq!(
+            parsed.sort,
+            SortSpec {
+                key: SortKey::Path,
+                dir: SortDir::Asc,
+            }
+        );
+        assert!(parsed.whole_word);
+    }
+
+    #[test]
+    fn the_last_daemon_report_wins() {
+        assert_eq!(
+            plan(&["--status", "--server-version", "report"]).report,
+            Some(Report::ServerVersion)
+        );
+        assert_eq!(
+            plan(&["--server-version", "--status"]).report,
+            Some(Report::Status)
+        );
     }
 
     #[test]

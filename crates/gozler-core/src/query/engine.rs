@@ -18,7 +18,10 @@ use super::dates::DateRange;
 use super::order::{
     KeyValue, OrderFields, SortRecord, compare, folder_ranks, packed_folder_rank, primary_key,
 };
-use super::parse::{Kind, Malformed, ParsedQuery, QueryError, SizeRange, TermMatch, Test};
+use super::parse::{
+    Kind, LengthTarget, Malformed, Metadata, ParsedQuery, QueryError, SizeRange, TermMatch, Test,
+    term_count,
+};
 use super::paths::{ComponentBits, DirPaths, FolderCopy, NameForm, ResultNames, root_name};
 use super::rows::VolumeRows;
 use super::through::{LinkPaths, Target as LinkTarget, Through};
@@ -251,6 +254,15 @@ pub(super) enum Check {
     Size(SizeRange),
     DateModified(DateRange),
     DateCreated(DateRange),
+    Unknown(Metadata),
+    Length {
+        target: LengthTarget,
+        range: SizeRange,
+    },
+    Child {
+        matcher: Matcher,
+        form: NameForm,
+    },
     /// Folded whatever the query's case, as es compares extensions.
     Extension(Vec<Vec<u8>>),
     /// The folder's full path, without a trailing separator, which the full
@@ -297,15 +309,7 @@ impl CompiledQuery {
             .clauses
             .iter()
             .map(|clause| {
-                let terms: usize = clause
-                    .terms
-                    .iter()
-                    .map(|term| match &term.test {
-                        Test::Extension(exts) => exts.len().max(1),
-                        Test::Ordered { terms, .. } => terms.len().max(1),
-                        _ => 1,
-                    })
-                    .sum();
+                let terms: usize = clause.terms.iter().map(term_count).sum();
                 terms.max(1)
             })
             .sum();
@@ -682,7 +686,12 @@ impl CompiledClause {
     /// the scan tests clauses in.
     fn cost(&self) -> (Reads, u8) {
         let reads = self.terms.iter().map(|term| match term.check {
-            Check::Text(Target::Path, _) | Check::Parent(_) => Reads::Path,
+            Check::Text(Target::Path, _)
+            | Check::Parent(_)
+            | Check::Length {
+                target: LengthTarget::FullPath,
+                ..
+            } => Reads::Path,
             Check::Component(_) => Reads::Components,
             _ => Reads::Entry,
         });
@@ -715,6 +724,8 @@ impl CompiledClause {
 
 /// What the checks read of one entry.
 struct Subject<'a> {
+    index: &'a VolumeIndex,
+    idx: EntryIdx,
     /// The entry, whose columns a check loads only when it reads them.
     entry: EntryView<'a>,
     /// The name as the query compares it: folded unless it matches case.
@@ -724,6 +735,7 @@ struct Subject<'a> {
     /// The full path in the same form as `name`; set before the path
     /// clauses run.
     path: Option<&'a [u8]>,
+    path_length: Option<usize>,
     /// [`VolumeIndex::folder_sizes_at_least`]: a folder's size is only a
     /// lower bound.
     folder_sizes_at_least: bool,
@@ -801,6 +813,23 @@ impl Check {
             }
             Test::Parent(s) => Check::Parent(text(s.trim_end_matches(['\\', '/']))),
             Test::Size(range) => Check::Size(*range),
+            Test::Unknown(field) => Check::Unknown(*field),
+            Test::Length { target, range } => Check::Length {
+                target: *target,
+                range: *range,
+            },
+            Test::Child(s) => Check::Child {
+                matcher: if s.contains(['*', '?']) {
+                    Matcher::Wildcard(wildcard(s))
+                } else {
+                    Matcher::Contains(finder(s))
+                },
+                form: if match_case {
+                    NameForm::Raw
+                } else {
+                    NameForm::Folded
+                },
+            },
             Test::DateModified(range) => Check::DateModified(*range),
             Test::DateCreated(range) => Check::DateCreated(*range),
             Test::Kind(kind) => Check::Kind(*kind),
@@ -816,7 +845,11 @@ impl Check {
     fn cost(&self) -> u8 {
         match self {
             Check::Kind(_) | Check::Attributes { .. } => 0,
-            Check::Size(_) | Check::DateModified(_) | Check::DateCreated(_) => 1,
+            Check::Size(_) | Check::DateModified(_) | Check::DateCreated(_) | Check::Unknown(_) => {
+                1
+            }
+            Check::Length { .. } => 3,
+            Check::Child { .. } => 6,
             Check::Parent(_) => 2,
             Check::Text(_, matcher) => match matcher {
                 Matcher::Contains(_)
@@ -855,6 +888,28 @@ impl Check {
             Check::Size(range) => range.contains(entry.size(subject.seen_by)?),
             Check::DateModified(range) => range.contains(entry.mtime()?),
             Check::DateCreated(range) => range.contains(entry.created()?),
+            Check::Unknown(field) => match field {
+                Metadata::Size => {
+                    entry.size(subject.seen_by).is_none()
+                        || entry.is_dir() && subject.folder_sizes_at_least
+                }
+                Metadata::DateModified => entry.mtime().is_none(),
+                Metadata::DateCreated => entry.created().is_none(),
+            },
+            Check::Length { target, range } => range.contains(match target {
+                LengthTarget::Name => crate::wtf8::utf16_len(entry.name()),
+                LengthTarget::FullPath => subject.path_length.expect("path clauses have a length"),
+            } as u64),
+            Check::Child { matcher, form } => {
+                entry.is_dir()
+                    && subject.index.children(subject.idx).any(|child| {
+                        subject.index.is_seen(child, subject.seen_by)
+                            && matcher.matches(
+                                form.name_of(subject.index, child),
+                                &mut scratch.code_points,
+                            )
+                    })
+            }
             Check::Extension(exts) => match extension(entry.name(), entry.is_dir()) {
                 Some(ext) => {
                     scratch.extension.clear();
@@ -2011,6 +2066,8 @@ impl<'q, 'i> Scan<'q, 'i> {
             later.split_at(query.path_clauses - query.component_clauses);
         let entry = index.entry(idx);
         let mut subject = Subject {
+            index,
+            idx,
             // The precomputed folded name serves a case-insensitive query.
             name: if query.match_case {
                 entry.name()
@@ -2020,6 +2077,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             entry,
             components: None,
             path: None,
+            path_length: None,
             folder_sizes_at_least: index.folder_sizes_at_least(),
             seen_by: self.seen_by,
         };
@@ -2103,6 +2161,7 @@ impl<'q, 'i> Scan<'q, 'i> {
         if let Some(paths) = self.query_paths.as_mut().filter(|_| !in_name) {
             let path = paths.full_path_into(index, idx, &mut self.path)?;
             subject.path = Some(&self.path);
+            subject.path_length = Some(path.utf16_len);
             if !path_clauses
                 .iter()
                 .all(|clause| clause.passes(&subject, path.target, &mut self.scratch))
@@ -2493,6 +2552,51 @@ mod tests {
         let parsed = compiled(query);
         let out = run_query(idx, "", &parsed, None, SortSpec::default(), None);
         texts(&out)
+    }
+
+    #[test]
+    fn grouped_filters_and_unknown_metadata_match_the_index() {
+        let mut idx = sample_index();
+        idx.insert_enum(&enum_rec(frn(105), NTFS_ROOT_FRN, "unread.txt", false));
+        assert_eq!(
+            run(&idx, "<ext:*.txt !size:unknown>|ext:pdf"),
+            ["docs\\notes.txt", "docs\\sub\\Report.PDF"]
+        );
+        assert_eq!(run(&idx, "file: size:unknown dm:unknown"), ["unread.txt"]);
+        assert_eq!(run(&idx, "file: !<ext:txt|ext:pdf>"), ["photo.JPG"]);
+    }
+
+    #[test]
+    fn lengths_use_raw_utf16_including_the_mount_prefix() {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        idx.insert_enum(&enum_rec(frn(100), NTFS_ROOT_FRN, "İ😀", true));
+        idx.insert_enum(&enum_rec(frn(101), frn(100), "x", false));
+        assert_eq!(run(&idx, "namelen:3"), ["İ😀"]);
+        assert_eq!(run(&idx, "name-length:2"), [] as [&str; 0]);
+        assert_eq!(
+            paths_under(&idx, r"C:\", "fullpathlen:8", None),
+            ["C:\\İ😀\\x"]
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", "full-path-length:8 case:", None),
+            ["C:\\İ😀\\x"]
+        );
+    }
+
+    #[test]
+    fn child_matches_only_immediate_visible_names() {
+        let mut idx = sample_index();
+        assert_eq!(run(&idx, "child:report"), ["docs\\sub"]);
+        assert_eq!(run(&idx, "child:*.txt"), ["docs"]);
+        assert!(run(&idx, "child:REPORT case:").is_empty());
+        idx.set_folder_descriptor(NTFS_ROOT_FRN, b"open");
+        idx.set_folder_descriptor(frn(100), b"open");
+        idx.set_folder_descriptor(frn(101), b"hidden");
+        let seen_by = SeenBy::Filtered(idx.listable(&|descriptor| descriptor == b"open"));
+        let report = compiled("child:report");
+        assert!(scan(&idx, "", &report, None, &seen_by).records.is_empty());
+        let notes = compiled("child:*.txt");
+        assert_eq!(scan(&idx, "", &notes, None, &seen_by).records.len(), 1);
     }
 
     #[test]

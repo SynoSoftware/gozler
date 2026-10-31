@@ -88,11 +88,22 @@ not a color.
 | Token | Color | Used for |
 | --- | --- | --- |
 | Strong | bold | gozler's name and version, section titles |
-| Muted | gray | row labels, such as Service |
-| Primary | cyan | what the reader types: commands, options, search terms |
+| Muted | gray | help descriptions and row labels, such as Service |
+| Executable | bold bright blue | the executable in a command example |
+| Primary | cyan | options |
+| Value | yellow | option values, including numbers, patterns and export files |
+| Path | green | paths used as search scope |
 | Success | green | gozlerd runs; exit 0 |
 | Warning | yellow | gozlerd is not ready; the answer may be incomplete or cut: exits 2, 9 and 10 |
 | Danger | red | gozlerd does not run; the command failed: exits 1 and 3 to 8 |
 
 `ExitCode::token` decides each exit code's token, so the quick help and the
 full reference show a code in one color.
+
+Search expressions use the terminal's normal foreground, including `ext:cs`.
+The option table decides which words are options and which are their values;
+the help does not guess a search expression's meaning from its punctuation.
+Each help section aligns descriptions after its longest usage. When that
+leaves less than 24 columns for descriptions, every row in that section puts
+its description below the usage. Color changes neither text nor alignment;
+redirected output and `NO_COLOR` keep the same layout without ANSI sequences.

@@ -380,7 +380,9 @@
     "switch": "Geçir"
   },
   "query": {
-    "unsupported_operator": "Arama terimleri {0} ile gruplanamaz. Bunu aramak için tırnak içine alın.",
+    "group_depth": "Gruplar en fazla {0} düzey iç içe olabilir. Bazı grupları kaldırın.",
+    "grouping": "Boş olmayan bir arama ifadesini eşleşen < ve > arasına alın.",
+    "length": "{0} bir karakter sayısı değil. >100 veya 10..100 gibi bir sayı, karşılaştırma veya aralık kullanın.",
     "unknown_function": "{0} bir arama işlevi değil. İşlevleri görmek için F1'e basın veya bu metni aramak için tırnak içine alın.",
     "relative_path": "{0} göreli bir yol. C:\\Users\\Public gibi tam yolu yazın.",
     "no_query_start": "Geçerli tarih ve saat okunamadı. Yeniden arayın.",
@@ -969,6 +971,12 @@
     "copy_too_large_hex": "{0} kopyalanamayacak kadar büyük. Kopyala, onaltılık olarak en fazla {1} boyutundaki dosyaları kopyalar."
   },
   "message": {
+    "argument_missing": "{0} seçeneğinden sonra bir değer girin.",
+    "argument_value": "{0} seçeneğinden sonraki değer geçerli değil.",
+    "arguments_conflict": "Bu komut satırı seçenekleri birlikte kullanılamaz.",
+    "search_required": "Eşleştirme ve sıralama seçeneklerini --search ile kullanın.",
+    "arguments_too_long": "İstek çok uzun. Daha kısa bir sorgu veya yol kullanın.",
+    "handoff_failed": "Açık pencere bu isteği kabul edemedi. Biraz sonra yeniden deneyin.",
     "internal_error": "Gozler kapanmak zorunda kaldı. Ayrıntılar şurada: {0}",
     "settings_not_saved": "Ayarlarınız {0} konumuna kaydedilemedi. {1} Değişiklikleriniz çıkış yapana kadar geçerlidir.",
     "export_failed": "{0} kaydedilemedi. {1} Başka bir klasör seçin veya yer açın, sonra yeniden dışa aktarın.",

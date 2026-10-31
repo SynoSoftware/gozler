@@ -43,6 +43,7 @@ pub(in crate::app) enum ShellPurpose {
     Target(Surface, ShellTarget),
     Entries(List, EntryAction),
     Commander(List),
+    Reveal,
     Setup,
 }
 
@@ -61,13 +62,14 @@ enum Invocation {
         list: List,
         entry: Selected,
     },
+    Reveal(Selected),
 }
 
 impl Invocation {
     fn items(&self) -> usize {
         match self {
             Self::Entries { entries, .. } => entries.items(),
-            Self::Target(..) | Self::Setup(_) | Self::Commander { .. } => 0,
+            Self::Target(..) | Self::Setup(_) | Self::Commander { .. } | Self::Reveal(_) => 0,
         }
     }
 
@@ -77,6 +79,7 @@ impl Invocation {
             Self::Setup(_) => ShellPurpose::Setup,
             Self::Entries { list, action, .. } => ShellPurpose::Entries(*list, *action),
             Self::Commander { list, .. } => ShellPurpose::Commander(*list),
+            Self::Reveal(_) => ShellPurpose::Reveal,
         }
     }
 }
@@ -125,7 +128,7 @@ impl Work {
                             .map(|target| ShellPurpose::Target(surface, target))
                         }),
                 )
-                .chain([ShellPurpose::Setup])
+                .chain([ShellPurpose::Setup, ShellPurpose::Reveal])
                 .map(|purpose| {
                     let replacement = if purpose == ShellPurpose::Setup {
                         Replacement::Finish
@@ -172,6 +175,10 @@ impl Work {
         self.invoke(Invocation::Commander { list, entry });
     }
 
+    pub(in crate::app) fn reveal(&mut self, entry: Selected) {
+        self.invoke(Invocation::Reveal(entry));
+    }
+
     fn invoke(&mut self, invocation: Invocation) {
         let purpose = invocation.purpose();
         let task = &mut self
@@ -213,8 +220,9 @@ impl Work {
 
     pub(super) fn slow(&self, list: List, now: Instant) -> Option<ShellPurpose> {
         self.tasks.iter().find_map(|(purpose, task)| {
-            (matches!(purpose, ShellPurpose::Entries(source, _) | ShellPurpose::Commander(source)
+            ((matches!(purpose, ShellPurpose::Entries(source, _) | ShellPurpose::Commander(source)
                 if *source == list)
+                || *purpose == ShellPurpose::Reveal)
                 && task.waiting(now) == Some(Waiting::Slow))
             .then_some(*purpose)
         })
@@ -229,7 +237,9 @@ impl Work {
             let owner = match purpose {
                 ShellPurpose::Target(owner, _) => *owner,
                 ShellPurpose::Setup => self.setup_surface,
-                ShellPurpose::Entries(..) | ShellPurpose::Commander(_) => return None,
+                ShellPurpose::Entries(..) | ShellPurpose::Commander(_) | ShellPurpose::Reveal => {
+                    return None;
+                }
             };
             (owner == surface)
                 .then(|| task.waiting(now).map(|waiting| (*purpose, waiting)))
@@ -245,7 +255,7 @@ impl Work {
         })
     }
 
-    pub(super) fn cancel(&mut self, purpose: ShellPurpose) {
+    pub(in crate::app) fn cancel(&mut self, purpose: ShellPurpose) {
         self.tasks
             .iter_mut()
             .find(|(source, _)| *source == purpose)
@@ -303,7 +313,7 @@ fn invoke(
                 }),
             ..Opened::default()
         },
-        Invocation::Commander { entry, .. } => {
+        Invocation::Commander { entry, .. } | Invocation::Reveal(entry) => {
             // Only a name that is gone is missing: a file in a folder that
             // Windows refuses, such as one in C:\Windows\Prefetch, gets
             // the folder's reason below.

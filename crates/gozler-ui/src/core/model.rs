@@ -71,9 +71,11 @@ pub(crate) enum Instance {
 pub(crate) struct Model {
     instance: Instance,
     pub(super) strings: Strings,
-    /// Also the one copy of the match controls, the filters, the sort and
-    /// whether the filter pane shows.
+    /// The person's preferences; explicit startup searches have temporary values.
     pub(super) settings: Settings,
+    temporary_search: Option<SearchPreferences>,
+    /// New search intent in any list, independent of background reruns.
+    search_revision: u64,
     /// `settings` when [`Model::saved_state_changed`] last ran, so the save
     /// timer starts once for each change.
     seen: Settings,
@@ -136,6 +138,20 @@ pub(crate) struct Model {
     clipboard_files: bool,
     panels: Panels,
     retired: Retirement,
+}
+
+struct SearchPreferences {
+    matching: Matching,
+    filters: Filters,
+    sort: SortSpec,
+    show_empty: bool,
+}
+
+pub(crate) struct Navigation {
+    mode: Mode,
+    side: Side,
+    generations: [u64; 2],
+    search_revision: u64,
 }
 
 /// What the window knows of GitHub's latest release once the service is
@@ -305,6 +321,8 @@ impl Model {
             seen: settings.clone(),
             saved: settings.clone(),
             settings,
+            temporary_search: None,
+            search_revision: 0,
             search: SearchArea::new(),
             status: None,
             links: Arc::default(),
@@ -806,6 +824,7 @@ impl Model {
             Matching::default(),
             &Filters::default(),
             &QueryStart {
+                week_start: jiff::civil::Weekday::Monday,
                 now: jiff::Timestamp::UNIX_EPOCH,
                 time_zone: jiff::tz::TimeZone::UTC,
             },
@@ -912,7 +931,9 @@ impl Model {
     }
 
     pub(crate) fn filters(&self) -> &Filters {
-        &self.settings.window.filters
+        self.temporary_search
+            .as_ref()
+            .map_or(&self.settings.window.filters, |search| &search.filters)
     }
 
     /// The folder the filters limit the search to.
@@ -1019,11 +1040,72 @@ impl Model {
     }
 
     pub(crate) fn matching(&self) -> Matching {
-        self.settings.window.matching
+        self.temporary_search
+            .as_ref()
+            .map_or(self.settings.window.matching, |search| search.matching)
     }
 
     pub(crate) fn sort(&self) -> SortSpec {
-        self.settings.window.sort
+        self.temporary_search
+            .as_ref()
+            .map_or(self.settings.window.sort, |search| search.sort)
+    }
+
+    pub(crate) fn navigation(&self) -> Navigation {
+        Navigation {
+            mode: self.mode(),
+            side: self.panels.active(),
+            generations: Side::BOTH.map(|side| self.panels.navigation(side)),
+            search_revision: self.search_revision,
+        }
+    }
+
+    pub(crate) fn navigation_is_current(&self, origin: &Navigation) -> bool {
+        self.mode() == origin.mode
+            && self.panels.active() == origin.side
+            && Side::BOTH.map(|side| self.panels.navigation(side)) == origin.generations
+            && self.search_revision == origin.search_revision
+    }
+
+    pub(crate) fn prepare_search(&mut self, request: super::startup::Search) -> Accepted {
+        self.search_revision += 1;
+        let mut matching = self.settings.window.matching;
+        if let Some(mode) = request.mode {
+            matching.mode = mode;
+        }
+        if let Some(case) = request.case {
+            matching.case = case;
+        }
+        if let Some(path) = request.path {
+            matching.path = path;
+        }
+        let mut sort = self.settings.window.sort;
+        if let Some(key) = request.sort {
+            sort.key = key;
+        }
+        if let Some(direction) = request.direction {
+            sort.dir = direction;
+        }
+        self.temporary_search = Some(SearchPreferences {
+            matching,
+            filters: Filters {
+                location: request.location,
+                chosen_folders: self.settings.window.filters.chosen_folders.clone(),
+                ..Filters::default()
+            },
+            sort,
+            show_empty: request.text.trim().is_empty(),
+        });
+        self.location_observed = None;
+        self.search.list.text = request.text;
+        self.search.enter_on_answer = false;
+        self.search.due = false;
+        let mut accepted = self.show_mode(Mode::Search);
+        accepted.touched |= Areas::SEARCH | Areas::FILTERS | Areas::TITLE;
+        accepted
+            .effects
+            .push(Effect::SearchAgain(vec![List::Search]));
+        accepted
     }
 
     /// The sort that View > Sort by shows: Search's, or the active panel's.
@@ -1108,6 +1190,12 @@ impl Model {
             return Accepted::default();
         }
         shown.text = text;
+        self.search_revision += 1;
+        if list == List::Search
+            && let Some(search) = &mut self.temporary_search
+        {
+            search.show_empty = false;
+        }
         let soon = match list {
             List::Search => {
                 // An open that waits is for the text before this one.
@@ -1126,6 +1214,15 @@ impl Model {
                 .effects
                 .extend(soon.then_some(Effect::SearchSoon(list)));
             accepted
+        }
+    }
+
+    pub(crate) fn set_look_in(&mut self, side: Side, look_in: LookIn) {
+        if let Some(search) = self.panels.search_mut(side)
+            && search.look_in != look_in
+        {
+            search.look_in = look_in;
+            self.search_revision += 1;
         }
     }
 
@@ -1153,43 +1250,43 @@ impl Model {
     /// window's own selection of the shown mode in the Match list changes
     /// nothing.
     pub(crate) fn set_matching(&mut self, matching: Matching) -> Accepted {
-        if matching == self.settings.window.matching {
+        if matching == self.matching() {
             return Accepted::default();
         }
-        self.settings.window.matching = matching;
-        {
-            let mut accepted = Accepted {
-                touched: Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
-                effects: vec![Effect::InspectAge],
-            };
-
-            accepted
-                .effects
-                .extend(Some(Effect::SearchAgain(vec![List::Search])));
-            accepted
-                .effects
-                .extend([Effect::Polling, Effect::NoteSavedState]);
-            accepted
+        self.search_revision += 1;
+        let previous = self.matching();
+        let saved = &mut self.settings.window.matching;
+        if previous.mode != matching.mode {
+            saved.mode = matching.mode;
         }
+        if previous.case != matching.case {
+            saved.case = matching.case;
+        }
+        if previous.path != matching.path {
+            saved.path = matching.path;
+        }
+        if let Some(search) = &mut self.temporary_search {
+            search.matching = matching;
+        }
+        Self::search_preferences_changed(Areas::NONE)
     }
 
     /// The person chose a sort; the search runs again (DESIGN.md: C20).
     pub(crate) fn sort_by(&mut self, sort: SortSpec) -> Accepted {
-        self.settings.window.sort = sort;
-        {
-            let mut accepted = Accepted {
-                touched: Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
-                effects: vec![Effect::InspectAge],
-            };
-
-            accepted
-                .effects
-                .extend(Some(Effect::SearchAgain(vec![List::Search])));
-            accepted
-                .effects
-                .extend([Effect::Polling, Effect::NoteSavedState]);
-            accepted
+        let previous = self.sort();
+        if previous != sort {
+            self.search_revision += 1;
         }
+        if previous.key != sort.key {
+            self.settings.window.sort.key = sort.key;
+        }
+        if previous.dir != sort.dir {
+            self.settings.window.sort.dir = sort.dir;
+        }
+        if let Some(search) = &mut self.temporary_search {
+            search.sort = sort;
+        }
+        Self::search_preferences_changed(Areas::NONE)
     }
 
     /// The person changed the filters; the search runs again. Only directly
@@ -1198,30 +1295,51 @@ impl Model {
         if filters.location.is_none() {
             filters.only_directly = false;
         }
-        if filters == self.settings.window.filters {
+        if filters == *self.filters() {
             return Accepted::default();
         }
-        if filters.location != self.settings.window.filters.location {
+        self.search_revision += 1;
+        if filters.location != self.filters().location {
             self.location_observed = None;
         }
-        self.settings.window.filters = filters;
-        {
-            let mut accepted = Accepted {
-                touched: Areas::FILTERS
-                    | Areas::SEARCH
-                    | Areas::INSPECTOR
-                    | Areas::STATUS
-                    | Areas::KEY_BAR,
-                effects: vec![Effect::InspectAge],
-            };
+        let previous = self.filters().clone();
+        let saved = &mut self.settings.window.filters;
+        if previous.kind != filters.kind {
+            saved.kind = filters.kind;
+        }
+        if previous.location != filters.location {
+            saved.location.clone_from(&filters.location);
+        }
+        if previous.chosen_folders != filters.chosen_folders {
+            saved.chosen_folders.clone_from(&filters.chosen_folders);
+        }
+        if previous.only_directly != filters.only_directly {
+            saved.only_directly = filters.only_directly;
+        }
+        if previous.date != filters.date {
+            saved.date = filters.date;
+        }
+        if previous.size != filters.size {
+            saved.size = filters.size;
+        }
+        if previous.attributes != filters.attributes {
+            saved.attributes = filters.attributes;
+        }
+        if let Some(search) = &mut self.temporary_search {
+            search.filters = filters;
+        }
+        Self::search_preferences_changed(Areas::FILTERS | Areas::STATUS)
+    }
 
-            accepted
-                .effects
-                .extend(Some(Effect::SearchAgain(vec![List::Search])));
-            accepted
-                .effects
-                .extend([Effect::Polling, Effect::NoteSavedState]);
-            accepted
+    fn search_preferences_changed(touched: Areas) -> Accepted {
+        Accepted {
+            touched: touched | Areas::SEARCH | Areas::INSPECTOR | Areas::KEY_BAR,
+            effects: vec![
+                Effect::InspectAge,
+                Effect::SearchAgain(vec![List::Search]),
+                Effect::Polling,
+                Effect::NoteSavedState,
+            ],
         }
     }
 
@@ -1520,6 +1638,10 @@ impl Model {
             .filter(|_| scope == ScopeCheck::Missing)
             .map(str::to_owned);
         let shows_nothing = !self.choices().show_all_when_empty
+            && !self
+                .temporary_search
+                .as_ref()
+                .is_some_and(|search| search.show_empty)
             && text.trim().is_empty()
             && !self.filters().is_set();
         let message = match (search, missing) {
@@ -3473,6 +3595,189 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn automation_search_choices_do_not_leak_into_saved_preferences() {
+        use crate::core::query::{Kind, MatchMode};
+        let mut model = model();
+        let original = model.settings.window.clone();
+        model.prepare_search(crate::core::startup::Search {
+            text: "annual".into(),
+            location: Some(r"C:\reports".into()),
+            mode: Some(MatchMode::Anywhere),
+            path: Some(true),
+            sort: Some(SortKey::Size),
+            ..Default::default()
+        });
+        assert_eq!(model.matching().mode, MatchMode::Anywhere);
+        assert_eq!(model.location(), Some(r"C:\reports"));
+        assert_eq!(
+            model.sort(),
+            SortSpec {
+                key: SortKey::Size,
+                dir: SortDir::Asc
+            }
+        );
+        let mut matching = model.matching();
+        matching.case = true;
+        model.set_matching(matching);
+        let mut filters = model.filters().clone();
+        filters.kind = Kind::Documents;
+        model.set_filters(filters);
+        model.sort_by(SortSpec {
+            key: SortKey::Size,
+            dir: SortDir::Desc,
+        });
+        model.settings_changes(SaveScope::Everything);
+        assert_eq!(
+            model.saved.window.matching,
+            Matching {
+                case: true,
+                ..original.matching
+            }
+        );
+        assert_eq!(
+            model.saved.window.filters.location,
+            original.filters.location
+        );
+        assert_eq!(model.saved.window.filters.kind, Kind::Documents);
+        assert_eq!(model.saved.window.sort.key, original.sort.key);
+        assert_eq!(model.saved.window.sort.dir, SortDir::Desc);
+        model.prepare_search(crate::core::startup::Search {
+            text: "next".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            model.matching(),
+            Matching {
+                case: true,
+                ..original.matching
+            }
+        );
+        assert_eq!(model.location(), None);
+        assert_eq!(model.filters().kind, Kind::All);
+        model.prepare_search(crate::core::startup::Search {
+            text: "explicit".into(),
+            sort: Some(SortKey::Name),
+            direction: Some(SortDir::Asc),
+            ..Default::default()
+        });
+        assert_eq!(
+            model.sort(),
+            SortSpec {
+                key: SortKey::Name,
+                dir: SortDir::Asc
+            }
+        );
+    }
+
+    #[test]
+    fn an_explicit_empty_search_runs_without_changing_empty_search_preferences() {
+        let mut model = model();
+        model.set_choices(Choices {
+            search_as_you_type: false,
+            show_all_when_empty: false,
+            ..Choices::default()
+        });
+        model.prepare_search(crate::core::startup::Search::default());
+        model.set_typed_search(List::Search, String::new());
+        let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
+            now: jiff::Timestamp::UNIX_EPOCH,
+            time_zone: jiff::tz::TimeZone::UTC,
+        };
+        let accepted = model.start_search(List::Search, &start, ScopeCheck::Exists);
+        assert!(
+            accepted
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Fetch(_)))
+        );
+        assert!(!model.choices().show_all_when_empty);
+        model.set_typed_search(List::Search, "a".into());
+        model.set_typed_search(List::Search, String::new());
+        let accepted = model.start_search(List::Search, &start, ScopeCheck::Exists);
+        assert!(
+            !accepted
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Fetch(_)))
+        );
+    }
+
+    #[test]
+    fn a_new_folder_or_search_invalidates_an_external_reveal_preflight() {
+        let mut model = model();
+        let ask = model
+            .panels_mut()
+            .go(Side::Left, r"C:\initial".into(), None);
+        let origin = model.navigation();
+        assert!(model.navigation_is_current(&origin));
+        model.panels_mut().accept_read(
+            Side::Left,
+            ReadEvent::Listed {
+                generation: ask.generation,
+                folder: ask.path,
+                entries: Vec::new(),
+                focus: None,
+            },
+            None,
+        );
+        assert!(model.navigation_is_current(&origin));
+        model.panels_mut().activate(Side::Right);
+        model.panels_mut().go(Side::Right, r"C:\other".into(), None);
+        model.panels_mut().activate(Side::Left);
+        assert!(!model.navigation_is_current(&origin));
+        let origin = model.navigation();
+        model.set_typed_search(List::Search, "new request".into());
+        model.set_typed_search(List::Search, String::new());
+        assert!(!model.navigation_is_current(&origin));
+
+        model.panels_mut().enter_search(Side::Right);
+        let origin = model.navigation();
+        model.set_typed_search(List::Panel(Side::Right), String::new());
+        model.set_look_in(Side::Right, LookIn::ThisFolder);
+        assert!(model.navigation_is_current(&origin));
+        model.set_typed_search(List::Panel(Side::Right), "new query".into());
+        model.set_typed_search(List::Panel(Side::Right), String::new());
+        assert!(!model.navigation_is_current(&origin));
+
+        let origin = model.navigation();
+        model.set_look_in(Side::Right, LookIn::AllDrives);
+        model.set_look_in(Side::Right, LookIn::ThisFolder);
+        assert!(!model.navigation_is_current(&origin));
+
+        let origin = model.navigation();
+        let filters = model.filters().clone();
+        model.set_filters(filters.clone());
+        let matching = model.matching();
+        model.set_matching(matching);
+        let sort = model.sort();
+        model.sort_by(sort);
+        assert!(model.navigation_is_current(&origin));
+        model.choose_folder(r"C:\new scope".into());
+        model.set_filters(filters);
+        assert!(!model.navigation_is_current(&origin));
+
+        let origin = model.navigation();
+        model.set_matching(Matching {
+            case: !matching.case,
+            ..matching
+        });
+        model.set_matching(matching);
+        assert!(!model.navigation_is_current(&origin));
+
+        let origin = model.navigation();
+        model.sort_by(SortSpec {
+            dir: match sort.dir {
+                SortDir::Asc => SortDir::Desc,
+                SortDir::Desc => SortDir::Asc,
+            },
+            ..sort
+        });
+        model.sort_by(sort);
+        assert!(!model.navigation_is_current(&origin));
+    }
+
+    #[test]
     fn an_expired_status_can_retry_without_abandoning_a_newer_request() {
         let mut model = model();
         let first = model.status_needed().unwrap();
@@ -3707,6 +4012,7 @@ pub(crate) mod tests {
     pub(crate) fn search(model: &mut Model, text: &str) -> Fetch {
         model.set_typed_search(List::Search, text.to_owned());
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: "2026-03-04T12:00:00Z".parse().expect("an instant"),
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -3732,6 +4038,7 @@ pub(crate) mod tests {
         model.panels_mut().enter_search(Side::Left);
         model.set_typed_search(List::Panel(Side::Left), text.to_owned());
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: "2026-03-04T12:00:00Z".parse().expect("an instant"),
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -3870,10 +4177,9 @@ pub(crate) mod tests {
                 root: r"E:\".to_owned()
             })
         );
-        (model.panels_mut().search_mut(Side::Left))
-            .expect("a search panel")
-            .look_in = LookIn::AllDrives;
+        model.set_look_in(Side::Left, LookIn::AllDrives);
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -4442,6 +4748,7 @@ pub(crate) mod tests {
         let mut model = model();
         model.set_typed_search(List::Search, "dz:x".into());
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -4477,6 +4784,7 @@ pub(crate) mod tests {
         let mut model = showing(10);
         model.choose_folder(r"D:\Old".into());
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -5349,6 +5657,7 @@ pub(crate) mod tests {
             }
         );
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };

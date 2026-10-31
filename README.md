@@ -167,8 +167,7 @@ together.
 
 ## Search from scripts and terminals
 
-Search from a terminal, or change `es.exe` to `gozler` in an existing
-Everything script:
+Search from a terminal with familiar Everything `es.exe` option names:
 
 ```
 gozler report                       # filenames containing report
@@ -180,7 +179,14 @@ gozler -export-csv files.csv ext:cs  # export matching files
 The default is 20 results; `-n all` returns every match. Scripts and agents
 can tell whether an answer is complete from its exit code. Invalid search
 terms produce an error. Run `gozler -h` for quick examples or `gozler --help`
-for the full reference.
+for the full reference. [Use Gozler from scripts and AI agents](docs/JSON.md)
+describes JSON fields, bounded searches, counts and completeness checks.
+Gozler supports the options in its help, rather than every `es.exe` option;
+check the help and exit codes when adapting an existing script.
+
+To show a search or reveal a file in the window, use `gozler-ui --search`
+or `gozler-ui --reveal`. The [agent guide](docs/JSON.md#show-files-in-the-window)
+has examples.
 
 ## Performance records
 

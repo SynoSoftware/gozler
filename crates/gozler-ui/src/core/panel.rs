@@ -75,6 +75,7 @@ pub(crate) fn size_query(folder: &str) -> Option<ChunkAsk> {
         Matching::default(),
         &filters,
         &QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         },
@@ -718,6 +719,8 @@ pub(crate) struct Panel {
     awaited: Option<Awaited>,
     awaited_place: Option<(Place, RowSelection)>,
     interaction_revision: u64,
+    /// The latest Go's generation; completing or refreshing its rows keeps it.
+    navigation: u64,
     epoch: u64,
     calculation: CalculationState,
     pending: std::collections::VecDeque<RowChange>,
@@ -816,6 +819,7 @@ impl Panel {
             awaited: None,
             awaited_place: None,
             interaction_revision: 0,
+            navigation: 0,
             epoch: 0,
             calculation: CalculationState::Idle,
             pending: Default::default(),
@@ -1722,6 +1726,7 @@ impl Panels {
         // awaited name; the shown one read again keeps them, so a change
         // does not end the person's typing.
         if matches!(kind, ReadKind::Go { .. }) {
+            panel.navigation = generation;
             panel.quick.close(&mut panel.retired);
             panel.set_awaited(None);
         }
@@ -1979,10 +1984,13 @@ impl Panels {
     /// and its reading go; the focused name stays for the way back. Returns
     /// whether it was not a search panel.
     pub(crate) fn enter_search(&mut self, side: Side) -> bool {
-        let panel = self.panel_mut(side);
-        if panel.search().is_some() {
+        if self.panel(side).search().is_some() {
             return false;
         }
+        self.moment += 1;
+        let generation = self.moment;
+        let panel = self.panel_mut(side);
+        panel.navigation = generation;
         let back = (panel.focused)
             .and_then(|row| panel.entry(row))
             .map(|entry| entry.name.clone());
@@ -2347,6 +2355,10 @@ impl Panels {
             epoch: panel.epoch,
             interaction: panel.interaction_revision,
         }
+    }
+
+    pub(crate) fn navigation(&self, side: Side) -> u64 {
+        self.panel(side).navigation
     }
 
     pub(crate) fn place_is_current(&self, place: CommandPlace) -> bool {

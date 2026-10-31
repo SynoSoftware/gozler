@@ -11,10 +11,16 @@ use std::fmt::Write;
 pub enum ColorToken {
     /// The program name and version, and section titles: bold.
     Strong,
-    /// A row label, such as `Service`: gray.
+    /// A help description or row label, such as `Service`: gray.
     Muted,
-    /// Text the reader types: a command, an option or a search term: cyan.
+    /// An option: cyan.
     Primary,
+    /// The executable in a command: bold bright blue.
+    Executable,
+    /// An option's value: yellow.
+    Value,
+    /// A folder or path used as search scope: green.
+    Path,
     /// gozlerd runs, or the answer is complete: green.
     Success,
     /// gozlerd is not ready, or the answer may be incomplete or cut: yellow.
@@ -33,6 +39,9 @@ pub fn paint(out: &mut String, token: ColorToken, text: &str, color: bool) {
         ColorToken::Strong => "1",
         ColorToken::Muted => "90",
         ColorToken::Primary => "36",
+        ColorToken::Executable => "1;94",
+        ColorToken::Value => "33",
+        ColorToken::Path => "32",
         ColorToken::Success => "32",
         ColorToken::Warning => "33",
         ColorToken::Danger => "31",

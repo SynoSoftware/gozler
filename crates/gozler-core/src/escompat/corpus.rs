@@ -292,6 +292,35 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         // Whole words: no letter or digit right before or after the text.
         // `read` lies inside readme and unread.
         (&["ww:read"], prints(&[])),
+        (&["wfn:report"], prints(&[])),
+        (
+            &["wfn:report.txt"],
+            prints(&[r"C:\repo\report.txt", r"D:\backup\report.txt"]),
+        ),
+        (
+            &[r"wfn:regex:report\.txt|readme\.txt"],
+            prints(&[
+                r"C:\docs\readme.txt",
+                r"C:\repo\report.txt",
+                r"D:\backup\report.txt",
+            ]),
+        ),
+        (
+            &[r"wfn:regex:(?x)report\.txt#comment"],
+            prints(&[r"C:\repo\report.txt", r"D:\backup\report.txt"]),
+        ),
+        (
+            &[r#"wfn:regex:"Report 2026\.txt""#],
+            prints(&[r"C:\repo\Report 2026.txt"]),
+        ),
+        (
+            &["-p", r"wfn:C:\repo\report.txt"],
+            prints(&[r"C:\repo\report.txt"]),
+        ),
+        (
+            &["wfn:size:1"],
+            query_error("unknown search function: wfn:size:"),
+        ),
         (
             &["-ww", "md"],
             prints(&[
@@ -464,12 +493,15 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             &["DESIGN", "|", "argv", "rs"],
             prints(&[r"C:\repo\src\argv.rs"]),
         ),
-        // An unquoted `<` is refused, because no Windows name contains it, so
-        // as text it would match nothing.
         (
             &["a<b"],
-            query_error("'<' is not supported: gozler does not group terms with < and >"),
+            query_error("query: use balanced < and > around a nonempty expression"),
         ),
+        (
+            &["<name:argv ext:*.rs>|<name:DESIGN ext:md>"],
+            prints(&[r"C:\repo\src\argv.rs", r"C:\repo\DESIGN.md"]),
+        ),
+        (&["child:argv.rs"], prints(&[r"C:\repo\src"])),
         // Functions.
         (
             &["ext:CS;.txt"],
@@ -541,6 +573,10 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         // Bug 2: `dm:`. Each day of the fixture is a day after
         // 1601-01-01, and every row starts at noon UTC on day 7, 1601-01-08.
         (&["dm:today"], prints(&[r"C:\repo\src\argv.rs"])),
+        (
+            &["file:", "dm:thisweek"],
+            prints(&[r"C:\repo\src\argv.rs", r"D:\backup\report.txt"]),
+        ),
         // The last 3 days end at the query start, so day 8 is in the future
         // and left out.
         (
@@ -909,6 +945,7 @@ const WORKING_DIR: &str = r"C:\repo\src";
 /// not depend on the machine's clock or time zone.
 fn query_start() -> QueryStart {
     QueryStart {
+        week_start: jiff::civil::Weekday::Monday,
         now: "1601-01-08T12:00:00Z".parse().expect("an RFC 3339 instant"),
         time_zone: jiff::tz::TimeZone::UTC,
     }

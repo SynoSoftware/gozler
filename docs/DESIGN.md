@@ -65,7 +65,9 @@ The Include settings decide which drives, folders and names the index holds, for
 
 ## Command line
 
-A script written for Everything's `es.exe` or for goz v0.2.0 changes only the program name to `gozler`.
+gozler keeps goz v0.2.0's option names and accepts the supported options and
+search syntax of Everything's `es.exe`. It is not a replacement for every ES
+script: unsupported options, syntax and the differences below need checking.
 
 - **Names never change.** Every option, alias, search function and syntax that goz v0.2.0 accepts keeps its name and purpose. An es name keeps es's aliases and single-dash form, so a script written for es finds it; that is why `-whole-words`, `-filename-column`, `datemodified:`, `date-modified:`, `attributes:` and `attr:` exist beside the shorter names. A gozler-only option starts with `--`, as `--json` does, so it can never collide with an es option. `-v`, beside `-version` and `--version`, is the one exception, because most command-line programs answer `-v` with their version and es has no `-v`. Messages read `gozler: <error>` and `gozler: warning: <text>`.
 - **Owner decision: neither v0.2.0 nor es decides behavior.** They supply the names and the starting behavior. Where either answers wrong, or worse for the user, gozler answers differently.
@@ -73,9 +75,19 @@ A script written for Everything's `es.exe` or for goz v0.2.0 changes only the pr
 - **Owner decision: 20 results by default.** A query that forgets `-n` on a volume of a million files would flood an agent's context or a person's console. 20 rows, the command, the warning and the next prompt fit one 25-line console. Without `-n`, gozler prints at most `DEFAULT_LIMIT` rows. When the limit leaves matches out, stderr gives the shown and total counts and gozler exits 10; `-n 0` also exits 10 when anything matches. `-n all` prints every match. `-export-*` writes a file, which floods nothing, so it exports every match unless `-n` is given. `-get-result-count` and the size totals cover every match whatever `-n` says, because a count that stops at the limit tells nothing.
 - **es's behavior comes from its documentation and its source.** `es.exe` is never run (owner ruling). gozler copies es where es is right, and each test pins the behavior gozler chose.
 - **The tables generate the help.** The options and sort keys (`SWITCHES` and `SORT_KEYS` in `escompat::argv`), the search functions (`SEARCH_FUNCTIONS` in `query::parse`), the attribute letters (`attributes::LETTERS`) and the exit codes (`ExitCode`) each live in one table that the parser and the help both read. A new option, function or sort key is one row, and the help lists it. A test parses every option, function, term and example the help lists, so the help cannot offer something gozler refuses.
-- **The help has two screens.** `-h`, `-?`, `/?` and `--h` print the quick help: the examples marked quick, each a command with what it finds, then exit codes 0, 2 and 10 in short and the command for the full reference. It fits an 80 by 25 console with the command and the next prompt, so it never scrolls. `--help` and `-help` print the full reference: every name of every option, grouped by task, with the search functions, attribute letters, notes and every exit code. An example marked `quick` is also a line of the quick help. The split exists because a new user, or an agent, needs the common tasks first, and the full reference fills several console screens. Each line of help text is one short sentence-case phrase; detail that does not fit one line is a note in the full reference. Every example is a command that works as typed in both cmd and PowerShell.
+- **The help has two screens.** `-h`, `-?`, `/?` and `--h` print the quick help: the examples marked quick, each a command with what it finds, then exit codes 0, 2 and 10 in short and the command for the full reference. It fits an 80 by 25 console with the command and the next prompt, so it never scrolls. `--help` and `-help` print the full reference: every name of every option, grouped by task, with the search functions, attribute letters, notes and every exit code. The full reference wraps to the visible console width, leaving one column free to avoid auto-wrap; redirected output uses 79 characters. Long command and alias lists wrap by the same rule as their descriptions. An example marked `quick` is also a line of the quick help. The split exists because a new user, or an agent, needs the common tasks first, and the full reference fills several console screens. Each line of help text is one short sentence-case phrase; detail that does not fit one line is a note in the full reference. Every example is a command that works as typed in both cmd and PowerShell.
 - **Bare `gozler` prints the overview**, not a search for every file: the version, what gozler does, the state of the gozler service with the commands that start it, and the commands to search and to read the help, in fewer than 25 lines. A first-time user learns there what gozler is and whether it can answer, and a list of 20 random files tells nothing. A command line of options alone, such as `gozler -n all`, still searches. The overview exits 0 when gozlerd answers, and otherwise with the failure's code: 7 when the service is not ready, 8 when it is not running. The overview and both help screens are in color only when stdout is a console that draws ANSI colors and `NO_COLOR` is not set, so a file or a pipe receives plain text. It uses the 16 standard console colors, so it follows the terminal's scheme, and words carry every state, so plain text loses nothing.
 - **`/a` and `/o` are prefix families** with their own small parsers, because es's dash-optional name matching would make `/ad` and `/a-d`, or `/on` and `/o-n`, collide as plain rows. They own every token that starts with `/a` or `/o`, and refuse a letter they do not know with exit 4. Another unknown `/` token is search text, as in es, but as text an `/a` or `/o` token would match nothing.
+- **Attribute exclusions apply to one letter.** `/a-h-s` excludes hidden and
+  system entries; `/a-hs` excludes hidden and requires system. `-full-path`
+  requests the existing full-path column, `-w` requests whole-word matching,
+  and `-s` requests ascending Path order, using the existing parent-path and
+  name comparator.
+- **`--server-version` identifies the connected service**, using the server
+  string received during Hello. Text output is that string and a newline;
+  `--json` writes it as a JSON string. It does not request status or search.
+  `--version` stays the client version and works without the service;
+  `--status` keeps its existing text and JSON contracts.
 
 ## Exit codes
 
@@ -84,6 +96,11 @@ Each outcome that a caller handles differently has its own code. `ExitCode` in `
 When the pipe does not exist, gozler asks Windows for the state of the gozler service and prints the commands that fix that state, each alone on its line so that it can be copied into cmd, Windows PowerShell or PowerShell 7: `net start gozler` for a stopped service, `sc.exe config gozler start= auto` and then `net start gozler` for a disabled one, `pushd` to the folder of the running `gozler.exe` and then `.\gozlerd.exe install` when no service is installed, and the releases page when `gozlerd.exe` is not in that folder. These exit 8. A service that is running, starting, stopping or paused without its pipe exits 7 with `try again shortly`, because the pipe may open soon: a script retries on 7 and repairs on 8.
 
 When several codes apply, the more serious wins: a failure (1, and 3 to 8) before an incomplete answer (2), that before no matches (9) or a cut list (10), and those before a complete answer (0). A failure ends the run before it has an answer; `Answer::exit_code` orders the rest. So an empty answer while a volume in scope is indexing exits 2, not 9, because the matches may exist, and a cut list from such a volume exits 2, not 10, because 10 promises that the rows shown are correct. `-no-result-error` exits 9 only when nothing matched, not when `-n 0` hid the matches. A count covers every match, so it never exits 10.
+
+A closed output reader stops the run successfully and silently. Output errors
+propagate through the page callback so the client stops receiving rows and closes
+the connection; `main` handles `BrokenPipe` once, rather than swallowing it and
+continuing to fetch and format rows no reader can use.
 
 An answer is incomplete (exit 2) for two causes: a volume in scope is not ready (indexing, rescanning, offline or failed), or the query tests or totals sizes or dates on a volume whose size and date pass failed (see "Sizes and dates"). Rows that only show sizes from such a volume warn and exit 0, because every row is there. `--status` exits 2 when any volume is not complete or the size and date pass of any volume failed. `-timeout MS` polls the daemon's status until the volumes in scope are complete or MS runs out, then searches anyway; a volume still incomplete then makes the answer exit 2. The client finds the volumes in scope with `Scope::of`, the rule the daemon routes by, so the two cannot disagree.
 
@@ -95,9 +112,19 @@ The client parses the query with the `gozler-core` parser and sends the parsed q
 
 The arguments are joined with spaces and split into terms again, as goz v0.2.0 does, because scripts build a query in one string: `gozler "ext:cs size:>1mb"` is two terms. Quotes make spaces and operators plain text, also in a function's value: `path:"C:\Program Files"`.
 
-A query is AND-ed clauses, each an OR of terms that may be negated. That covers `!` and `|` with es's precedence, where `|` binds tighter than the space, and keeps the evaluator flat. The parser refuses with exit 4 what would otherwise search text that no name contains. An unknown function such as `dc:` is one: Windows names cannot contain `:`, so as text it gives an empty answer that looks valid. An unquoted `<` or `>` outside a function value is another, because Windows names cannot contain them either. es groups terms with `< >`; gozler does not.
+A query is AND-ed clauses, each an OR of terms that may be negated. `|` binds tighter than the space, as in es. `< >` groups expressions: `<a b>|<c d>` matches both a and b, or both c and d; `!` before a group negates it. The parser distributes groups into the same flat clauses the engine already evaluates. It refuses nesting beyond 32 levels and expansion past the existing 256-term budget before allocating the expanded clauses. Empty or unbalanced groups are invalid input (exit 4), as is an unknown function: treating one as text would give an empty answer that looks valid. Comparisons such as `size:>1mb` keep their meaning. In an unquoted `regex:` value, angles belong to the pattern; put a space before a group's closing `>`, or quote the pattern.
+
+`name:` is `nopath:`, and `full-path:` is `path:`; they reuse the same matching and path normalization. `ext:*.rs` normalizes to `ext:rs`, including each member of a semicolon list. This accepts the familiar filename-style prefix without adding general extension wildcard matching.
+
+`name-length:` (`namelen:`) and `full-path-length:` (`fullpathlen:`) compare UTF-16 code-unit counts with a number, comparison or inclusive range, such as `>100` or `10..100`. The full path includes its mount prefix and uses the spelling printed in results, even in a case-insensitive query. The existing folder-path cache carries the raw length alongside its ancestry, so folding cannot change the count and no second path cache is needed.
+
+`child:text` finds folders with an immediate visible child whose name contains text, or whose whole name matches a `*`/`?` pattern. It follows the index's direct-child chains, not the filesystem or descendants: across candidate folders each child is inspected at most once per predicate. It checks the child's visibility as well as the result folder's. An empty value means any visible child; `!child:text` is the complement, so add `folder:` when only folders are wanted.
+
+`size:unknown`, `dm:unknown` and `dc:unknown` test missing indexed metadata explicitly; unlike ordinary numeric/date comparisons, they may match missing values and can be negated. A folder's lower-bound size also counts as unknown. Folder sizes stay unknown for filtered users, and `dc:unknown` still requires Dates created to be enabled. Queries using these predicates retain the existing completeness reporting for size/date failures.
 
 Regular expressions use Rust's `regex` crate, which matches in linear time, so no pattern can hang gozlerd. The price is that a pattern has no look-around and no backreferences.
+
+`wfn:` matches the whole name, with `*` and `?` as wildcards. Its aliases are `wholefilename:`, `whole-filename:`, `whole:` and `entire:`. With Match path or a separator in its value, it matches the whole full path. `wfn:regex:` anchors its expression to the whole name or path, including when the expression contains alternatives or multiline flags; any other nested modifier is refused instead of searched as an impossible filename.
 
 **Word start and name start.** `wordstart:` matches a term where a word of the name starts: at the start of the name or after a character that is not a letter or digit, so `wordstart:1234` finds `IMG_1234.jpg` and `wordstart:para` does not find `comparator.txt`. A term that starts with such a character starts its own word, so `wordstart:.dll` finds `7z.dll`, as a person typing `.dll` expects. `startwith:` matches at the start of the name. With `-p`, or with `\` or `/` in the value, each tests the full path instead, as `ww:` does. Accents count, as in every comparison (`gozler_core::fold`). The window's match mode is a parse default (`ParseOptions::term_match`). Start of words and Start of name reach name terms only; a term with a separator and the values of `path:`, `nopath:`, `file:` and `folder:` stay plain substrings, so a typed folder still finds what is below it. Whole words is `-ww` and keeps its rule, which reaches those terms and values too. With `-p`, a mode tests the full path.
 
@@ -126,10 +153,12 @@ For a literal or wildcard path clause with one positive term, the last required 
 
 A `dm:` or `dc:` value resolves once, to UTC bounds, from the query start and a time zone. The date resolver in `gozler-core` (`query::dates`, with `jiff`) does it: the client passes its own clock and time zone, and the daemon's text path passes its own. The bounds travel as UTC, so the daemon never needs the client's time zone.
 
-- `today`, `yesterday` and a `YYYY-MM-DD` date are calendar days in the time zone, from midnight to the next midnight, so a day around a daylight-saving change lasts 23 or 25 hours.
-- `Ndays` is the N times 24 hours that end at the query start.
-- `dm:` and `dc:` take only these forms, because they are the dates scripts and agents write. A slash date such as `03/04/2026` is a different day in another locale.
+- `today`, `yesterday`, `tomorrow` and a `YYYY-MM-DD` date are calendar days in the time zone, from midnight to the next midnight, so a day around a daylight-saving change lasts 23 or 25 hours.
+- `this`, `last` and `next` before `week`, `month` or `year` name calendar periods. `current` is `this`, `past` and `prev` are `last`, and `coming` is `next`. Weeks start on the first day set in Windows, carried by `QueryStart::week_start`; the pure core never reads the machine's locale.
+- `Nminutes`, `Nhours`, `Ndays` and `Nweeks`, also prefixed by `last`, count fixed durations ending at the query start: 60 seconds, 3,600 seconds, 24 hours and seven days per unit. Counts must be positive and their resolved times representable. A slash date such as `03/04/2026` is refused because it names a different day in another locale.
 - Output prints dates as ISO 8601 in local time, and plain output groups digits with commas, whatever the locale, so a script reads the output without knowing the locale.
+- JSON adds `mtime` and `created` in the same local ISO 8601 format when their dates are known, beside the unchanged `mtime_ft` and `created_ft` fields. Its `more` means matching rows were omitted, including when a result limit cuts the list. This output contract belongs to `output::results`; the wire's `QueryResults::more` continues to mean another response frame follows.
+- [The script and agent guide](JSON.md) describes the CLI's JSON fields and how to check limits, completeness, counts and status. Count switches keep their numeric output, including with `--json`; `--json -n 0` returns a search object with the total and completeness flags but no rows.
 - A comparison compares times at the value's granularity, as es does: `>today` is after today, and `<7days` is older than the last 7 days. A range `lower..upper` runs from the start of `lower` to the end of `upper`, and a reversed range is invalid input.
 
 ### Sizes and dates
@@ -188,7 +217,7 @@ Several volumes merge one page at a time, by the same comparison, reading each r
 - **The version gate.** The client sends `Request::Hello` with `PROTO_VERSION` as both its lowest and highest version. **Owner ruling:** the daemon serves only its own version (`OLDEST_PROTO_VERSION` is `PROTO_VERSION`), of gozler or of goz, and refuses any other with `Unsupported`, because `gozler` and `gozlerd` install together from one build, and an old layout kept for an old client would bind every later change. The client prints `gozler: the running gozlerd is older than this client; install the matching gozlerd`, then the link to the gozler setup, and exits 7. Without the gate, a daemon of another build would misread the request or the client the pages.
 - **Each change to a request or a reply raises `PROTO_VERSION` by one**, such as a new kind of term in the parsed query or a new page layout.
 - **No result carries its full path.** gozlerd keeps each match as a row, its entry and its file ID, and a page reads each row's name and folder from the index into a `ResultNames` table, which holds each folder once with its parent, so a reply's memory grows with the folders and not with the folder depth. A results page (`proto::binary`) sends the folders its items need that no earlier page of the reply sent, then each item as its folder and its name; the client keeps the reply's folders and joins each item's full path. On `C:\` with 2.15 million entries this is 73 MB on the pipe instead of 251 MB of full paths. A tree 200 folders deep, such as a copy that copied into itself, costs gozlerd about 100 bytes a row instead of 2 KB or more ([deep folder rows](research/deep-folder-rows.md)).
-- **Item fields travel only when the request asks for them** (`Rows::want_size`, `want_mtime`, `want_created`, `want_attributes`), and each item's flags say which it carries. gozler asks for the date created only for a `-dc` column, because most indexes hold none.
+- **Item fields travel only when the request asks for them** (`Rows::want_size`, `want_mtime`, `want_created`, `want_attributes`), and each item's flags say which it carries. gozler asks for the date created for JSON or a `-dc` column, because most indexes hold none.
 - **A page's sums follow its items.** `Rows::want_sums` asks for the matches' files and folders and their sizes (`MatchSums`), which the daemon computes in the scan that counts `total`. They travel after the last item, flagged in the page flags.
 - **Totals cross the pipe without rows.** `-get-result-count`, `-get-total-size` and `-get-folder-size` ask for `Returns::Totals`, and the daemon sums the sizes it already holds for each hit. Summing on the client would stream every match, and `-get-folder-size C:\` is the whole volume. The sum uses checked arithmetic; an overflow, which only a corrupt size in the index can cause, is `ProtoError::Overflow` and exit 1.
 
@@ -536,7 +565,7 @@ While the filter pane is hidden, Show filters stands at the row's left margin an
 
   Settings > Search has no separate Enter choice. Show in Commander stays a command of its own, so a person with an Open folders command can still go to a result in Commander.
 
-  Show in Commander, also as Open, changes the window only after the folder opens, as File Explorer and Total Commander stay where they are when a folder refuses them. The shell worker first opens the folder for listing, as a panel does; when the result is gone the window reports it as for Open, and when Windows refuses the folder, such as `C:\Windows\Prefetch` for a user who is not an administrator, the window stays where it was and says "Windows could not open" the folder, with Windows' reason. A slow folder shows in the status bar as any slow open does, with Cancel. From Search, the active panel then reads the folder while Search still shows, and Commander mode shows when the listing arrives, so the panel appears with that folder instead of the one it showed before; the panel reads it once.
+  Show in Commander, also as Open, changes the window only after the folder opens, as File Explorer and Total Commander stay where they are when a folder refuses them. The shell worker first opens the folder for listing, as a panel does; when the result is gone the window reports it as for Open, and when Windows refuses the folder, such as `C:\Windows\Prefetch` for a user who is not an administrator, the window stays where it was and says "Windows could not open" the folder, with Windows' reason. A slow folder shows in the status bar as any slow open does, with Cancel. From Search, the active panel then reads the folder while Search still shows; Commander mode shows when that listing and the other panel's initial listing are ready (see "Commander mode's window"). The requested folder appears directly, and the panel reads it once.
 - Search as you type starts a search 150 ms after the last keystroke. `Enter` in the search box then acts on the selected row, or the first row when none is selected, as `Enter` in the list does, so a person types a name and presses `Enter` to reach it. When the search for the current text has not answered yet, because `Enter` came within the 150 ms or while the search runs, the search runs at once and its first row takes `Enter` when it answers; a search that finds nothing does nothing, and typing again before the answer cancels it (`Model::enter_in_search_box`). With search as you type off, `Enter` runs the search.
 - While a search runs, the list keeps the previous results, and the status bar keeps their counts and totals until the new ones arrive. Only a search that has run 300 ms without an answer makes the status bar say "Searching…" and drop the totals, so a search that answers at once, as most do while the person types, changes the status bar once instead of blinking on every keystroke (**Owner ruling**). The search itself starts at once. The new results replace the previous ones at once, scrolled to the first row (`T1`, `T2`).
 - When the Location folder does not exist, the window does not search, as `gozler` refuses the same search (`S8`).
@@ -661,6 +690,51 @@ thread. At narrow widths the per-drive details collapse to a complete
 job's progress and Cancel controls. The tooltip retains all drive details.
 
 ### Window lifetime
+
+#### Requests from another program
+
+`gozler-ui --search <query>` opens Search and runs the supplied query, including
+an empty query, even when Search normally waits for Enter. `--location <folder>`
+limits it to that folder and its subfolders; without it, Location is Everywhere.
+The other filters start clear. Matching and sorting start with the person's
+preferences unless the request supplies these options:
+
+| Option | Values |
+| --- | --- |
+| `--match-mode` | `start-of-words`, `start-of-name`, `anywhere`, `whole-words`, `regex` |
+| `--match-case` | `on`, `off` |
+| `--match-path` | `on`, `off` |
+| `--sort` | `name`, `path`, `extension`, `size`, `date-modified`, `date-created` |
+| `--sort-direction` | `ascending`, `descending` |
+
+These modifiers require `--search`. An omitted sort direction keeps the person's
+preferred direction, including when `--sort` supplies a new key. They use
+Search's normal matching rules, including ordered name terms, rather than
+changing the CLI's matching rules.
+The requested filters, matching and sort stay temporary: saving the window or
+closing it does not turn them into preferences. A person's later changes use
+the normal setting owners.
+
+`gozler-ui --reveal <file>` opens the containing folder in Commander and keeps
+the cursor on the file, on screen, without marking it selected. It cannot be
+combined with Search, Location or Search modifiers. The existing work owner
+checks the destination in the background before navigation changes the mode
+or folder. Failure leaves the current location and explains the problem; a
+newer request or navigation in either panel or Search supersedes a pending reveal.
+Editing a search panel's query or scope also supersedes it; background search
+refreshes leave Reveal running.
+
+`--new-window` opens another window rather than handing over or replacing the
+running program. It can accompany either request and leaves the saved
+one-window choice alone. The normal additional-window rules below apply;
+sign-in retains its existing behavior.
+
+Startup and handoff use one request implementation. Handoff extends the
+existing `WM_COPYDATA` route, accepts the legacy Location message, and bounds
+structured messages before allocating. Relative destination paths are resolved
+in the sending process. These options add no indexing or content reads.
+
+#### Running windows
 
 - **One window per user session, unless the person allows more.** `main` creates the named mutex `Local\gozler.ui`, and the `Local\` namespace is already one per session. A second start finds the first window by its class name, calls `AllowSetForegroundWindow` for its process, posts it a registered message and exits; the first window comes forward, restored when it was minimized and still maximized when it was maximized, with the search box focused and its text selected (`MainWindow::show_window`, `C24`); a second start explicitly shows Search, as Show Search does. A second start with `--location <folder>` also sets Location, through `WM_COPYDATA`. A start with `--location`, the first or a second, shows Search, because Location is Search's filter.
 - **A second start of another program replaces the first window,** because a person who starts a build expects to see that build. Another program is another file, such as another build's folder or a running copy that a developer renamed so the build could replace it, or the same file written after the first process started (`app::runs_another_program`); names compare without case, as NTFS does, and a process whose file Windows does not name counts as the same program, so a start never closes a window it cannot name. The second start sends the first window the registered message `gozler.ui.exit`, which runs the same Exit as File > Exit: with file operations running or waiting, the first window comes forward and asks the Exit question, so they are saved for Continue. When the first window ends, the second start waits, without a limit, for that process to end, which can outlive its window while essential persistence and accepted cleanup finish, and then becomes the first window; when the person keeps the operations, or the first window has a dialog open, the first window stays in front and the second start ends. A first window from a build before this message does not answer it, and comes forward instead. A start at sign-in never closes the running window. The setup sends the same message when the person selects Install, not when it starts, and the uninstaller once the person confirms the uninstall; each says that Gozler is running only when it stays.
@@ -1177,7 +1251,7 @@ Commander mode is the window's second mode: a file manager that works like Norto
 | Bottom edge | the status bar |
 
 - **Commander mode and Search share one window.** View > Search and View > Commander choose the mode, and the window opens in the mode it closed in. Choosing the active mode keeps it active. When Search shows again, its list scrolls its focused row, or else its first selected row, into view. Each panel takes half the window, with no splitter between them. The filter pane and the inspector belong to Search, and Commander mode does not show them.
-- **Switching modes keeps each mode's state:** the search text, its results and the panels' folders. While Search shows, the panels stop watching their folders and ask gozlerd nothing, and they read their folders again when Commander mode shows, because a watched folder on a USB drive blocks its removal and nobody sees the changes.
+- **Switching modes keeps each mode's state:** the search text, its results and the panels' folders. While Search shows, the panels stop watching their folders and ask gozlerd nothing, because a watched folder on a USB drive blocks its removal and nobody sees the changes. Choosing Commander starts both panels' readings in the background. Search stays visible until both initial listings are ready, and the panels, columns and active cursor then appear in one presenter update. Later switches keep the panels' previous listings during their refresh. A slow initial reading has the status bar's Cancel; cancelling or choosing another destination leaves Search visible and stops the hidden panels' watches.
 - **The title is "Gozler",** because a title that names one panel's folder would be wrong for the other.
 - **Show Commander** (the tray or its shortcut from any program) explicitly selects Commander mode and focuses the active panel's list. Show Search and a second start explicitly select Search (see "Window lifetime").
 
@@ -2503,7 +2577,6 @@ in the engine's checks of [After install](plans/ui-after-install.md).
 Each of these waits for a concrete need:
 
 - Content search: `rg` does that.
-- `< >` grouping of terms.
 - Paging: es's `-viewport-offset` and `-viewport-count` are unknown options (exit 6). The pipe protocol keeps its `offset` field for other applications.
 - EFU file lists, playlists, bookmarks, macros, and the size and date format menus.
 - In the window: search and run history; results that update while files change, because the protocol has no change notification (`F5` searches again); the other hard links of a file, because results carry no file ID; and right-to-left languages, because no such catalogue is planned (see "How normal changes land").

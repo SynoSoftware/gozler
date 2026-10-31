@@ -1,6 +1,7 @@
 //! The request gozler sends for a command line.
 
 use super::{EsPlan, ScopeFolder};
+use crate::output::ResultFormat;
 use crate::proto::{Returns, Rows, SearchRequest};
 use crate::query::{QueryError, QueryStart, TermMatch};
 use crate::search::{Search, SearchInput, TextMatch};
@@ -30,10 +31,11 @@ pub fn build_search(
             offset: 0,
             limit: plan.row_limit(),
             // Always fetch the size and date; output decides what to show.
-            // Attributes and the date created travel only for their column.
+            // JSON includes creation dates; table metadata follows its columns.
             want_size: true,
             want_mtime: true,
-            want_created: plan.columns.contains(&EsColumn::DateCreated),
+            want_created: plan.columns.contains(&EsColumn::DateCreated)
+                || matches!(plan.result_format(), ResultFormat::Json),
             want_attributes: plan.columns.contains(&EsColumn::Attributes),
             want_sums: false,
         }),
@@ -74,6 +76,7 @@ mod tests {
     /// The request for `plan` in `working_dir`, at an arbitrary query start.
     fn search_in(plan: &EsPlan, working_dir: &str) -> Result<SearchRequest, QueryError> {
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -186,5 +189,20 @@ mod tests {
             returns(&["-n", "5"]),
             Returns::Rows(Rows { limit: Some(5), .. })
         ));
+    }
+
+    #[test]
+    fn json_requests_creation_dates_without_adding_a_column() {
+        for (tokens, want_created) in [
+            (vec!["--json", "report"], true),
+            (vec!["report"], false),
+            (vec!["--json", "-export-csv", "report.csv", "report"], false),
+        ] {
+            let request = search_in(&plan(&tokens), r"C:\").expect("parses");
+            assert!(matches!(
+                request.returns,
+                Returns::Rows(Rows { want_created: actual, .. }) if actual == want_created
+            ));
+        }
     }
 }

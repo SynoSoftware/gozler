@@ -18,10 +18,8 @@
 //! A `dm:` value is resolved to UTC bounds here, from the query start
 //! ([`ParseOptions::query_start`]), by the date resolver in `dates`.
 //!
-//! Refused as invalid input, because each would otherwise search text that
-//! no name contains: an unknown function such as `dc:`, an unquoted `<` or
-//! `>` outside a function value (es groups terms with them), an operator
-//! without its term, and a relative path when there is no working directory.
+//! `<` and `>` group expressions. Nesting and Boolean distribution are bounded
+//! before expanding clauses, so a short query cannot exhaust the parser.
 //!
 //! The parser turns the text into a [`ParsedQuery`], which the client sends to
 //! the daemon as it is: AND-ed clauses, each an OR of terms. Apart from those
@@ -147,10 +145,9 @@ impl Clause {
     }
 }
 
-/// One test, or with `negated` its opposite. A size test never matches an
-/// entry whose size is unknown, and a date test an entry whose date is
-/// unknown, negated or not, so a negated size test does not report an unread
-/// file as small.
+/// One test, or with `negated` its opposite. Size and date comparisons never
+/// match unknown values, negated or not, so an unread file is not reported as
+/// small. [`Test::Unknown`] tests missing metadata explicitly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Term {
     pub negated: bool,
@@ -218,6 +215,28 @@ pub enum Test {
     DateCreated(DateRange),
     /// The entry has every one of these attributes. From protocol 6.
     Attributes(Attributes),
+    Unknown(Metadata),
+    /// Length in UTF-16 code units, as Windows counts names and paths.
+    Length {
+        target: LengthTarget,
+        range: SizeRange,
+    },
+    /// A folder with an immediate visible child whose name matches this text
+    /// or whole-name wildcard pattern.
+    Child(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Metadata {
+    Size,
+    DateModified,
+    DateCreated,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LengthTarget {
+    Name,
+    FullPath,
 }
 
 impl ParsedQuery {
@@ -227,7 +246,7 @@ impl ParsedQuery {
         self.clauses.iter().flat_map(|c| &c.terms).any(|t| {
             matches!(
                 t.test,
-                Test::Size(_) | Test::DateModified(_) | Test::DateCreated(_)
+                Test::Size(_) | Test::DateModified(_) | Test::DateCreated(_) | Test::Unknown(_)
             )
         })
     }
@@ -235,10 +254,12 @@ impl ParsedQuery {
     /// Whether a term tests the date created, which only an index with
     /// Dates created on holds.
     pub fn tests_date_created(&self) -> bool {
-        self.clauses
-            .iter()
-            .flat_map(|c| &c.terms)
-            .any(|t| matches!(t.test, Test::DateCreated(_)))
+        self.clauses.iter().flat_map(|c| &c.terms).any(|t| {
+            matches!(
+                t.test,
+                Test::DateCreated(_) | Test::Unknown(Metadata::DateCreated)
+            )
+        })
     }
 
     /// `true` when no term tests text: the query matches everything its
@@ -269,10 +290,8 @@ impl ParsedQuery {
 /// A query that cannot be executed as written.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum QueryError {
-    /// An unquoted `<` or `>` outside a function value, which es reads as
-    /// grouping.
-    #[error("'{0}' is not supported: gozler does not group terms with < and >")]
-    UnsupportedOperator(char),
+    #[error("query: groups may nest at most {0} levels")]
+    GroupDepth(usize),
     /// A `name:` term whose name is no search function; carries the name.
     #[error("unknown search function: {0}:")]
     UnknownFunction(String),
@@ -307,6 +326,10 @@ pub enum QueryError {
 /// fix it. A `String` carries the text that is wrong, as typed.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Malformed {
+    #[error("query: use balanced < and > around a nonempty expression")]
+    Grouping,
+    #[error("length: {0} is not a character count; use a number, comparison or range")]
+    Length(String),
     /// A `!` that does not start a term.
     #[error("query: ! must start a term; quote it to search for it")]
     MisplacedNot,
@@ -330,7 +353,7 @@ pub enum Malformed {
     /// `Ndays` without a number of days above 0.
     #[error("{0} {1} needs a number of days above 0")]
     Days(DateField, String),
-    #[error("{0} {1} is not a date; use today, yesterday, Ndays or YYYY-MM-DD")]
+    #[error("{0} {1} is not a date; use today, Ndays, lastweek, thismonth or YYYY-MM-DD")]
     Date(DateField, String),
     /// `parent:` without a folder.
     #[error("parent: needs a folder")]
@@ -362,6 +385,8 @@ pub(crate) struct SearchFunction {
 enum Function {
     Ext,
     Size,
+    Length(LengthTarget),
+    Child,
     Date(DateField),
     Path,
     Parent,
@@ -369,6 +394,7 @@ enum Function {
     WholeWord,
     WordStart,
     NameStart,
+    WholeName,
     Regex,
     Attributes,
     File,
@@ -385,7 +411,7 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["ext"],
         function: Function::Ext,
         example: "cs;txt",
-        help: "Extension is one in the list; `ext:` alone finds files without one",
+        help: "Extension is one in the list; `ext:*.cs` also works; `ext:` alone finds files without one",
     },
     SearchFunction {
         names: &["size"],
@@ -393,14 +419,15 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         example: ">1mb",
         help: "Size of a file, or of the files below a folder; also `<`, `<=`, `>=`, `=`, \
                ranges such as `1mb..10mb`, and `empty`, `tiny`, `small`, `medium`, `large`, \
-               `huge` or `gigantic`",
+               `huge` or `gigantic`; `unknown` finds missing sizes",
     },
     SearchFunction {
         names: &["dm", "datemodified", "date-modified"],
         function: Function::Date(DateField::Modified),
         example: "today",
-        help: "Date modified: `today`, `yesterday`, `YYYY-MM-DD` or `Ndays`; also `<`, `<=`, `>`, \
-               `>=` and ranges such as `2026-01-01..2026-03-31`",
+        help: "Date modified: `today`, `yesterday`, `YYYY-MM-DD`, `Nminutes`, `Nhours`, `Ndays`, `lastNdays`, `Nweeks`, \
+               or `thisweek`, `lastmonth`, `thisyear` and other calendar periods; also `<`, `<=`, `>`, \
+               `>=`, ranges such as `2026-01-01..2026-03-31`, and `unknown`",
     },
     SearchFunction {
         names: &["dc", "datecreated", "date-created"],
@@ -410,7 +437,7 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
                Settings > Drives and service page",
     },
     SearchFunction {
-        names: &["path"],
+        names: &["path", "full-path"],
         function: Function::Path,
         example: "text",
         help: "Full path contains text; with `*` or `?`, the whole full path must match",
@@ -423,11 +450,29 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
                starts from the current folder",
     },
     SearchFunction {
-        names: &["nopath"],
+        names: &["nopath", "name"],
         function: Function::NoPath,
         example: "text",
         help: "Name contains text, also when other terms test the full path; \
                with `*` or `?`, the whole name must match",
+    },
+    SearchFunction {
+        names: &["name-length", "namelen"],
+        function: Function::Length(LengthTarget::Name),
+        example: ">100",
+        help: "Name length in UTF-16 characters; accepts comparisons and ranges such as `10..100`",
+    },
+    SearchFunction {
+        names: &["full-path-length", "fullpathlen"],
+        function: Function::Length(LengthTarget::FullPath),
+        example: ">260",
+        help: "Full path length in UTF-16 characters, including the mount prefix",
+    },
+    SearchFunction {
+        names: &["child"],
+        function: Function::Child,
+        example: "Cargo.toml",
+        help: "Folders with an immediate visible child whose name contains text; `*` and `?` match the whole child name",
     },
     SearchFunction {
         names: &["ww"],
@@ -439,8 +484,8 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
     SearchFunction {
         names: &["wordstart"],
         function: Function::WordStart,
-        example: "para",
-        help: "A word in the name starts with para, as in my_Paracetamol.pdf; \
+        example: "ann",
+        help: "A word in the name starts with ann, as in my_annual_report.pdf; \
                with `\\` or `/` in the value, a word in the full path must",
     },
     SearchFunction {
@@ -448,6 +493,13 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         function: Function::NameStart,
         example: "read",
         help: "Name starts with read; with `\\` or `/` in the value, the full path must",
+    },
+    SearchFunction {
+        names: &["wfn", "wholefilename", "whole-filename", "whole", "entire"],
+        function: Function::WholeName,
+        example: "readme.txt",
+        help: "Match the whole name, with `*` and `?` as wildcards; \
+               `wfn:regex:pattern` matches the whole name as a regular expression",
     },
     SearchFunction {
         names: &["regex"],
@@ -479,7 +531,8 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["case"],
         function: Function::Case,
         example: "",
-        help: "Match case; `case:0` turns it off",
+        help: "Match case for the whole query; `case:1` also enables it, and \
+               `case:0` turns it off",
     },
 ];
 
@@ -572,31 +625,41 @@ pub fn parse_query(input: &str) -> Result<ParsedQuery, QueryError> {
 /// A later `ext:`, `size:`, `file:` or `folder:` that stands alone, without
 /// `!` or `|`, replaces an earlier one.
 pub fn parse_query_with(input: &str, options: ParseOptions) -> Result<ParsedQuery, QueryError> {
-    let groups = groups(lex(input)?)?;
+    let lexemes = lex(input)?;
 
     // The last `case:` directive wins.
-    let match_case = groups
+    let match_case = lexemes
         .iter()
-        .flatten()
-        .filter(|item| item.word.quote_at.is_none())
-        .filter_map(|item| case_directive(&item.word.text))
+        .filter_map(|lexeme| match lexeme {
+            Lexeme::Word(word) if word.quote_at.is_none() => case_directive(&word.text),
+            _ => None,
+        })
         .next_back()
         .unwrap_or(options.match_case);
+    let mut lexemes = lexemes.into_iter().peekable();
+    let groups = parse_groups(&mut lexemes, 0)?;
+    let clauses = compile_groups(&groups, &options)?;
+    Ok(ParsedQuery {
+        clauses,
+        match_case,
+    })
+}
 
+fn compile_groups(groups: &[Vec<Item>], options: &ParseOptions) -> Result<Vec<Clause>, QueryError> {
     let mut clauses = Vec::new();
     let mut ordered = Vec::new();
     let mut kind = None;
     let mut size = None;
     let mut ext = None;
-    for group in &groups {
+    for group in groups {
         if let [
             Item {
                 negated: false,
-                word,
+                value: Atom::Word(word),
             },
         ] = group.as_slice()
         {
-            match operand(word, &options)? {
+            match operand(word, options)? {
                 Operand::Text(test) => {
                     if options.ordered_terms
                         && function_parts(word).is_none()
@@ -622,7 +685,7 @@ pub fn parse_query_with(input: &str, options: ParseOptions) -> Result<ParsedQuer
                     kind = Some(new_kind);
                     clauses.extend(text.map(Clause::single));
                 }
-                Operand::Size(range) => size = Some(range),
+                Operand::Size(test) => size = Some(test),
                 Operand::Extensions(extensions) => ext = Some(extensions),
                 Operand::Nothing => {}
             }
@@ -631,29 +694,43 @@ pub fn parse_query_with(input: &str, options: ParseOptions) -> Result<ParsedQuer
         let alternatives = group
             .iter()
             .map(|item| {
-                let terms = operand(&item.word, &options)?.terms();
-                if terms.is_empty() {
-                    return Err(QueryError::Malformed(Malformed::OperatorOnNothing(
-                        item.word.text.clone(),
-                    )));
-                }
-                Ok(if item.negated {
-                    // The negated operand passes when any one of its terms
-                    // fails.
-                    let negated = terms
-                        .into_iter()
-                        .map(|term| Term {
-                            negated: !term.negated,
-                            test: term.test,
-                        })
-                        .collect();
-                    vec![Clause { terms: negated }]
-                } else {
-                    terms
+                let clauses = match &item.value {
+                    Atom::Word(word) => operand(word, options)?
+                        .terms()
                         .into_iter()
                         .map(|term| Clause { terms: vec![term] })
-                        .collect()
-                })
+                        .collect(),
+                    Atom::Group(groups) => compile_groups(groups, options)?,
+                };
+                if clauses.is_empty() {
+                    let text = match &item.value {
+                        Atom::Word(word) => word.text.clone(),
+                        Atom::Group(_) => "< >".to_owned(),
+                    };
+                    return Err(QueryError::Malformed(Malformed::OperatorOnNothing(text)));
+                }
+                if item.negated {
+                    // Negating AND-ed clauses OR-s their negations.
+                    any_of(
+                        clauses
+                            .into_iter()
+                            .map(|clause| {
+                                clause
+                                    .terms
+                                    .into_iter()
+                                    .map(|term| Clause {
+                                        terms: vec![Term {
+                                            negated: !term.negated,
+                                            test: term.test,
+                                        }],
+                                    })
+                                    .collect()
+                            })
+                            .collect(),
+                    )
+                } else {
+                    Ok(clauses)
+                }
             })
             .collect::<Result<Vec<_>, _>>()?;
         clauses.extend(any_of(alternatives)?);
@@ -676,17 +753,21 @@ pub fn parse_query_with(input: &str, options: ParseOptions) -> Result<ParsedQuer
         }));
     }
     clauses.extend(kind.map(|kind| Clause::single(Test::Kind(kind))));
-    clauses.extend(size.map(|range| Clause::single(Test::Size(range))));
+    clauses.extend(size.map(Clause::single));
     let ext_terms = ext.map(Extensions::terms).unwrap_or_default();
     clauses.extend(
         ext_terms
             .into_iter()
             .map(|term| Clause { terms: vec![term] }),
     );
-    Ok(ParsedQuery {
-        clauses,
-        match_case,
-    })
+    Ok(clauses)
+}
+
+pub(super) fn term_count(term: &Term) -> usize {
+    match &term.test {
+        Test::Extension(values) | Test::Ordered { terms: values, .. } => values.len().max(1),
+        _ => 1,
+    }
 }
 
 /// The clauses that pass when any of `alternatives` passes, where each
@@ -703,7 +784,11 @@ fn any_of(alternatives: Vec<Vec<Clause>>) -> Result<Vec<Clause>, QueryError> {
         .fold(1usize, |n, alternative| n.saturating_mul(alternative.len()));
     let terms = alternatives.iter().fold(0usize, |sum, alternative| {
         let picks = count / alternative.len().max(1);
-        let terms: usize = alternative.iter().map(|clause| clause.terms.len()).sum();
+        let terms: usize = alternative
+            .iter()
+            .flat_map(|clause| &clause.terms)
+            .map(term_count)
+            .sum();
         sum.saturating_add(terms.saturating_mul(picks))
     });
     if terms > super::engine::MAX_QUERY_TERMS {
@@ -731,7 +816,7 @@ enum Operand {
     Text(Test),
     /// `file:` or `folder:`, and the text after it.
     Kind(Kind, Option<Test>),
-    Size(SizeRange),
+    Size(Test),
     Extensions(Extensions),
     /// A `case:` directive or an empty `path:`, `nopath:` or `attrib:`, which
     /// test nothing.
@@ -751,7 +836,7 @@ impl Operand {
                 .chain(text)
                 .map(positive)
                 .collect(),
-            Operand::Size(range) => vec![positive(Test::Size(range))],
+            Operand::Size(test) => vec![positive(test)],
             Operand::Extensions(extensions) => extensions.terms(),
             Operand::Nothing => Vec::new(),
         }
@@ -818,8 +903,26 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
         };
         match function_named(name) {
             Some(Function::Ext) => return Ok(Operand::Extensions(extensions(value))),
-            Some(Function::Size) => return Ok(Operand::Size(parse_size(value)?)),
+            Some(Function::Size) => {
+                return Ok(Operand::Size(if value.eq_ignore_ascii_case("unknown") {
+                    Test::Unknown(Metadata::Size)
+                } else {
+                    Test::Size(parse_size(value)?)
+                }));
+            }
+            Some(Function::Length(target)) => {
+                let range = parse_range(value, |s| s.trim().parse().ok())
+                    .ok_or_else(|| QueryError::Malformed(Malformed::Length(value.to_owned())))?;
+                return Ok(Operand::Text(Test::Length { target, range }));
+            }
+            Some(Function::Child) => return Ok(Operand::Text(Test::Child(value.to_owned()))),
             Some(Function::Date(field)) => {
+                if value.eq_ignore_ascii_case("unknown") {
+                    return Ok(Operand::Text(Test::Unknown(match field {
+                        DateField::Modified => Metadata::DateModified,
+                        DateField::Created => Metadata::DateCreated,
+                    })));
+                }
                 let start = options.query_start.ok_or(QueryError::NoQueryStart(field))?;
                 let range = date_range(value, start, field)?;
                 return Ok(Operand::Text(match field {
@@ -840,6 +943,7 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
             Some(Function::WholeWord) => return matched_as(TermMatch::WholeWords),
             Some(Function::WordStart) => return matched_as(TermMatch::WordStart),
             Some(Function::NameStart) => return matched_as(TermMatch::NameStart),
+            Some(Function::WholeName) => return whole_name(value, options),
             Some(Function::Regex) => {
                 return Ok(text_operand(regex_test(value, options.match_path)));
             }
@@ -871,14 +975,41 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
             None => return Err(QueryError::UnknownFunction(name.to_string())),
         }
     }
-    if let Some(angle) = word.angle {
-        return Err(QueryError::UnsupportedOperator(angle));
-    }
     // Only `""` is an empty word; it searches for the empty phrase, which
     // every name contains.
     let path_match = options.term_match.beyond_name_terms();
     let test = text_test(text, word.quote_at.is_some(), options, path_match)?;
     Ok(Operand::Text(test.unwrap_or(Test::Name(String::new()))))
+}
+
+fn whole_name(value: &str, options: &ParseOptions) -> Result<Operand, QueryError> {
+    let test = if let Some((modifier, pattern)) = value
+        .split_once(':')
+        .filter(|(modifier, _)| modifier.len() > 1)
+    {
+        if function_named(modifier) != Some(Function::Regex) {
+            return Err(QueryError::UnknownFunction(format!("wfn:{modifier}")));
+        }
+        if pattern.is_empty() {
+            return Ok(Operand::Nothing);
+        }
+        let match_path = options.match_path || has_escaped_backslash(pattern);
+        // Parse before anchoring so an extended-mode comment cannot swallow
+        // the closing group and anchor.
+        let expression = regex_syntax::ast::parse::Parser::new()
+            .parse(pattern)
+            .map_err(|error| QueryError::Malformed(Malformed::Regex(error.to_string())))?;
+        regex_test(&format!(r"\A(?:{expression})\z"), match_path)
+    } else {
+        let full_path = options.match_path || value.contains(['\\', '/']);
+        let text = if full_path {
+            path_text(value, options.working_dir)?
+        } else {
+            value.to_owned()
+        };
+        text_of(text, full_path, Form::Wildcard)
+    };
+    Ok(test.map_or(Operand::Nothing, Operand::Text))
 }
 
 /// The name and the value of a function term. The text before the word's
@@ -910,7 +1041,11 @@ fn function_named(name: &str) -> Option<Function> {
 fn extensions(value: &str) -> Extensions {
     let exts: Vec<String> = value
         .split(';')
-        .map(|ext| ext.trim_start_matches('.'))
+        .map(|ext| {
+            ext.strip_prefix("*.")
+                .unwrap_or(ext)
+                .trim_start_matches('.')
+        })
         .filter(|ext| !ext.is_empty())
         .map(str::to_string)
         .collect();
@@ -1063,8 +1198,6 @@ struct Word {
     /// Where in `text` the first quoted part starts; `None` when nothing is
     /// quoted. A function's name and colon lie before it.
     quote_at: Option<usize>,
-    /// The first unquoted `<` or `>`.
-    angle: Option<char>,
 }
 
 enum Lexeme {
@@ -1073,13 +1206,21 @@ enum Lexeme {
     Not,
     /// `|`
     Or,
+    Open,
+    Close,
 }
 
 impl Word {
     /// Whether the word so far is a `regex:` term, whose `|` and `!` belong
     /// to the expression, as in es, where `|` is the regex alternation.
     fn is_regex(&self) -> bool {
-        function_parts(self).is_some_and(|(name, _)| function_named(name) == Some(Function::Regex))
+        function_parts(self).is_some_and(|(name, value)| match function_named(name) {
+            Some(Function::Regex) => true,
+            Some(Function::WholeName) => value
+                .split_once(':')
+                .is_some_and(|(modifier, _)| function_named(modifier) == Some(Function::Regex)),
+            _ => false,
+        })
     }
 }
 
@@ -1099,8 +1240,10 @@ fn lex(input: &str) -> Result<Vec<Lexeme>, QueryError> {
             }
             continue;
         }
-        if matches!(ch, '|' | '!')
-            && let Some(regex) = word.as_mut().filter(|word| word.is_regex())
+        if matches!(ch, '|' | '!' | '<' | '>')
+            && let Some(regex) = word.as_mut().filter(|word| {
+                word.is_regex() && (!matches!(ch, '<' | '>') || word.quote_at.is_none())
+            })
         {
             regex.text.push(ch);
             continue;
@@ -1121,12 +1264,27 @@ fn lex(input: &str) -> Result<Vec<Lexeme>, QueryError> {
             '!' => {
                 return Err(QueryError::Malformed(Malformed::MisplacedNot));
             }
+            '<' | '>'
+                if !word.as_ref().is_some_and(|word| {
+                    function_parts(word).is_some_and(|(name, value)| {
+                        value.is_empty()
+                            && matches!(
+                                function_named(name),
+                                Some(Function::Size | Function::Date(_) | Function::Length(_))
+                            )
+                    })
+                }) =>
+            {
+                lexemes.extend(word.take().map(Lexeme::Word));
+                lexemes.push(if ch == '<' {
+                    Lexeme::Open
+                } else {
+                    Lexeme::Close
+                });
+            }
             c if c.is_whitespace() => lexemes.extend(word.take().map(Lexeme::Word)),
             c => {
                 let word = word.get_or_insert_default();
-                if matches!(c, '<' | '>') && word.angle.is_none() {
-                    word.angle = Some(c);
-                }
                 word.text.push(c);
             }
         }
@@ -1138,18 +1296,39 @@ fn lex(input: &str) -> Result<Vec<Lexeme>, QueryError> {
 /// A word after its `!` operators; an odd number of them negates it.
 struct Item {
     negated: bool,
-    word: Word,
+    value: Atom,
 }
 
+enum Atom {
+    Word(Word),
+    Group(Vec<Vec<Item>>),
+}
+
+const MAX_GROUP_DEPTH: usize = 32;
+
 /// The lexemes as groups of items joined by `|`; the query AND-s the groups.
-fn groups(lexemes: Vec<Lexeme>) -> Result<Vec<Vec<Item>>, QueryError> {
+fn parse_groups(
+    lexemes: &mut std::iter::Peekable<std::vec::IntoIter<Lexeme>>,
+    depth: usize,
+) -> Result<Vec<Vec<Item>>, QueryError> {
+    if depth > MAX_GROUP_DEPTH {
+        return Err(QueryError::GroupDepth(MAX_GROUP_DEPTH));
+    }
     let or_needs_terms = || QueryError::Malformed(Malformed::OrWithoutTerms);
     let mut groups: Vec<Vec<Item>> = Vec::new();
     let mut nots = 0usize;
     // After a `|`, the next word joins the last group.
     let mut joined = false;
-    for lexeme in lexemes {
+    let mut closed = false;
+    while let Some(lexeme) = lexemes.next() {
         match lexeme {
+            Lexeme::Close => {
+                if depth == 0 {
+                    return Err(QueryError::Malformed(Malformed::Grouping));
+                }
+                closed = true;
+                break;
+            }
             Lexeme::Not => nots += 1,
             Lexeme::Or => {
                 if groups.is_empty() || joined || nots > 0 {
@@ -1157,10 +1336,29 @@ fn groups(lexemes: Vec<Lexeme>) -> Result<Vec<Vec<Item>>, QueryError> {
                 }
                 joined = true;
             }
-            Lexeme::Word(word) => {
+            lexeme @ (Lexeme::Word(_) | Lexeme::Open) => {
+                let value = match lexeme {
+                    Lexeme::Word(word) => Atom::Word(word),
+                    Lexeme::Open => Atom::Group(parse_groups(lexemes, depth + 1)?),
+                    _ => unreachable!("only words and opening groups reach this arm"),
+                };
+                let value = match value {
+                    // Redundant AND groups must not restart ordered name
+                    // matching or turn a later filter into a separate rule.
+                    Atom::Group(inner)
+                        if nots.is_multiple_of(2)
+                            && !joined
+                            && !matches!(lexemes.peek(), Some(Lexeme::Or)) =>
+                    {
+                        groups.extend(inner);
+                        nots = 0;
+                        continue;
+                    }
+                    value => value,
+                };
                 let item = Item {
                     negated: nots % 2 == 1,
-                    word,
+                    value,
                 };
                 match groups.last_mut() {
                     Some(group) if joined => group.push(item),
@@ -1170,6 +1368,9 @@ fn groups(lexemes: Vec<Lexeme>) -> Result<Vec<Vec<Item>>, QueryError> {
                 joined = false;
             }
         }
+    }
+    if depth > 0 && (!closed || groups.is_empty()) {
+        return Err(QueryError::Malformed(Malformed::Grouping));
     }
     if joined {
         return Err(or_needs_terms());
@@ -1192,49 +1393,49 @@ fn parse_size(value: &str) -> Result<SizeRange, QueryError> {
         return Ok(word.range);
     }
 
+    parse_range(v, parse_bytes).ok_or_else(|| malformed(v))
+}
+
+fn parse_range(value: &str, number: impl Fn(&str) -> Option<u64>) -> Option<SizeRange> {
+    let v = value.trim();
+
     // Range a..b (either side optional).
     if let Some((lo, hi)) = v.split_once("..") {
-        let min = if lo.trim().is_empty() {
-            0
-        } else {
-            parse_bytes(lo).ok_or_else(|| malformed(lo))?
-        };
+        let min = if lo.trim().is_empty() { 0 } else { number(lo)? };
         let max = if hi.trim().is_empty() {
             u64::MAX
         } else {
-            parse_bytes(hi).ok_or_else(|| malformed(hi))?
+            number(hi)?
         };
-        return Ok(SizeRange { min, max });
+        return Some(SizeRange { min, max });
     }
 
     // Comparison operators. Order matters: two-char ops before their one-char
     // prefixes so `>=` is not read as `>` plus a stray `=`.
     for op in [">=", "<=", ">", "<"] {
         if let Some(rest) = v.strip_prefix(op) {
-            let n = parse_bytes(rest).ok_or_else(|| malformed(rest))?;
-            return Ok(match op {
-                ">=" => SizeRange {
+            let n = number(rest)?;
+            return Some(match (op, n) {
+                (">=", n) => SizeRange {
                     min: n,
                     max: u64::MAX,
                 },
-                ">" => SizeRange {
-                    min: n.saturating_add(1),
+                (">", u64::MAX) | ("<", 0) => SizeRange { min: 1, max: 0 },
+                (">", n) => SizeRange {
+                    min: n + 1,
                     max: u64::MAX,
                 },
-                "<=" => SizeRange { min: 0, max: n },
+                ("<=", n) => SizeRange { min: 0, max: n },
                 // The only remaining op.
-                _ => SizeRange {
-                    min: 0,
-                    max: n.saturating_sub(1),
-                },
+                _ => SizeRange { min: 0, max: n - 1 },
             });
         }
     }
 
     // Bare number or `=N` → exact.
     let rest = v.strip_prefix('=').unwrap_or(v);
-    let n = parse_bytes(rest).ok_or_else(|| malformed(v))?;
-    Ok(SizeRange { min: n, max: n })
+    let n = number(rest)?;
+    Some(SizeRange { min: n, max: n })
 }
 
 /// Parses `"10mb"` / `"1024"` / `"2gb"` into a byte count (1024-based units).
@@ -1503,18 +1704,17 @@ mod tests {
         }
     }
 
-    /// es groups terms with `<` and `>`, which gozler does not, and no name
-    /// contains them; in a function value they compare.
     #[test]
-    fn angle_brackets_are_refused_outside_a_function_value() {
-        assert_eq!(
-            parse_query("a<b"),
-            Err(QueryError::UnsupportedOperator('<'))
-        );
-        assert_eq!(
-            parse_query("<a b>|c"),
-            Err(QueryError::UnsupportedOperator('<'))
-        );
+    fn groups_preserve_comparisons_and_reject_unbalanced_or_empty_expressions() {
+        for query in ["a<b", "a>", "<>", "<a|>", "<a !>"] {
+            assert!(parse_query(query).is_err(), "{query}");
+        }
+        assert_eq!(parse_query("<<a b>|c>"), parse_query("a|c b|c"));
+        assert_eq!(parse_query("!<a b>"), parse_query("!a|!b"));
+        assert_eq!(parse_query("!<a|b>"), parse_query("!a !b"));
+        assert_eq!(parse_query("<size:<1kb>"), parse_query("size:<1kb"));
+        assert_eq!(parse_query(r#"<regex:"^a$">"#), parse_query("regex:^a$"));
+        assert_eq!(parse_query("<regex:^a$ >"), parse_query("regex:^a$"));
         assert_eq!(
             size("size:<1kb"),
             SizeRange {
@@ -1523,6 +1723,70 @@ mod tests {
             }
         );
         assert_eq!(tests("\"a<b\""), [name("a<b")]);
+    }
+
+    #[test]
+    fn groups_bound_nesting_and_boolean_expansion() {
+        let nested = format!(
+            "{}a{}",
+            "<".repeat(MAX_GROUP_DEPTH + 1),
+            ">".repeat(MAX_GROUP_DEPTH + 1)
+        );
+        assert_eq!(
+            parse_query(&nested),
+            Err(QueryError::GroupDepth(MAX_GROUP_DEPTH))
+        );
+        let expanded = std::iter::repeat_n("<a b>", 9)
+            .collect::<Vec<_>>()
+            .join("|");
+        assert!(matches!(
+            parse_query(&expanded),
+            Err(QueryError::TooManyTerms(_))
+        ));
+    }
+
+    #[test]
+    fn redundant_groups_preserve_ordered_words_and_last_wins_filters() {
+        let options = ParseOptions {
+            ordered_terms: true,
+            term_match: TermMatch::NameStart,
+            ..ParseOptions::default()
+        };
+        for text in ["red <blue green>", "<red> blue <green>"] {
+            assert_eq!(
+                parse_query_with(text, options),
+                parse_query_with("red blue green", options)
+            );
+        }
+        assert_eq!(parse_query("size:1 <size:2>"), parse_query("size:2"));
+    }
+
+    #[test]
+    fn explicit_index_filters_share_existing_semantics() {
+        assert_eq!(parse_query("ext:*.rs;*.txt"), parse_query("ext:rs;txt"));
+        assert_eq!(
+            parse_query(r"name:report full-path:C:\repo"),
+            parse_query(r"nopath:report path:C:\repo")
+        );
+        assert_eq!(
+            tests("size:unknown size:1"),
+            [Test::Size(SizeRange { min: 1, max: 1 })]
+        );
+        assert_eq!(
+            tests("size:1 size:unknown dm:unknown"),
+            [
+                Test::Unknown(Metadata::DateModified),
+                Test::Unknown(Metadata::Size)
+            ]
+        );
+        assert!(parse_query("namelen:1kb").is_err());
+        assert!(parse_query("<case:0 report> case:1").unwrap().match_case);
+        assert!(!parse_range("<0", |s| s.parse().ok()).unwrap().contains(0));
+        assert!(
+            !parse_range(">18446744073709551615", |s| s.parse().ok())
+                .unwrap()
+                .contains(u64::MAX)
+        );
     }
 
     /// Bug 2: an unknown function is refused, because searched as text it
@@ -1815,12 +2079,17 @@ mod tests {
                     "ww:",
                     "wordstart:",
                     "startwith:",
+                    "wfn:",
+                    "wfn:regex:",
                     "regex:",
                     "file:",
                     "folder:",
                     "case:",
                     "case:0",
                     "dm:",
+                    "child:",
+                    "unknown",
+                    "namelen:",
                     "..",
                     ">=",
                     "<",
@@ -1840,6 +2109,10 @@ mod tests {
                     "gb",
                     "tiny",
                     "today",
+                    "thisweek",
+                    "lastmonth",
+                    "nextyear",
+                    "last999999999days",
                     "days",
                     "-",
                 ])
@@ -1862,6 +2135,7 @@ mod tests {
                 latest in any::<bool>(),
             ) {
                 let start = QueryStart {
+                    week_start: jiff::civil::Weekday::Monday,
                     now: if latest { jiff::Timestamp::MAX } else { jiff::Timestamp::MIN },
                     time_zone: jiff::tz::TimeZone::UTC,
                 };

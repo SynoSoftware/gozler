@@ -36,6 +36,9 @@ fn main() -> std::process::ExitCode {
 
     let code = match run() {
         Ok(code) => code,
+        Err(Failure::Output { error, .. }) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+            ExitCode::Complete
+        }
         Err(failure) => {
             failure.report();
             failure.exit_code()
@@ -54,7 +57,7 @@ fn run() -> Result<ExitCode, Failure> {
         .collect::<Result<Vec<String>, Failure>>()?;
     match parse_argv(&args).map_err(Failure::Argv)? {
         Command::Overview => overview(),
-        Command::Help(screen) => print(&help(screen, console_color())),
+        Command::Help(screen) => print(&help(screen, console_color(), console_width())),
         Command::Version => print(&format!("{}\n", version())),
         Command::Run(plan) => execute(plan),
     }
@@ -89,6 +92,13 @@ fn console_color() -> bool {
     false
 }
 
+fn console_width() -> Option<usize> {
+    #[cfg(windows)]
+    return gozler_winfs::console_width();
+    #[cfg(not(windows))]
+    None
+}
+
 #[cfg(not(windows))]
 fn overview() -> Result<ExitCode, Failure> {
     Err(Failure::NotWindows)
@@ -102,7 +112,9 @@ mod win {
     use super::failure::{Failure, output};
     use super::overview::{Index, Service, render};
     use gozler_client::{CancelToken, Client, ClientError, folder_is_missing};
-    use gozler_core::escompat::{Answer, Count, EsPlan, ExitCode, ScopeFolder, build_search};
+    use gozler_core::escompat::{
+        Answer, Count, EsPlan, ExitCode, Report, ScopeFolder, build_search,
+    };
     use gozler_core::links::Links;
     use gozler_core::output::{ResultWriter, write_status};
     use gozler_core::proto::{DaemonStatus, PIPE_NAME};
@@ -144,6 +156,8 @@ mod win {
             ..EsPlan::default()
         };
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday
+                .wrapping_add(gozler_winfs::first_day_of_week()),
             now: jiff::Timestamp::now(),
             time_zone: jiff::tz::TimeZone::system(),
         };
@@ -169,9 +183,20 @@ mod win {
     }
 
     pub(crate) fn execute(plan: EsPlan) -> Result<ExitCode, Failure> {
-        if plan.status {
+        if let Some(report) = plan.report {
             let mut connection = connect(plan.insecure_no_server_check)?;
-            return status(&mut connection, plan.json);
+            return match report {
+                Report::Status => status(&mut connection, plan.json),
+                Report::ServerVersion => {
+                    let server = if plan.json {
+                        serde_json::to_string(connection.server())
+                            .expect("a string serializes as JSON")
+                    } else {
+                        connection.server().to_owned()
+                    };
+                    super::print(&format!("{server}\n"))
+                }
+            };
         }
         search(plan)
     }
@@ -180,6 +205,8 @@ mod win {
         resolve_drive_relative(&mut plan)?;
         let time_zone = jiff::tz::TimeZone::system();
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday
+                .wrapping_add(gozler_winfs::first_day_of_week()),
             now: jiff::Timestamp::now(),
             time_zone: time_zone.clone(),
         };

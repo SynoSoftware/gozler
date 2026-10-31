@@ -32,7 +32,7 @@ pub(crate) enum NameForm {
 }
 
 impl NameForm {
-    fn name_of(self, index: &VolumeIndex, idx: EntryIdx) -> &[u8] {
+    pub(super) fn name_of(self, index: &VolumeIndex, idx: EntryIdx) -> &[u8] {
         match self {
             NameForm::Raw => index.entry(idx).name(),
             NameForm::Folded => index.folded_name(idx),
@@ -60,6 +60,8 @@ struct Folder {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Ancestry {
     depth: usize,
+    /// The raw spelling's length, even when the cached path is folded.
+    pub(crate) utf16_len: usize,
     pub(crate) target: Option<(usize, usize)>,
 }
 
@@ -106,6 +108,7 @@ impl DirPaths {
             end: arena.len(),
             ancestry: Ancestry {
                 depth: 1,
+                utf16_len: crate::wtf8::utf16_len(root_name(mount_prefix)),
                 target: None,
             },
         };
@@ -150,8 +153,10 @@ impl DirPaths {
                 folder.depth += 1;
                 if !out.is_empty() {
                     out.push(b'\\');
+                    folder.utf16_len += 1;
                 }
                 out.extend_from_slice(self.form.name_of(index, idx));
+                folder.utf16_len += crate::wtf8::utf16_len(index.entry(idx).name());
                 if let Some(&number) = self.targets.get(&idx) {
                     folder.target = Some((number, out.len()));
                 }
@@ -219,8 +224,10 @@ impl DirPaths {
             }
             if !out.is_empty() {
                 out.push(b'\\');
+                ancestry.utf16_len += 1;
             }
             out.extend_from_slice(self.form.name_of(index, folder));
+            ancestry.utf16_len += crate::wtf8::utf16_len(index.entry(folder).name());
             if let Some(&number) = self.targets.get(&folder) {
                 ancestry.target = Some((number, out.len()));
             }

@@ -35,6 +35,7 @@ unicode-normalization = "0.1"
 # regex: and -r; linear time, so a pattern from any local user cannot hang
 # the daemon.
 regex = "1"
+regex-syntax = "0.8"
 # dm: and local dates: calendar days and daylight saving in a time zone.
 jiff = "0.2"
 # winfs
@@ -43,6 +44,7 @@ windows-sys = { version = "0.61", features = [
     "Wdk_Storage_FileSystem",
     "Wdk_System_SystemServices",
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_System_IO",

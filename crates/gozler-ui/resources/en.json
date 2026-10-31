@@ -380,7 +380,9 @@
     "switch": "Switch"
   },
   "query": {
-    "unsupported_operator": "Search terms can't be grouped with {0}. To search for it, put it in quotation marks.",
+    "group_depth": "Groups can nest up to {0} levels. Remove some groups.",
+    "grouping": "Use matching < and > around a nonempty search expression.",
+    "length": "{0} isn't a character count. Use a number, comparison or range, such as >100 or 10..100.",
     "unknown_function": "{0} isn't a search function. Press F1 to see them, or put the text in quotation marks to search for it.",
     "relative_path": "{0} is a relative path. Type the full path, such as C:\\Users\\Public.",
     "no_query_start": "Couldn't read the current date and time. Search again.",
@@ -969,6 +971,12 @@
     "copy_too_large_hex": "{0} is too large to copy. Copy takes files up to {1} as hex."
   },
   "message": {
+    "argument_missing": "Enter a value after {0}.",
+    "argument_value": "The value after {0} is not valid.",
+    "arguments_conflict": "These command-line options cannot be used together.",
+    "search_required": "Use matching and sorting options with --search.",
+    "arguments_too_long": "The request is too long. Use a shorter query or path.",
+    "handoff_failed": "The open window could not take this request. Try again shortly.",
     "internal_error": "Gozler had to close. The details are in {0}.",
     "settings_not_saved": "Couldn't save your settings to {0}. {1} Your changes apply until you exit.",
     "export_failed": "Couldn't save {0}. {1} Choose another folder or free up space, then export again.",

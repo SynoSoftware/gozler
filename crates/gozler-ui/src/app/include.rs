@@ -16,11 +16,6 @@ use std::io;
 use std::path::Path;
 use std::time::SystemTime;
 
-/// The argument that makes the window the copy that saves.
-pub(super) const SAVE_ARGUMENT: &str = "--save-include";
-/// The argument that makes the window the copy that asks for a rebuild.
-pub(super) const REBUILD_ARGUMENT: &str = "--rebuild-index";
-
 /// Windows' code for settings that do not parse.
 const ERROR_INVALID_DATA: i32 = 13;
 

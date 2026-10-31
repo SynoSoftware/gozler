@@ -380,7 +380,9 @@
     "switch": "Overschakelen"
   },
   "query": {
-    "unsupported_operator": "Zoektermen kunnen niet worden gegroepeerd met {0}. Zet het tussen aanhalingstekens om ernaar te zoeken.",
+    "group_depth": "Groepen kunnen tot {0} niveaus worden genest. Verwijder enkele groepen.",
+    "grouping": "Gebruik bij elkaar horende < en > rond een niet-lege zoekuitdrukking.",
+    "length": "{0} is geen aantal tekens. Gebruik een getal, vergelijking of bereik, zoals >100 of 10..100.",
     "unknown_function": "{0} is geen zoekfunctie. Druk op F1 om ze te bekijken, of zet de tekst tussen aanhalingstekens om ernaar te zoeken.",
     "relative_path": "{0} is een relatief pad. Typ het volledige pad, zoals C:\\Users\\Public.",
     "no_query_start": "Kan de huidige datum en tijd niet lezen. Zoek opnieuw.",
@@ -969,6 +971,12 @@
     "copy_too_large_hex": "{0} is te groot om te kopiëren. Kopiëren werkt voor bestanden tot {1} als hex."
   },
   "message": {
+    "argument_missing": "Voer een waarde in na {0}.",
+    "argument_value": "De waarde na {0} is niet geldig.",
+    "arguments_conflict": "Deze opdrachtregelopties kunnen niet samen worden gebruikt.",
+    "search_required": "Gebruik de opties voor overeenkomsten en sortering met --search.",
+    "arguments_too_long": "Het verzoek is te lang. Gebruik een kortere zoekopdracht of een korter pad.",
+    "handoff_failed": "Het geopende venster kon dit verzoek niet aannemen. Probeer het zo meteen opnieuw.",
     "internal_error": "Gozler moest worden gesloten. De details staan in {0}.",
     "settings_not_saved": "Kan uw instellingen niet opslaan in {0}. {1} Uw wijzigingen gelden totdat u afsluit.",
     "export_failed": "Kan {0} niet opslaan. {1} Kies een andere map of maak ruimte vrij en exporteer opnieuw.",

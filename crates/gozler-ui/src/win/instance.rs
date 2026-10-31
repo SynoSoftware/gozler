@@ -3,6 +3,7 @@
 //! exit (DESIGN.md: Window lifetime).
 
 use super::Hwnd;
+use crate::core::startup::{REQUEST_TAG, Request};
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
@@ -151,25 +152,28 @@ fn allow_foreground(window: Hwnd) {
 /// How long a second start waits for the first window to take a folder.
 const HAND_OVER_TIMEOUT_MS: u32 = 5_000;
 
-/// Lets the first window come to the front, and posts it `message`; with a
-/// `folder`, from `--location`, it sends `message`'s ID and the folder with
-/// `WM_COPYDATA` instead.
-pub(crate) fn hand_over(window: Hwnd, message: u32, folder: Option<&str>) {
+/// Hands a request to the first window, preserving the legacy Location tag.
+pub(crate) fn hand_over(window: Hwnd, message: u32, request: Option<&Request>) -> bool {
     allow_foreground(window);
-    let Some(folder) = folder else {
+    let Some(request) = request else {
         window.post(message);
-        return;
+        return true;
     };
-    let text: Vec<u16> = folder.encode_utf16().collect();
+    let (tag, text) = match request {
+        Request::Location(folder) => (message as usize, folder.clone()),
+        _ => (REQUEST_TAG, request.encode()),
+    };
+    let text: Vec<u16> = text.encode_utf16().collect();
     let data = COPYDATASTRUCT {
-        dwData: message as usize,
+        dwData: tag,
         cbData: (text.len() * 2) as u32,
         lpData: text.as_ptr().cast_mut().cast(),
     };
+    let mut answer = 0usize;
     // SAFETY: `data` and its text outlive the call, which Windows copies
     // into the first process; a window that does not answer in time is
     // left alone.
-    unsafe {
+    let sent = unsafe {
         SendMessageTimeoutW(
             window.0,
             WM_COPYDATA,
@@ -177,9 +181,10 @@ pub(crate) fn hand_over(window: Hwnd, message: u32, folder: Option<&str>) {
             LPARAM((&raw const data) as isize),
             SMTO_ABORTIFHUNG,
             HAND_OVER_TIMEOUT_MS,
-            None,
+            Some(&raw mut answer),
         )
     };
+    matches!(request, Request::Location(_)) || sent.0 != 0 && answer == 1
 }
 
 /// Lets the first window come to the front, sends it `message` and returns
