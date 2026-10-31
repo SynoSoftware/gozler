@@ -889,6 +889,12 @@ unsafe extern "system" fn procedure<W: WindowProc>(
     let _context = unsafe { super::watchdog::enter(msg, wparam, lparam) };
     // SAFETY: as above.
     let _update = unsafe { super::present::enter(hwnd, msg, lparam) };
+    if msg == WM_CTLCOLORSTATIC && super::present::is_cover(Hwnd(HWND(lparam.0 as *mut _))) {
+        // A bitmap static maps grey pixels to its background colour. Keep
+        // Windows' default, so the cover preserves the captured colours.
+        // SAFETY: the parameters are the ones Windows passed.
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    }
     if msg == WM_NCCREATE {
         // SAFETY: WM_NCCREATE's lparam is the CREATESTRUCTW of the
         // CreateWindowExW call, whose lpCreateParams is the Rc::into_raw

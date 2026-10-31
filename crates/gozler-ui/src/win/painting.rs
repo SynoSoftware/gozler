@@ -9,7 +9,7 @@ use std::path::Path;
 #[test]
 fn window_code_paints_only_where_the_owner_allowed() {
     let failures = misplaced(|code, file, function| {
-        !PAINTING.iter().any(|call| code.contains(call)) || allowed(file, function)
+        !PAINTING.iter().any(|call| contains_call(code, call)) || allowed(file, function)
     });
     assert!(
         failures.is_empty(),
@@ -18,6 +18,24 @@ fn window_code_paints_only_where_the_owner_allowed() {
          to `allowed`:\n{}",
         failures.join("\n")
     );
+}
+
+fn contains_call(code: &str, call: &str) -> bool {
+    if !call.ends_with('(') {
+        return code.contains(call);
+    }
+    code.match_indices(call).any(|(index, _)| {
+        index == 0
+            || !code[..index]
+                .ends_with(|character: char| character.is_alphanumeric() || character == '_')
+    })
+}
+
+#[test]
+fn painting_match_keeps_owner_draw_styles_and_excludes_other_method_names() {
+    assert!(contains_call("LVS_OWNERDRAWFIXED", "OWNERDRAW"));
+    assert!(contains_call("Rectangle(dc,0,0,10,10)", "Rectangle("));
+    assert!(!contains_call("fragment.BoundingRectangle()", "Rectangle("));
 }
 
 /// One owner decides when the main window's pixels appear (`win::present`):
@@ -265,6 +283,7 @@ fn presents(call: &str, file: &str, function: &str) -> bool {
         _ => matches!(
             (file, function),
             ("win/mod.rs", "set_text" | "focus")
+                | ("win/controls/list_view/accessibility.rs", "SetFocus")
                 | (
                     "win/controls.rs",
                     "set_enabled"
