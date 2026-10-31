@@ -15,7 +15,7 @@ version = "0.5.8"
 edition = "2024"
 rust-version = "1.94"
 license = "MIT"
-repository = "https://github.com/SynoSoftware/goz"
+repository = "https://github.com/SynoSoftware/gozler"
 authors = ["Synapse N.V.", "Mustafa Ahci"]
 
 [workspace.dependencies]

@@ -2,7 +2,6 @@
 //! (DESIGN.md: The General page), and its setup, for Download and install
 //! Gozler, with the setup's SHA-256 (DESIGN.md: Service fixes).
 
-use crate::core::update::{LATEST_RELEASE_HOST, LATEST_RELEASE_PATH};
 use std::io::{self, Read};
 use windows::Win32::Networking::WinHttp::{
     INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
@@ -45,8 +44,10 @@ impl Drop for Internet {
 /// GitHub's description of Gozler's latest release; `None` for any
 /// failure, which Check for updates ignores.
 pub(crate) fn latest_release() -> Option<String> {
+    let repository = env!("CARGO_PKG_REPOSITORY").strip_prefix("https://github.com/")?;
+    let path = format!("/repos/{repository}/releases/latest");
     let mut body = Vec::new();
-    read(LATEST_RELEASE_HOST, LATEST_RELEASE_PATH, &mut |piece| {
+    read("api.github.com", &path, &mut |piece| {
         body.extend_from_slice(piece);
         body.len() <= MOST_BYTES
     })?;

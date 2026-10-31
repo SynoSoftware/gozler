@@ -444,13 +444,16 @@ const NOTES: &[(Reader, &str)] = &[
     ),
     (
         Reader::CommandLine,
-        "JSON search results include readable local `mtime` and `created` dates \
-         beside `mtime_ft` and `created_ft`. Unknown dates are omitted. `total` \
-         counts every match; `more` is true when matching rows were left out. \
-         Check `volumes_incomplete`, `metadata_pending` and the exit code before \
-         treating an answer as complete. Warnings and errors go to stderr, not \
-         into JSON. See https://github.com/SynoSoftware/gozler/blob/main/docs/JSON.md \
-         for fields and script examples.",
+        concat!(
+            "JSON search results include readable local `mtime` and `created` dates \
+             beside `mtime_ft` and `created_ft`. Unknown dates are omitted. `total` \
+             counts every match; `more` is true when matching rows were left out. \
+             Check `volumes_incomplete`, `metadata_pending` and the exit code before \
+             treating an answer as complete. Warnings and errors go to stderr, not \
+             into JSON. See ",
+            env!("CARGO_PKG_REPOSITORY"),
+            "/blob/main/docs/JSON.md for fields and script examples."
+        ),
     ),
     (
         Reader::CommandLine,

@@ -275,7 +275,7 @@ Read on 2026-10-19 and 2026-10-20 from the repositories at the heads given,
 for the owner's ruling that an interrupted copy resumes inside a file. No
 tool read here resumes a file after a crash without slowing every copy, so
 the engine's resume (spec D10) is Gozler's own, proven by its tests;
-SynoSoftware/goz#80 tracks what to revisit.
+SynoSoftware/gozler#80 tracks what to revisit.
 
 | Tool | Resumes inside a file | Evidence |
 | --- | --- | --- |

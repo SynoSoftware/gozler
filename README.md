@@ -213,6 +213,6 @@ File operations run with your own permissions. Read the
 [SynoSoftware/gozler](https://github.com/SynoSoftware/gozler).
 It began as a fork of [goz v0.2.0](https://github.com/mustafaahci/goz)
 by Mustafa Ahci, who created the original index, daemon and historical
-benchmarks. Gozler means “eyes” in Turkish.
+benchmarks.
 
 Licensed under the [MIT License](LICENSE).

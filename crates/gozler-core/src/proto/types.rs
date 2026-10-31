@@ -623,7 +623,7 @@ mod tests {
     fn response_hello_round_trips() {
         rt_response(&Response::Hello {
             proto: PROTO_VERSION,
-            server: "gozd 0.1.0".into(),
+            server: "gozlerd 0.1.0".into(),
             ready: false,
         });
     }
@@ -786,14 +786,14 @@ mod tests {
     fn unknown_json_fields_are_ignored() {
         // Additive evolution: a newer peer may send fields we don't know.
         let resp: Response = serde_json::from_str(
-            r#"{"t":"Hello","proto":1,"server":"gozd","ready":true,"new_field":[1,2,3]}"#,
+            r#"{"t":"Hello","proto":1,"server":"gozlerd","ready":true,"new_field":[1,2,3]}"#,
         )
         .expect("top-level extra field");
         assert_eq!(
             resp,
             Response::Hello {
                 proto: 1,
-                server: "gozd".into(),
+                server: "gozlerd".into(),
                 ready: true
             }
         );
