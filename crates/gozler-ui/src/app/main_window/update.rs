@@ -14,6 +14,7 @@ impl MainWindow {
     /// nested accepted update owns later presentation; [`Message::Deferred`]
     /// repairs interrupted areas and delivers still-current work afterward.
     pub(super) fn apply(&self, hwnd: Hwnd, accepted: Accepted) {
+        self.cancel_stale_reveal();
         if accepted.touched == Areas::NONE && accepted.effects.is_empty() {
             self.retire_model();
             return;

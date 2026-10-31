@@ -55,8 +55,8 @@ use crate::core::layout::{
     MessageArea, Px, Rect, ScrollRequest, Size, StatusLayout, ToolHeights,
 };
 use crate::core::model::{
-    Accepted, Areas, Column, Effect, ExportError, ExportFormat, Instance, Job, Model, SaveScope,
-    ScopeCheck, SearchBoxEnter,
+    Accepted, Areas, Column, Effect, ExportError, ExportFormat, Instance, Job, Model, Navigation,
+    SaveScope, ScopeCheck, SearchBoxEnter,
 };
 use crate::core::open::{Commands, Entries, EntryAction, OpenRoute, Selected};
 use crate::core::operations::{
@@ -73,6 +73,7 @@ use crate::core::search_list::Deselect;
 use crate::core::selection::{DRAG_LIMIT, RowSelection, SELECTION_LIMIT, Selection, wide_path};
 use crate::core::settings::{Choices, Mode, SettingsPage, SettingsValues};
 use crate::core::shortcuts::{CommandShortcuts, ShowShortcut};
+use crate::core::startup::{REQUEST_TAG, Request as StartupRequest};
 use crate::core::text::{LanguageChoice, Numbers, Strings, Text, without_access_key};
 use crate::core::work::{Id, Retirement, Waiting};
 use crate::win::clipboard;
@@ -391,6 +392,15 @@ enum Ending {
     ForReset,
 }
 
+enum Reveal {
+    Checking(Navigation),
+    Reading {
+        origin: Navigation,
+        side: Side,
+        generation: u64,
+    },
+}
+
 pub(crate) struct MainWindow {
     created: OnceCell<Created>,
     model: RefCell<Model>,
@@ -402,6 +412,7 @@ pub(crate) struct MainWindow {
     settings_failure_shown: Cell<bool>,
     ending_session: Cell<bool>,
     show_message: u32,
+    reveal: RefCell<Option<Reveal>>,
     icons: Icons,
     /// Whether the status timer runs.
     polling: Cell<bool>,
@@ -507,6 +518,7 @@ impl OperationDelivery {
 /// applied, because its loop dispatches the next wakes (DESIGN.md: window
 /// rule 13).
 enum ModalStep {
+    Request(StartupRequest),
     /// Asks whether to download the setup that the fix found.
     ConfirmSetup,
     /// Says that the latest release has no setup to install.
@@ -553,6 +565,7 @@ impl MainWindow {
         settings_file: PathBuf,
         show_message: u32,
         sign_in: bool,
+        request: Option<StartupRequest>,
     ) -> (Hwnd, Rc<MainWindow>) {
         let placement = model.placement();
         let accelerators = accelerator_table(&model.choices().shortcuts, model.mode())
@@ -570,6 +583,7 @@ impl MainWindow {
             settings_failure_shown: Cell::new(false),
             ending_session: Cell::new(false),
             show_message,
+            reveal: RefCell::new(None),
             icons: Icons::default(),
             polling: Cell::new(false),
             update_revision: Cell::new(0),
@@ -605,11 +619,28 @@ impl MainWindow {
         win::present::set_main_window(hwnd);
         // Only a status reply names the volumes, so it is asked for beside
         // the first search (DESIGN.md: Requests).
-        window.search(hwnd, List::Search);
+        let starts_search = matches!(
+            request,
+            Some(StartupRequest::Search(_) | StartupRequest::Location(_))
+        );
+        if !starts_search {
+            window.search(hwnd, List::Search);
+        }
+        let reveal = match request {
+            Some(request @ StartupRequest::Reveal(_)) => Some(request),
+            Some(request) => {
+                window.apply_request(hwnd, request);
+                None
+            }
+            None => None,
+        };
         window.ask_status();
         if window.model.borrow().mode() == Mode::Commander {
             let accepted = window.controls().panels.start_panels(&window, hwnd);
             window.apply(hwnd, accepted);
+        }
+        if let Some(request) = reveal {
+            window.apply_request(hwnd, request);
         }
         if instance == Instance::First {
             window.shortcuts.start(&window, hwnd);
@@ -635,6 +666,103 @@ impl MainWindow {
     /// until the command it sends returns.
     pub(crate) fn accelerators(&self) -> Rc<Accelerators> {
         Rc::clone(&self.accelerators.borrow())
+    }
+
+    pub(super) fn request(&self, hwnd: Hwnd, request: StartupRequest) {
+        self.cancel_reveal();
+        self.modal_steps
+            .borrow_mut()
+            .retain(|step| !matches!(step, ModalStep::Request(_)));
+        self.defer(hwnd, ModalStep::Request(request));
+    }
+
+    fn apply_request(&self, hwnd: Hwnd, request: StartupRequest) {
+        self.cancel_reveal();
+        match request {
+            StartupRequest::Search(search) => {
+                let text = search.text.clone();
+                let accepted = self.model.borrow_mut().prepare_search(search);
+                self.controls().search.row.input.hwnd().set_text(&text);
+                self.apply(hwnd, accepted);
+            }
+            StartupRequest::Location(folder) => {
+                let mut accepted = self.model.borrow_mut().show_mode(Mode::Search);
+                let changed = self.model.borrow_mut().choose_folder(folder);
+                accepted.touched |= changed.touched;
+                accepted.effects.extend(changed.effects);
+                accepted
+                    .effects
+                    .retain(|effect| !matches!(effect, Effect::SearchAgain(_)));
+                accepted
+                    .effects
+                    .push(Effect::SearchAgain(vec![List::Search]));
+                self.apply(hwnd, accepted);
+            }
+            StartupRequest::Reveal(path) => {
+                self.reveal
+                    .replace(Some(Reveal::Checking(self.model.borrow().navigation())));
+                self.created().work.borrow_mut().shell.reveal(Selected {
+                    path: path.encode_utf16().collect(),
+                    is_folder: false,
+                });
+                self.poll_work(hwnd);
+            }
+        }
+    }
+
+    pub(super) fn cancel_reveal(&self) {
+        let revealing = self.reveal.borrow_mut().take();
+        self.created()
+            .work
+            .borrow_mut()
+            .shell
+            .cancel(ShellPurpose::Reveal);
+        if let Some(Reveal::Reading {
+            side, generation, ..
+        }) = revealing
+        {
+            let cancelled = self
+                .model
+                .borrow_mut()
+                .panels_mut()
+                .cancel_read(side, generation);
+            if cancelled {
+                self.created().work.borrow_mut().folders.cancel_read(side);
+                self.retire_model();
+            }
+        }
+        self.controls().panels.cancel_commander_reading(self);
+    }
+
+    fn cancel_stale_reveal(&self) {
+        if !self.controls().panels.entering_is_current(self) {
+            self.cancel_reveal();
+            return;
+        }
+        let (stale, completed) = {
+            let reveal = self.reveal.borrow();
+            let Some(reveal) = reveal.as_ref() else {
+                return;
+            };
+            let model = self.model.borrow();
+            match reveal {
+                Reveal::Checking(origin) => (!model.navigation_is_current(origin), false),
+                Reveal::Reading {
+                    origin,
+                    side,
+                    generation,
+                } => (
+                    !model.navigation_is_current(origin),
+                    model.panels().panel(*side).reading_generation() != Some(*generation)
+                        && self.controls().panels.entering_side().is_none(),
+                ),
+            }
+        };
+        if stale {
+            self.cancel_reveal();
+        } else if completed {
+            self.reveal.borrow_mut().take();
+        }
     }
 
     fn created(&self) -> &Created {
@@ -954,7 +1082,16 @@ impl MainWindow {
                 return None;
             }
         }
-        self.slow_global(Surface::Main)
+        self.slow_global(Surface::Main).or_else(|| {
+            self.controls().panels.entering_side()?;
+            let now = Instant::now();
+            let work = self.created().work.borrow();
+            Side::BOTH.into_iter().find_map(|side| {
+                (work.folders.waiting(side, now) == Some(Waiting::Slow)
+                    || work.panels.waiting(side, now) == Some(Waiting::Slow))
+                .then_some(Awaited::Listing(side))
+            })
+        })
     }
 
     pub(super) fn request_waiting(&self, purpose: Purpose, now: Instant) -> Option<Waiting> {
@@ -1010,7 +1147,13 @@ impl MainWindow {
             return false;
         };
         if awaited.can_cancel() {
-            self.created().work.borrow_mut().cancel_awaited(awaited);
+            if matches!(awaited, Awaited::Listing(_))
+                && self.controls().panels.entering_side().is_some()
+            {
+                self.cancel_reveal();
+            } else {
+                self.created().work.borrow_mut().cancel_awaited(awaited);
+            }
             self.poll_work(hwnd);
         }
         true
@@ -1859,6 +2002,7 @@ impl MainWindow {
                 CommandId::Refresh => {
                     return match mode {
                         Mode::Search => {
+                            self.cancel_reveal();
                             self.created().work.borrow_mut().lists.refresh_location();
                             self.search(hwnd, List::Search);
                         }
@@ -1984,6 +2128,8 @@ impl MainWindow {
     fn begin_search(&self, hwnd: Hwnd, list: List) -> Accepted {
         hwnd.kill_timer(Timer::Search(list).id());
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday
+                .wrapping_add(gozler_winfs::first_day_of_week()),
             now: jiff::Timestamp::now(),
             time_zone: jiff::tz::TimeZone::system(),
         };
@@ -2197,6 +2343,16 @@ impl MainWindow {
             let step = self.modal_steps.borrow_mut().pop_front();
             let Some(step) = step else { break };
             match step {
+                ModalStep::Request(request) => {
+                    if !hwnd.is_enabled() {
+                        self.modal_steps
+                            .borrow_mut()
+                            .push_front(ModalStep::Request(request));
+                        break;
+                    }
+                    self.apply_request(hwnd, request);
+                    self.show_window(hwnd);
+                }
                 ModalStep::ConfirmSetup => self.confirm_setup(hwnd),
                 ModalStep::ExplainNoSetup => self.explain_no_setup(hwnd),
                 ModalStep::ExportFailed { path, error } => {
@@ -2283,8 +2439,27 @@ impl MainWindow {
                     if !self.created().work.borrow().shell.is_current(purpose, id) {
                         continue;
                     }
+                    if purpose == ShellPurpose::Reveal {
+                        let current = match self.reveal.borrow_mut().take() {
+                            Some(Reveal::Checking(origin)) => {
+                                self.model.borrow().navigation_is_current(&origin)
+                            }
+                            _ => false,
+                        };
+                        if !current {
+                            continue;
+                        }
+                    }
                     if let Some(entry) = opened.commander {
-                        self.controls().panels.show_entry_in_commander(self, entry);
+                        let (side, generation) =
+                            self.controls().panels.show_entry_in_commander(self, entry);
+                        if purpose == ShellPurpose::Reveal {
+                            self.reveal.replace(Some(Reveal::Reading {
+                                origin: self.model.borrow().navigation(),
+                                side,
+                                generation,
+                            }));
+                        }
                         continue;
                     }
                     if purpose == ShellPurpose::Setup {
@@ -2767,6 +2942,8 @@ impl MainWindow {
             let accepted = self.model.borrow_mut().expire_request(purpose, generation);
             self.apply(hwnd, accepted);
         }
+        self.cancel_stale_reveal();
+        self.controls().panels.show_commander_after(self, hwnd);
         self.update_message();
         self.update_status();
         if self.model.borrow().mode() == Mode::Commander {
@@ -2991,7 +3168,10 @@ impl MainWindow {
             KeyAction::SearchBoxEnter => {
                 let enter = self.model.borrow_mut().enter_in_search_box();
                 match enter {
-                    SearchBoxEnter::Search => self.search(hwnd, List::Search),
+                    SearchBoxEnter::Search => {
+                        self.cancel_reveal();
+                        self.search(hwnd, List::Search);
+                    }
                     SearchBoxEnter::Enter => self.controls().search.enter_first_or_focused(self),
                     SearchBoxEnter::Wait => {}
                 }
@@ -3120,6 +3300,7 @@ impl MainWindow {
     /// Shows `entry` in Commander once its folder opens (DESIGN.md:
     /// Searching, "where Open goes").
     fn show_in_commander(&self, list: List, entry: Selected) {
+        self.cancel_reveal();
         self.created()
             .work
             .borrow_mut()
@@ -4198,8 +4379,13 @@ impl MainWindow {
 
     fn show_mode(&self, hwnd: Hwnd, mode: Mode) {
         if hwnd.is_enabled() {
-            let accepted = self.model.borrow_mut().show_mode(mode);
-            self.apply(hwnd, accepted);
+            self.cancel_reveal();
+            if mode == Mode::Commander && self.model.borrow().mode() == Mode::Search {
+                self.controls().panels.enter_commander(self, hwnd);
+            } else {
+                let accepted = self.model.borrow_mut().show_mode(mode);
+                self.apply(hwnd, accepted);
+            }
         }
         self.show_window(hwnd);
     }
@@ -4415,7 +4601,12 @@ impl MainWindow {
                 self.save_settings(true);
             }
             Timer::Work => self.poll_work(hwnd),
-            Timer::NativeSelection => self.continue_native_selections(hwnd),
+            Timer::NativeSelection => {
+                self.continue_native_selections(hwnd);
+                if self.update_live() {
+                    self.controls().panels.show_commander_after(self, hwnd);
+                }
+            }
             Timer::OperationDelivery => {
                 hwnd.kill_timer(timer.id());
                 self.operation_timer.set(false);
@@ -4512,6 +4703,9 @@ fn windows_reason(failure: WriteFailure) -> String {
 
 impl WindowProc for MainWindow {
     fn message(&self, hwnd: Hwnd, message: Message<'_>) -> Option<LRESULT> {
+        if self.created.get().is_some() && self.shutdown.borrow().is_none() {
+            self.cancel_stale_reveal();
+        }
         match message {
             Message::Create => Some(LRESULT(if self.on_create(hwnd) { 0 } else { -1 })),
             // Every other handler does nothing until WM_CREATE has made the
@@ -4951,18 +5145,31 @@ impl WindowProc for MainWindow {
                 }
                 Some(LRESULT(0))
             }
-            // A second start with `--location`, such as from Total Commander
-            // or a script (DESIGN.md: Window lifetime), shows Search, whose
-            // filter Location is (DESIGN.md: Commander mode's window).
             Message::CopyData { tag, text } if tag == self.show_message as usize => {
-                let accepted = self.model.borrow_mut().show_mode(Mode::Search);
-                self.apply(hwnd, accepted);
-                let accepted = self.model.borrow_mut().choose_folder(text);
-                self.apply(hwnd, accepted);
-                self.show_window(hwnd);
+                let request = StartupRequest::Location(text);
+                if request.validate().is_err() {
+                    return Some(LRESULT(0));
+                }
+                self.request(hwnd, request);
+                Some(LRESULT(1))
+            }
+            Message::CopyData {
+                tag: REQUEST_TAG,
+                text,
+            } => {
+                let Some(request) = StartupRequest::decode(&text) else {
+                    return Some(LRESULT(0));
+                };
+                self.request(hwnd, request);
                 Some(LRESULT(1))
             }
             Message::CopyData { .. } => None,
+            Message::Enabled(enabled) => {
+                if enabled {
+                    hwnd.post_deferred();
+                }
+                None
+            }
             Message::Other(msg) if msg == self.show_message => {
                 self.show_mode(hwnd, Mode::Search);
                 Some(LRESULT(0))

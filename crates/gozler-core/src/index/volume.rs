@@ -1870,6 +1870,16 @@ impl VolumeIndex {
         }
     }
 
+    pub(crate) fn children(&self, parent: EntryIdx) -> impl Iterator<Item = EntryIdx> + '_ {
+        std::iter::successors(
+            (self.entries.first_child(parent) != NIL).then(|| self.entries.first_child(parent)),
+            |&child| {
+                let next = self.entries.next_child(child);
+                (next != NIL).then_some(next)
+            },
+        )
+    }
+
     /// The invariant the child chains must uphold: every live entry with a
     /// parent appears exactly once in that parent's child chain, and chains
     /// contain nothing else. The model-op-tape proptest asserts this after

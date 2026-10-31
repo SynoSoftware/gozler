@@ -16,7 +16,7 @@ pub(crate) mod work;
 
 use crate::core::ids::IconId;
 use crate::core::model::{Instance, Model};
-use crate::core::settings::Mode;
+use crate::core::startup::{self, Arguments, Request};
 use crate::core::text::{LANGUAGES, Language, Strings};
 use crate::win;
 use main_window::MainWindow;
@@ -48,7 +48,14 @@ const SETTLE_POLL: Duration = Duration::from_millis(50);
 
 pub(crate) fn run() {
     install_panic_hook();
-    let arguments = Arguments::read();
+    let arguments = match read_arguments() {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            let strings = Strings::load(&LANGUAGES[0]);
+            win::dialog::error_box(None, &error.message(&strings), strings.text("window.title"));
+            std::process::exit(1);
+        }
+    };
     if arguments.unregister_shortcut {
         let result =
             win::work::spawn(|worker| win::shell::set_windows_shortcut_disabled(&[], worker))
@@ -83,7 +90,10 @@ pub(crate) fn run() {
     let first = loop {
         let first = win::instance::claim(&mutex).expect("a named mutex can be created");
         // A start at sign-in never opens a second window.
-        if first.is_some() || !(settings.choices.one_window || arguments.sign_in) {
+        if first.is_some()
+            || arguments.new_window
+            || !(settings.choices.one_window || arguments.sign_in)
+        {
             break first;
         }
         let Some(window) = win::instance::find(&window_class) else {
@@ -106,7 +116,7 @@ pub(crate) fn run() {
         let Some(process) =
             process.filter(|process| !arguments.sign_in && runs_another_program(process))
         else {
-            win::instance::hand_over(window, show_message, arguments.location.as_deref());
+            hand_over(window, show_message, arguments.request.as_ref());
             return;
         };
         match win::instance::ask(window, exit_message) {
@@ -119,7 +129,7 @@ pub(crate) fn run() {
             }
             Some(EXIT_STAYS) => return,
             _ => {
-                win::instance::hand_over(window, show_message, arguments.location.as_deref());
+                hand_over(window, show_message, arguments.request.as_ref());
                 return;
             }
         }
@@ -141,13 +151,7 @@ pub(crate) fn run() {
         .language
         .resolve(&win::locale::display_languages());
     set_panic_report(|report| report.language = Some(language));
-    let mut model = Model::new(Strings::load(language), settings, instance);
-    if let Some(folder) = arguments.location {
-        // The window's first search runs with it, in Search, whose filter
-        // Location is (DESIGN.md: Commander mode's window).
-        let _ = model.show_mode(Mode::Search);
-        let _ = model.choose_folder(folder);
-    }
+    let model = Model::new(Strings::load(language), settings, instance);
 
     win::window::register_class::<MainWindow>(
         &window_class,
@@ -162,6 +166,7 @@ pub(crate) fn run() {
         settings_file,
         show_message,
         arguments.sign_in,
+        arguments.request,
     );
     win::window::run_message_loop(hwnd, &|| window.accelerators());
     window.close_for_setup(hwnd);
@@ -175,6 +180,40 @@ pub(crate) fn run() {
             reset_and_start_again(&data_dir, given_data_dir.as_deref(), worker);
         })
         .join();
+    }
+}
+
+fn read_arguments() -> Result<Arguments, startup::Error> {
+    let mut arguments = Arguments::parse(std::env::args_os().skip(1))?;
+    if let Some(request) = &mut arguments.request {
+        let path = match request {
+            Request::Search(search) => search
+                .location
+                .as_mut()
+                .map(|folder| (folder, "--location")),
+            Request::Reveal(path) => Some((path, "--reveal")),
+            Request::Location(_) => None,
+        };
+        if let Some((path, option)) = path {
+            *path = std::path::absolute(&*path)
+                .map_err(|_| startup::Error::Value(option.into()))?
+                .to_string_lossy()
+                .into_owned();
+        }
+        request.validate()?;
+    }
+    Ok(arguments)
+}
+
+fn hand_over(window: win::Hwnd, message: u32, request: Option<&Request>) {
+    if !win::instance::hand_over(window, message, request) {
+        let strings = Strings::load(&LANGUAGES[0]);
+        win::dialog::error_box(
+            None,
+            strings.text("message.handoff_failed"),
+            strings.text("window.title"),
+        );
+        std::process::exit(1);
     }
 }
 
@@ -214,67 +253,6 @@ fn reset_and_start_again(
             &log,
             &format!("Reset all did not start Gozler again: {error}"),
         );
-    }
-}
-
-/// The command line: `--data-dir <folder>`, `--sign-in`, which the `Run`
-/// value passes, `--location <folder>`, which starts the search in that folder
-/// (DESIGN.md: Window lifetime), and `--save-include <file>` and
-/// `--rebuild-index`, which Settings passes to the copy it runs as
-/// administrator (DESIGN.md: The Include page, The Drives and service
-/// page). `--unregister-shortcut` restores Explorer's setting for uninstall.
-struct Arguments {
-    /// The folder of `ui.json` and `ui-error.log`; without it, `run` uses
-    /// `%LOCALAPPDATA%\Gozler`.
-    data_dir: Option<PathBuf>,
-    sign_in: bool,
-    location: Option<String>,
-    /// The Include settings to save, which Settings writes to this file
-    /// before it starts this copy as administrator.
-    save_include: Option<PathBuf>,
-    rebuild_index: bool,
-    unregister_shortcut: bool,
-}
-
-impl Arguments {
-    fn read() -> Arguments {
-        let mut arguments = Arguments {
-            data_dir: None,
-            sign_in: false,
-            location: None,
-            save_include: None,
-            rebuild_index: false,
-            unregister_shortcut: false,
-        };
-        let mut args = std::env::args_os().skip(1);
-        while let Some(arg) = args.next() {
-            if arg == "--data-dir" {
-                arguments.data_dir = args.next().map(PathBuf::from);
-            } else if arg == "--sign-in" {
-                arguments.sign_in = true;
-            } else if arg == "--unregister-shortcut" {
-                arguments.unregister_shortcut = true;
-            } else if arg == include::SAVE_ARGUMENT {
-                arguments.save_include = args.next().map(PathBuf::from);
-            } else if arg == include::REBUILD_ARGUMENT {
-                arguments.rebuild_index = true;
-            } else if arg == "--location" {
-                arguments.location = args
-                    .next()
-                    .map(|folder| location(&folder.to_string_lossy()));
-            }
-        }
-        arguments
-    }
-}
-
-/// The folder of `--location`. A program that quotes a drive's root, as
-/// `"C:\"`, passes `C:"`, because Windows reads `\"` as a quote; this gives
-/// back `C:\`.
-fn location(argument: &str) -> String {
-    match argument.strip_suffix('"') {
-        Some(drive) => format!(r"{drive}\"),
-        None => argument.to_owned(),
     }
 }
 
@@ -398,7 +376,7 @@ fn write_log(path: &Path, text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_another_program, location};
+    use super::is_another_program;
     use std::path::Path;
     use std::time::{Duration, SystemTime};
 
@@ -416,13 +394,5 @@ mod tests {
         assert!(is_another_program(renamed, started, this, before));
         let after = Some(started + Duration::from_secs(1));
         assert!(is_another_program(this, started, this, after));
-    }
-
-    /// A drive's "Search with Gozler" would otherwise set Location to
-    /// `C:"`, which does not exist.
-    #[test]
-    fn location_of_a_drive_root_keeps_its_backslash() {
-        assert_eq!(location("C:\""), r"C:\");
-        assert_eq!(location(r"C:\Users\ana"), r"C:\Users\ana");
     }
 }

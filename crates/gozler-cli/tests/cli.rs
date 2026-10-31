@@ -95,6 +95,7 @@ fn help_exits_0() {
     let out = gozler(["-help"]);
     assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
     assert!(!out.stdout.is_empty(), "the help goes to stdout");
+    assert!(!out.stdout.contains(&0x1b), "redirected help is plain text");
 }
 
 /// An argument that is not valid Unicode, such as an unpaired surrogate from

@@ -35,6 +35,7 @@ pub(crate) mod selection;
 pub(crate) mod settings;
 pub(crate) mod shortcuts;
 pub(crate) mod speed;
+pub(crate) mod startup;
 pub(crate) mod status_bar;
 pub(crate) mod status_transfer;
 pub(crate) mod synchronize;

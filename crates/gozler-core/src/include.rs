@@ -830,6 +830,7 @@ mod tests {
     #[test]
     fn dc_is_refused_while_dates_created_is_off() {
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -846,7 +847,9 @@ mod tests {
             ..IndexSettings::default()
         };
         assert!(off.allows(&parse("x dc:7days")).is_err());
+        assert!(off.allows(&parse("dc:unknown")).is_err());
         assert!(off.allows(&parse("x dm:7days")).is_ok());
         assert!(on.allows(&parse("x dc:7days")).is_ok());
+        assert!(on.allows(&parse("dc:unknown")).is_ok());
     }
 }

@@ -13,7 +13,7 @@ use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
 use crate::core::layout::column_sizing::{self, ColumnFit};
 use crate::core::layout::{Body, PanelLayout, Px, Rect};
-use crate::core::model::{Accepted, Areas, Effect, TakenShown};
+use crate::core::model::{Accepted, Areas, Effect, Navigation, TakenShown};
 use crate::core::open::{Entries, EntryAction};
 use crate::core::panel::{
     self, Entered, FolderChange, LookIn, PanelColumn, PanelFollow, PanelUpdate,
@@ -282,13 +282,16 @@ fn first_folder(side: Side) -> String {
 
 pub(super) struct Panels {
     pub(super) sides: [PanelControls; 2],
-    /// The reading that Show in Commander started while Search shows.
-    /// Commander mode shows when its listing arrives, so the panel appears
-    /// with the requested folder, not with the folder it showed before.
-    commander_reading: Cell<Option<Side>>,
+    /// Search stays visible until both panels have their initial listings.
+    entering: RefCell<Option<Entering>>,
     /// The mask that Select files… and Unselect files… show first: the
     /// last one chosen, while the window runs.
     select_mask: RefCell<String>,
+}
+
+struct Entering {
+    side: Side,
+    origin: Navigation,
 }
 
 impl Panels {
@@ -302,7 +305,7 @@ impl Panels {
                 PanelControls::create(parent, Side::Left)?,
                 PanelControls::create(parent, Side::Right)?,
             ],
-            commander_reading: Cell::new(None),
+            entering: RefCell::new(None),
             select_mask: RefCell::new("*.*".to_owned()),
         })
     }
@@ -896,7 +899,7 @@ impl Panels {
             touched: Areas::LEFT_PANEL | Areas::RIGHT_PANEL | Areas::STATUS | Areas::KEY_BAR,
             effects: Vec::new(),
         };
-        self.commander_reading.set(None);
+        self.entering.borrow_mut().take();
         window.created().work.borrow_mut().folders.stop_all();
         window.model.borrow_mut().panels_mut().stop_reading();
         for side in Side::BOTH {
@@ -949,6 +952,7 @@ impl Panels {
 
     pub(super) fn read(&self, window: &MainWindow, side: Side, ask: Option<ReadAsk>) {
         if let Some(ask) = ask {
+            window.cancel_stale_reveal();
             window.cancel_matching_selection(List::Panel(side));
             window.created().work.borrow_mut().folders.read(side, ask);
             window.retire_model();
@@ -1106,11 +1110,8 @@ impl Panels {
         side: Side,
         update: PanelUpdate,
     ) {
-        // The panel that Show in Commander reads while Search shows takes
-        // its rows before Commander mode shows it.
-        if window.model.borrow().mode() != Mode::Commander
-            && self.commander_reading.get() != Some(side)
-        {
+        // Both panels take their initial rows while Search still shows.
+        if window.model.borrow().mode() != Mode::Commander && self.entering.borrow().is_none() {
             return;
         }
         let shown = &update.before;
@@ -1177,7 +1178,7 @@ impl Panels {
         window.release_operations();
         // Every listing arrives here, also one calculated in the background.
         if listed {
-            self.show_commander_after(window, hwnd, side);
+            self.show_commander_after(window, hwnd);
         }
     }
 
@@ -1262,11 +1263,10 @@ impl Panels {
                 reason,
                 typed,
             } => {
-                if self.commander_reading.get() == Some(side) {
+                if self.entering_side() == Some(side) {
                     // The person stays in Search, where a panel watches
                     // nothing; it reads its folder when Commander mode shows.
-                    self.commander_reading.set(None);
-                    window.created().work.borrow_mut().folders.cancel_read(side);
+                    self.cancel_commander_reading(window);
                 } else {
                     // Starting the refused reading ended the shown folder's
                     // watch, so the panel reads its folder again, which keeps
@@ -1299,15 +1299,27 @@ impl Panels {
             .reading_generation()
             .is_none()
         {
-            self.show_commander_after(window, hwnd, side);
+            self.show_commander_after(window, hwnd);
         }
     }
 
-    /// Shows Commander mode when `side`'s reading is the one Show in
-    /// Commander started from Search.
-    fn show_commander_after(&self, window: &MainWindow, hwnd: Hwnd, side: Side) {
-        if self.commander_reading.get() == Some(side) {
-            self.commander_reading.set(None);
+    pub(super) fn show_commander_after(&self, window: &MainWindow, hwnd: Hwnd) {
+        if !self.entering_is_current(window) {
+            window.cancel_reveal();
+            return;
+        }
+        if let Some(side) = self.entering_side() {
+            let ready = {
+                let model = window.model.borrow();
+                Side::BOTH.into_iter().all(|side| {
+                    let panel = model.panels().panel(side);
+                    !matches!(panel.view(), View::Reading) && !panel.rows_pending()
+                })
+            };
+            if !ready {
+                return;
+            }
+            self.entering.borrow_mut().take();
             let shown = window.model.borrow_mut().show_mode(Mode::Commander);
             window.apply(hwnd, shown);
             // The listing scrolled while the list was hidden and had no
@@ -1494,9 +1506,7 @@ impl Panels {
         else {
             return;
         };
-        if let Some(search) = window.model.borrow_mut().panels_mut().search_mut(side) {
-            search.look_in = *chosen;
-        }
+        window.model.borrow_mut().set_look_in(side, *chosen);
         window.search(hwnd, List::Panel(side));
         self.show_panel(window, side);
     }
@@ -1694,7 +1704,47 @@ impl Panels {
         self.read(window, side, Some(ask));
     }
 
-    pub(super) fn show_entry_in_commander(&self, window: &MainWindow, entry: Selected) {
+    pub(super) fn entering_side(&self) -> Option<Side> {
+        self.entering
+            .borrow()
+            .as_ref()
+            .map(|entering| entering.side)
+    }
+
+    pub(super) fn entering_is_current(&self, window: &MainWindow) -> bool {
+        self.entering.borrow().as_ref().is_none_or(|entering| {
+            window
+                .model
+                .borrow()
+                .navigation_is_current(&entering.origin)
+        })
+    }
+
+    pub(super) fn cancel_commander_reading(&self, window: &MainWindow) {
+        if self.entering.borrow_mut().take().is_some() {
+            window.created().work.borrow_mut().folders.stop_all();
+            window.model.borrow_mut().panels_mut().stop_reading();
+            window.retire_model();
+        }
+    }
+
+    pub(super) fn enter_commander(&self, window: &MainWindow, hwnd: Hwnd) {
+        let accepted = self.start_panels(window, hwnd);
+        let (side, origin) = {
+            let model = window.model.borrow();
+            (model.panels().active(), model.navigation())
+        };
+        self.entering.replace(Some(Entering { side, origin }));
+        window.apply(hwnd, accepted);
+        self.show_commander_after(window, hwnd);
+    }
+
+    pub(super) fn show_entry_in_commander(
+        &self,
+        window: &MainWindow,
+        entry: Selected,
+    ) -> (Side, u64) {
+        self.cancel_commander_reading(window);
         let path = String::from_utf16_lossy(&entry.path);
         let (path, focus) = if entry.is_folder {
             (path, None)
@@ -1709,10 +1759,12 @@ impl Panels {
         };
         let side = window.model.borrow().panels().active();
         let ask = window.model.borrow_mut().panels_mut().go(side, path, focus);
-        if window.model.borrow().mode() == Mode::Search {
-            self.commander_reading.set(Some(side));
-        }
+        let generation = ask.generation;
         self.read(window, side, Some(ask));
+        if window.model.borrow().mode() == Mode::Search {
+            self.enter_commander(window, self.panel(side).list.hwnd().parent());
+        }
+        (side, generation)
     }
 
     /// A character typed in a panel's list: quick search (DESIGN.md: Quick

@@ -44,6 +44,8 @@ mod journal;
 #[cfg(windows)]
 mod links;
 #[cfg(windows)]
+mod locale;
+#[cfg(windows)]
 mod pipe_client;
 #[cfg(windows)]
 mod pipe_sd;
@@ -78,7 +80,9 @@ pub use clock::{
     awake_time, own_process_cycles, process_cycles, program_linked, system_time, thread_cycles,
 };
 #[cfg(windows)]
-pub use console::enable_console_color;
+pub use console::{console_width, enable_console_color};
+#[cfg(windows)]
+pub use locale::first_day_of_week;
 #[cfg(windows)]
 pub use working_set::{SelfMemory, pin_working_set, self_memory, trim_working_set};
 

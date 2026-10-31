@@ -1,6 +1,7 @@
 //! Accepted service-setting and rebuild writes run to completion without owning a UI HWND.
 
-use crate::app::include::{Elevated, NotSaved, REBUILD_ARGUMENT, SAVE_ARGUMENT};
+use crate::app::include::{Elevated, NotSaved};
+use crate::core::startup::{REBUILD_ARGUMENT, SAVE_ARGUMENT};
 use crate::core::work::{Replacement, Retirement, Waiting};
 use crate::win;
 use crate::win::wake::OpenWaker;

@@ -7,7 +7,7 @@
 //! it holds for the window's search box.
 
 use super::ExitCode;
-use super::argv::{Group, HelpScreen, SORT_KEYS, SWITCHES, Spelling};
+use super::argv::{Group, HelpScreen, SORT_KEYS, SWITCHES, Spelling, match_native, match_switch};
 use crate::attributes::LETTERS;
 use crate::output::style::{ColorToken, paint};
 use crate::query::parse::SEARCH_FUNCTIONS;
@@ -50,17 +50,46 @@ pub fn version() -> &'static str {
 }
 
 /// The help screen a [`Command::Help`](super::Command::Help) asks for, with
-/// ANSI colors when `color` is set.
-pub fn help(screen: HelpScreen, color: bool) -> String {
+/// ANSI colors when `color` is set. The full reference uses `columns`, or
+/// 80 columns without a console, leaving one column free to avoid auto-wrap.
+pub fn help(screen: HelpScreen, color: bool, columns: Option<usize>) -> String {
+    let line_width = match screen {
+        HelpScreen::Quick => DEFAULT_LINE_WIDTH,
+        HelpScreen::Full => {
+            columns.map_or(DEFAULT_LINE_WIDTH, |width| width.saturating_sub(1).max(1))
+        }
+    };
     let mut out = String::new();
-    paint(
+    let title = format!("gozler {}", version());
+    if screen == HelpScreen::Full {
+        wrap_usage(
+            &mut out,
+            0,
+            &title,
+            Usage::Styled(ColorToken::Strong),
+            color,
+            line_width,
+        );
+        wrap(
+            &mut out,
+            0,
+            "Instant file search for Windows NTFS and ReFS",
+            0,
+            color,
+            line_width,
+        );
+    } else {
+        paint(&mut out, ColorToken::Strong, &title, color);
+        out.push_str(" - Instant file search for Windows NTFS and ReFS\n");
+    }
+    out.push_str("Usage: ");
+    wrap_usage(
         &mut out,
-        ColorToken::Strong,
-        &format!("gozler {}", version()),
+        7,
+        "gozler [options] [search terms]",
+        Usage::Command,
         color,
-    );
-    out.push_str(
-        " - Instant file search for Windows NTFS and ReFS\nUsage: gozler [options] [search terms]\n",
+        line_width,
     );
     match screen {
         HelpScreen::Quick => {
@@ -68,24 +97,24 @@ pub fn help(screen: HelpScreen, color: bool) -> String {
             let examples: Vec<Entry> = EXAMPLES
                 .iter()
                 .filter(|example| example.quick)
-                .map(|example| entry(example.usage.to_string(), example.text))
+                .map(|example| command(example.usage.to_string(), example.text))
                 .collect();
-            render(&mut out, &examples, QUICK_EXAMPLE_COLUMN, color);
+            render(&mut out, &examples, color, line_width);
             out.push('\n');
-            wrap(&mut out, 0, QUICK_QUOTING, 0, color);
+            wrap(&mut out, 0, QUICK_QUOTING, 0, color, line_width);
             quick_exit_codes(&mut out, color);
             out.push_str("For every option, search function and exit code, run ");
-            paint(&mut out, ColorToken::Primary, "gozler --help", color);
+            syntax(&mut out, "gozler --help", Usage::Command, color);
             out.push_str(".\n");
         }
         HelpScreen::Full => {
             out.push_str("\n  ");
-            wrap(&mut out, 2, INTRO, 2, color);
+            wrap(&mut out, 2, INTRO, 2, color, line_width);
             for section in full_sections() {
-                render_section(&mut out, &section, color);
+                render_section(&mut out, &section, color, line_width);
             }
-            render_notes(&mut out, Reader::CommandLine, color);
-            render_section(&mut out, &exit_codes(&ExitCode::ALL), color);
+            render_notes(&mut out, Reader::CommandLine, color, line_width);
+            render_section(&mut out, &exit_codes(&ExitCode::ALL), color, line_width);
         }
     }
     // A blank line before the shell's next prompt.
@@ -106,7 +135,7 @@ fn quick_exit_codes(out: &mut String, color: bool) {
     code(out, ExitCode::Complete);
     out.push_str(" when done, ");
     code(out, ExitCode::Incomplete);
-    out.push_str(" if results may be incomplete, ");
+    out.push_str(" if results may be missing, ");
     code(out, ExitCode::Truncated);
     out.push_str(" if some are hidden.\n");
 }
@@ -227,7 +256,10 @@ const EXAMPLES: &[Example] = &[
         r"gozler -get-folder-size C:\repo",
         r"Show the total size of everything in C:\repo",
     ),
-    full_only("gozler --json report", "Print the matches as JSON"),
+    full_only(
+        "gozler --json -n 0 report",
+        "Count matches as JSON without fetching rows",
+    ),
     full_only(
         "gozler -timeout 5000 -no-result-error report",
         "Wait up to 5 seconds for indexing, and exit 9 if nothing matches",
@@ -241,6 +273,10 @@ const SEARCH_TERMS: &[(&str, &str)] = &[
     ("\"two words\"", "Name contains the phrase"),
     ("!test", "Name does not contain test"),
     ("a|b", "Either term; `|` binds tighter than a space"),
+    (
+        "<a b>|<c d>",
+        "Both a and b, or both c and d; `!<a b>` negates a group",
+    ),
     (r"C:\repo\", "Everything below that folder"),
     ("ext:cs;txt", "Extension is cs or txt"),
     ("dm:7days", "Modified in the last 7 days"),
@@ -299,15 +335,22 @@ enum Reader {
 const NOTES: &[(Reader, &str)] = &[
     (
         Reader::CommandLine,
-        "Options start with `-` or `/`, and dashes inside an option name are \
-         optional. A token that starts with / and names an option is that \
-         option, as `/p` is `-p`, so write a relative path without a leading `/`: \
-         `docs/agents`.",
+        "Single-dash options also accept `/`, and dashes inside their names are \
+         optional. Double-dash options must be written exactly as listed. \
+         A recognized `/` option is an option, as `/p` is `-p`, so write a relative \
+         path without a leading `/`: `docs/agents`.",
     ),
     (
         Reader::CommandLine,
         "gozler joins its arguments with spaces and splits them into terms again, \
-         so the single argument `\"ext:cs report\"` is two terms.",
+         so the single argument `\"ext:cs report\"` is two terms. A bare `--` is \
+         search text; it does not end option parsing.",
+    ),
+    (
+        Reader::CommandLine,
+        "`/ad` finds folders, `/a-d` files. Prefix each unwanted attribute letter \
+         with `-`: `/a-h-s` excludes hidden and system; `/a-hs` excludes hidden \
+         and requires system.",
     ),
     (
         Reader::CommandLine,
@@ -319,9 +362,10 @@ const NOTES: &[(Reader, &str)] = &[
     (
         Reader::CommandLine,
         "When a volume in scope is not ready (indexing, rescanning, offline or \
-         failed), gozler prints the results it has, warns on stderr and exits 2. With `-path`, only the \
-         volume of that folder is in scope. `--status` exits 2 when any volume is not \
-         ready or its sizes and dates could not be read.",
+         failed), gozler prints the results it has, warns on stderr and exits 2. With `-path`, \
+         scope includes volumes reached through folder mounts and links. `--status` \
+         exits 2 when any volume is not ready or its sizes and dates could not be read. \
+         With both `--status` and `--server-version`, the last report wins.",
     ),
     (
         Reader::CommandLine,
@@ -337,8 +381,21 @@ const NOTES: &[(Reader, &str)] = &[
     ),
     (
         Reader::Both,
-        "Files whose size or date Windows did not report never match `size:` or \
-         `dm:`, even negated.",
+        "Sizes use 1,024-based units: `size:1kb` and `size:=1kb` both mean exactly \
+         1,024 bytes. Use comparisons or a range such as `size:1kb..2kb` for other sizes.",
+    ),
+    (
+        Reader::Both,
+        "Missing sizes and dates never match numeric or date comparisons, even \
+         negated. Use `size:unknown`, `dm:unknown` or `dc:unknown` to find them. \
+         A folder with only a lower-bound size also matches `size:unknown`.",
+    ),
+    (
+        Reader::Both,
+        "Use `<` and `>` to group expressions, and `!` to negate a group. \
+         Put a space after an unquoted regular expression before a closing `>`, \
+         or quote the expression, so `>` is not read as part of the pattern. \
+         Nesting and expanded query terms are bounded.",
     ),
     (
         Reader::CommandLine,
@@ -362,9 +419,13 @@ const NOTES: &[(Reader, &str)] = &[
     ),
     (
         Reader::Both,
-        "`dm:today`, `dm:yesterday` and `dm:YYYY-MM-DD` are calendar days in the local \
-         time zone. `7days` is the 7 times 24 hours before the search starts, and `dm:<30days` finds files older than 30 \
-         days.",
+        "Dates use local time. `today`, `yesterday` and `tomorrow` are calendar days. \
+         `this`, `last` and `next` before `week`, `month` or `year` select a calendar \
+         period; weeks start on the first day set in Windows. `current` means `this`, \
+         `past` and `prev` mean `last`, and `coming` means `next`. \
+         `7days` and `last7days` are the 7 times 24 hours before the search starts; \
+         `1weeks` is the same duration. `10minutes` and `2hours` count back from \
+         the search start. `dm:<30days` finds files older than 30 days.",
     ),
     (
         Reader::CommandLine,
@@ -383,8 +444,18 @@ const NOTES: &[(Reader, &str)] = &[
     ),
     (
         Reader::CommandLine,
-        "An unknown search function, such as `dc:`, and an unquoted `<` or `>` outside a \
-         function value are invalid input and exit 4.",
+        "JSON search results include readable local `mtime` and `created` dates \
+         beside `mtime_ft` and `created_ft`. Unknown dates are omitted. `total` \
+         counts every match; `more` is true when matching rows were left out. \
+         Check `volumes_incomplete`, `metadata_pending` and the exit code before \
+         treating an answer as complete. Warnings and errors go to stderr, not \
+         into JSON. See https://github.com/SynoSoftware/gozler/blob/main/docs/JSON.md \
+         for fields and script examples.",
+    ),
+    (
+        Reader::CommandLine,
+        "An unknown search function, such as `unknown:`, or an unbalanced or empty \
+         group is invalid input and exits 4.",
     ),
 ];
 
@@ -401,16 +472,21 @@ const GROUPS: [(Group, &str); 5] = [
 struct Section {
     title: &'static str,
     entries: Vec<Entry>,
-    /// A usage longer than this puts its text on the next line.
-    usage_column: usize,
 }
 
 /// One help line: what to type, and what it does.
 struct Entry {
     usage: String,
     text: &'static str,
-    /// The color of the usage.
-    token: ColorToken,
+    usage_kind: Usage,
+}
+
+#[derive(Clone, Copy)]
+enum Usage {
+    Expression,
+    Command,
+    Options,
+    Styled(ColorToken),
 }
 
 /// The examples that use no option, the search terms, the search functions,
@@ -434,9 +510,9 @@ pub fn search_syntax() -> String {
         search_functions(),
         attribute_letters("Attribute letters:"),
     ] {
-        render_section(&mut out, &section, false);
+        render_section(&mut out, &section, false, DEFAULT_LINE_WIDTH);
     }
-    render_notes(&mut out, Reader::SearchBox, false);
+    render_notes(&mut out, Reader::SearchBox, false, DEFAULT_LINE_WIDTH);
     // Each section starts with a blank line, which the first one does not
     // need.
     out.remove(0);
@@ -447,20 +523,20 @@ pub fn search_syntax() -> String {
 fn full_sections() -> Vec<Section> {
     let examples = EXAMPLES
         .iter()
-        .map(|example| entry(example.usage.to_string(), example.text))
+        .map(|example| command(example.usage.to_string(), example.text))
         .collect();
     let mut sections = vec![
-        Section {
-            usage_column: EXAMPLE_COLUMN,
-            ..section("Examples:", examples)
-        },
+        section("Examples:", examples),
         search_terms(
             "Search syntax (what gozler receives; quote it for the shell as shown below):",
         ),
-        Section {
-            usage_column: EXAMPLE_COLUMN,
-            ..section("Quoting in the shell:", pairs(QUOTING))
-        },
+        section(
+            "Quoting in the shell:",
+            QUOTING
+                .iter()
+                .map(|&(usage, text)| command(usage.to_string(), text))
+                .collect(),
+        ),
         search_functions(),
         attribute_letters("Attribute letters (for attrib: and /a):"),
     ];
@@ -468,7 +544,10 @@ fn full_sections() -> Vec<Section> {
         let options = SWITCHES
             .iter()
             .filter(|switch| switch.group == group)
-            .map(|switch| entry(switch_usage(&switch.spelling), switch.help))
+            .map(|switch| Entry {
+                usage_kind: Usage::Options,
+                ..entry(switch_usage(&switch.spelling), switch.help)
+            })
             .collect();
         sections.push(section(title, options));
         if group == Group::LimitAndSort {
@@ -529,7 +608,7 @@ fn exit_codes(codes: &[ExitCode]) -> Section {
         codes
             .iter()
             .map(|&code| Entry {
-                token: code.token(),
+                usage_kind: Usage::Styled(code.token()),
                 ..entry(code.code().to_string(), code.meaning())
             })
             .collect(),
@@ -541,16 +620,19 @@ fn entry(usage: String, text: &'static str) -> Entry {
     Entry {
         usage,
         text,
-        token: ColorToken::Primary,
+        usage_kind: Usage::Expression,
+    }
+}
+
+fn command(usage: String, text: &'static str) -> Entry {
+    Entry {
+        usage_kind: Usage::Command,
+        ..entry(usage, text)
     }
 }
 
 fn section(title: &'static str, entries: Vec<Entry>) -> Section {
-    Section {
-        title,
-        entries,
-        usage_column: USAGE_COLUMN,
-    }
+    Section { title, entries }
 }
 
 /// The forms of a switch the help lists, such as `-n N, -max-results N`.
@@ -569,73 +651,184 @@ fn switch_usage(spelling: &Spelling) -> String {
     }
 }
 
-/// A usage longer than this puts its text on the next line.
-const USAGE_COLUMN: usize = 24;
-/// [`USAGE_COLUMN`] for the examples, whose usage is a whole command line.
-const EXAMPLE_COLUMN: usize = 30;
-/// [`EXAMPLE_COLUMN`] for the quick help, which is only examples, so every
-/// one of them keeps its text on its line.
-const QUICK_EXAMPLE_COLUMN: usize = 36;
-/// The width the help wraps text to, so it fits an 80-column console.
-const LINE_WIDTH: usize = 79;
+/// The quick help and non-console text fit an 80-column console.
+const DEFAULT_LINE_WIDTH: usize = 79;
 
 /// Writes the section's title and its entries, after a blank line.
-fn render_section(out: &mut String, section: &Section, color: bool) {
+fn render_section(out: &mut String, section: &Section, color: bool, line_width: usize) {
     out.push('\n');
-    paint(out, ColorToken::Strong, section.title, color);
-    out.push('\n');
-    render(out, &section.entries, section.usage_column, color);
+    wrap_usage(
+        out,
+        0,
+        section.title,
+        Usage::Styled(ColorToken::Strong),
+        color,
+        line_width,
+    );
+    render(out, &section.entries, color, line_width);
 }
 
 /// Writes the notes for `reader` and for both helps, after a blank line.
-fn render_notes(out: &mut String, reader: Reader, color: bool) {
+fn render_notes(out: &mut String, reader: Reader, color: bool, line_width: usize) {
     out.push('\n');
-    paint(out, ColorToken::Strong, "Notes:", color);
-    out.push('\n');
+    wrap_usage(
+        out,
+        0,
+        "Notes:",
+        Usage::Styled(ColorToken::Strong),
+        color,
+        line_width,
+    );
     for &(_, note) in NOTES
         .iter()
         .filter(|(note_reader, _)| [reader, Reader::Both].contains(note_reader))
     {
         out.push_str("  - ");
-        wrap(out, 4, note, 4, color);
+        wrap(out, 4, note, 4, color, line_width);
     }
 }
 
-/// Writes `entries` as two columns: the usage, in its token's color when
-/// `color` is set, and its text wrapped beside it.
-fn render(out: &mut String, entries: &[Entry], usage_column: usize, color: bool) {
-    let width = entries
+/// Uses one description column for the whole section, stacking every row
+/// when the longest usage would leave less than 24 columns for descriptions.
+fn render(out: &mut String, entries: &[Entry], color: bool, line_width: usize) {
+    let width = entries.iter().map(|e| e.usage.len()).max().unwrap_or(0) + 2;
+    let longest = entries
         .iter()
-        .map(|e| e.usage.len())
-        .filter(|&len| len <= usage_column)
+        .flat_map(|entry| entry.text.split(' '))
+        .map(word_width)
         .max()
-        .unwrap_or(0)
-        + 2;
+        .unwrap_or(0);
+    let indent = if 2 + width + longest.max(24) > line_width {
+        2
+    } else {
+        2 + width
+    };
     for entry in entries {
         out.push_str("  ");
-        paint(out, entry.token, &entry.usage, color);
-        if entry.usage.len() < width {
+        if indent > 2 {
+            syntax(out, &entry.usage, entry.usage_kind, color);
             out.push_str(&" ".repeat(width - entry.usage.len()));
         } else {
-            out.push('\n');
-            out.push_str(&" ".repeat(2 + width));
+            wrap_usage(out, 2, &entry.usage, entry.usage_kind, color, line_width);
+            out.push_str(&" ".repeat(indent));
         }
-        wrap(out, 2 + width, entry.text, 2 + width, color);
+        let mut description = String::new();
+        wrap(
+            &mut description,
+            indent,
+            entry.text,
+            indent,
+            false,
+            line_width,
+        );
+        paint(out, ColorToken::Muted, &description, color);
     }
 }
 
-/// Appends `text` word-wrapped to [`LINE_WIDTH`], starting at `column` of the
+fn wrap_usage(
+    out: &mut String,
+    column: usize,
+    text: &str,
+    usage: Usage,
+    color: bool,
+    line_width: usize,
+) {
+    let mut wrapped = String::new();
+    wrap(&mut wrapped, column, text, column, false, line_width);
+    syntax(out, &wrapped, usage, color);
+}
+
+fn syntax(out: &mut String, text: &str, usage: Usage, color: bool) {
+    if !color {
+        out.push_str(text);
+        return;
+    }
+    if let Usage::Styled(token) = usage {
+        let code = text.trim_end_matches(char::is_whitespace);
+        paint(out, token, code, color);
+        out.push_str(&text[code.len()..]);
+        return;
+    }
+    let mut parameter = None;
+    let mut quote = None;
+    let mut quoted_token = None;
+    for part in text.split_inclusive(char::is_whitespace) {
+        let word = part.trim_end_matches(char::is_whitespace);
+        let bare = word.trim_end_matches(',');
+        let option =
+            if quote.is_none() && parameter.is_none() && !matches!(usage, Usage::Expression) {
+                bare.strip_prefix("--")
+                    .and_then(match_native)
+                    .or_else(|| bare.strip_prefix(['-', '/']).and_then(match_switch))
+            } else {
+                None
+            };
+        let token = if quote.is_some() {
+            quoted_token
+        } else if parameter.is_some() {
+            Some(match parameter {
+                Some("DIR" | "PATH") => ColorToken::Path,
+                _ => ColorToken::Value,
+            })
+        } else if word == "gozler" && matches!(usage, Usage::Command) {
+            Some(ColorToken::Executable)
+        } else if option.is_some()
+            || matches!(usage, Usage::Options) && bare.starts_with(['-', '/'])
+        {
+            Some(ColorToken::Primary)
+        } else if crate::winpath::is_absolute(word.trim_matches(['\'', '"'])) {
+            Some(ColorToken::Path)
+        } else {
+            None
+        };
+        if let Some(token) = token {
+            paint(out, token, word, color);
+        } else {
+            out.push_str(word);
+        }
+        out.push_str(&part[word.len()..]);
+        let mut escaped = false;
+        for c in word.chars() {
+            if !escaped && matches!(c, '\'' | '"') {
+                if quote == Some(c) {
+                    quote = None;
+                    quoted_token = None;
+                } else if quote.is_none() {
+                    quote = Some(c);
+                    quoted_token = token;
+                }
+            }
+            escaped = c == '\\' && !escaped;
+        }
+        if quote.is_none() && !word.is_empty() {
+            parameter = option.and_then(|action| action.param());
+        }
+    }
+}
+
+fn word_width(word: &str) -> usize {
+    word.chars().filter(|&c| c != '`').count()
+}
+
+/// Appends `text` word-wrapped to `line_width`, starting at `column` of the
 /// current line, with every line after the first indented by `indent` spaces.
 ///
 /// Text between backticks is text the reader types, such as `` `-n` ``: the
 /// backticks are dropped, and the text is colored when `color` is set.
-fn wrap(out: &mut String, column: usize, text: &str, indent: usize, color: bool) {
+fn wrap(
+    out: &mut String,
+    column: usize,
+    text: &str,
+    indent: usize,
+    color: bool,
+    line_width: usize,
+) {
     let mut column = column;
     let mut at_line_start = true;
     let mut typed = false;
     for word in text.split(' ') {
-        let width = word.chars().filter(|&c| c != '`').count();
-        if !at_line_start && column + 1 + width > LINE_WIDTH {
+        let width = word_width(word);
+        if !at_line_start && column + 1 + width > line_width {
             out.push('\n');
             out.push_str(&" ".repeat(indent));
             column = indent;
@@ -650,7 +843,7 @@ fn wrap(out: &mut String, column: usize, text: &str, indent: usize, color: bool)
                 typed = !typed;
             }
             if typed {
-                paint(out, ColorToken::Primary, part, color);
+                syntax(out, part, Usage::Command, color);
             } else {
                 out.push_str(part);
             }
@@ -702,6 +895,7 @@ mod tests {
     /// and `dm:` values resolve.
     fn parse(query: &str) -> Result<ParsedQuery, QueryError> {
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -848,14 +1042,53 @@ mod tests {
         }
     }
 
-    /// Color adds only ANSI codes: the columns line up as they do in plain
-    /// text, because the padding is measured on the text alone.
+    /// Alias lists fit the console; the guide URL stays intact for copying even
+    /// in a narrower console. Colors preserve text and alignment.
     #[test]
     fn color_changes_no_text_or_alignment() {
-        for screen in [HelpScreen::Quick, HelpScreen::Full] {
+        for (screen, columns) in [
+            (HelpScreen::Quick, None),
+            (HelpScreen::Full, Some(30)),
+            (HelpScreen::Full, Some(60)),
+            (HelpScreen::Full, None),
+            (HelpScreen::Full, Some(120)),
+        ] {
+            let plain = help(screen, false, columns);
+            let colored = help(screen, true, columns);
+            let line_width = columns.unwrap_or(80) - 1;
+            assert!(!plain.contains('\x1b'));
+            if screen == HelpScreen::Quick {
+                assert!(
+                    plain.lines().count() <= 23,
+                    "quick help leaves room for the command and prompt"
+                );
+            }
+            for line in plain.lines() {
+                let intact_url =
+                    line.trim() == "https://github.com/SynoSoftware/gozler/blob/main/docs/JSON.md";
+                assert!(
+                    line.chars().count() <= line_width || intact_url,
+                    "{screen:?} at {line_width} columns: {line}"
+                );
+            }
+            if columns == Some(120) {
+                assert!(plain.lines().any(|line| line.chars().count() > 79));
+            }
+            assert!(colored.starts_with("\x1b[1mgozler "));
+            assert!(colored.contains("\x1b[1;94mgozler\x1b[0m report"));
+            assert!(colored.contains("\x1b[36m-n\x1b[0m"));
+            assert!(colored.contains("\x1b[33m10\x1b[0m"));
+            assert!(colored.contains("\x1b[33mout.csv\x1b[0m"));
+            assert!(colored.contains("\x1b[32mC:\\repo\\\x1b[0m *.cs"));
+            assert!(colored.contains("\x1b[32m0\x1b[0m"));
+            assert!(colored.contains("\x1b[33m2\x1b[0m"));
+            if screen == HelpScreen::Full {
+                assert!(colored.contains("\x1b[1mExamples:\x1b[0m\n"));
+                assert!(colored.contains("\x1b[31m4\x1b[0m"));
+            }
             let mut stripped = String::new();
             let mut in_code = false;
-            for c in help(screen, true).chars() {
+            for c in colored.chars() {
                 match c {
                     '\x1b' => in_code = true,
                     'm' if in_code => in_code = false,
@@ -863,7 +1096,48 @@ mod tests {
                     _ => {}
                 }
             }
-            assert_eq!(stripped, help(screen, false), "{screen:?}");
+            assert!(!in_code, "every ANSI sequence is complete");
+            assert_eq!(stripped, plain, "{screen:?}");
         }
+    }
+
+    #[test]
+    fn descriptions_use_one_column_or_stack_the_whole_section() {
+        let entries = [
+            command("gozler report".into(), "Find reports"),
+            command("gozler -export-csv out.csv ext:cs".into(), "Save C# files"),
+        ];
+        let mut wide = String::new();
+        render(&mut wide, &entries, false, 119);
+        let lines: Vec<_> = wide.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].find("Find"), lines[1].find("Save"));
+
+        let mut narrow = String::new();
+        render(&mut narrow, &entries, false, 50);
+        assert_eq!(
+            narrow,
+            "  gozler report\n  Find reports\n  gozler -export-csv out.csv ext:cs\n  Save C# files\n"
+        );
+    }
+
+    #[test]
+    fn quoted_values_keep_their_color_without_coloring_search_expressions() {
+        let mut out = String::new();
+        syntax(
+            &mut out,
+            r#"gozler -path "C:\My Files" -r "two -n words" ext:cs"#,
+            Usage::Command,
+            true,
+        );
+        assert_eq!(
+            out,
+            concat!(
+                "\x1b[1;94mgozler\x1b[0m \x1b[36m-path\x1b[0m ",
+                "\x1b[32m\"C:\\My\x1b[0m \x1b[32mFiles\"\x1b[0m ",
+                "\x1b[36m-r\x1b[0m \x1b[33m\"two\x1b[0m ",
+                "\x1b[33m-n\x1b[0m \x1b[33mwords\"\x1b[0m ext:cs"
+            )
+        );
     }
 }

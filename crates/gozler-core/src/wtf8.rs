@@ -14,6 +14,13 @@ pub fn from_utf16(units: &[u16], out: &mut Vec<u8>) {
     extend_from_units(units.iter().copied(), out);
 }
 
+/// Counts UTF-16 code units without allocating a decoded name.
+pub(crate) fn utf16_len(bytes: &[u8]) -> usize {
+    CodePoints::new(bytes)
+        .map(|cp| if cp > 0xffff { 2 } else { 1 })
+        .sum()
+}
+
 /// Converts a UTF-16LE name read from a disk structure to WTF-8. The caller
 /// rejects an odd byte length first, because a trailing odd byte is ignored.
 pub(crate) fn from_utf16le(bytes: &[u8]) -> Vec<u8> {
@@ -219,6 +226,7 @@ mod tests {
         fn utf16_round_trips_through_wtf8(units in proptest::collection::vec(any::<u16>(), 0..64)) {
             let mut bytes = Vec::new();
             from_utf16(&units, &mut bytes);
+            prop_assert_eq!(utf16_len(&bytes), units.len());
             prop_assert_eq!(to_utf16(&bytes), units);
         }
 

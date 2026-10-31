@@ -184,16 +184,13 @@ pub(crate) fn repair_lines(repair: &Repair) -> (&'static str, Vec<String>) {
     (how, lines)
 }
 
-/// Maps the result of writing output to the run's result. A reader that
-/// closes early (`gozler * | head`) is a clean stop, not a failure.
+/// Propagates an output error so a closed reader stops the query too;
+/// `main` treats that stop as successful.
 pub(crate) fn output(written: io::Result<()>, to: &str) -> Result<(), Failure> {
-    match written {
-        Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(Failure::Output {
-            to: to.to_string(),
-            error,
-        }),
-        _ => Ok(()),
-    }
+    written.map_err(|error| Failure::Output {
+        to: to.to_string(),
+        error,
+    })
 }
 
 #[cfg(test)]
@@ -343,11 +340,14 @@ mod tests {
         }
     }
 
-    /// A reader that stops reading ends the output without a failure, so
-    /// `gozler * | head` exits as if every line was read.
+    /// Swallowing a closed reader's error would keep fetching and formatting
+    /// every remaining page after no one can read it.
     #[test]
-    fn a_closed_reader_is_not_a_failure() {
+    fn a_closed_reader_stops_output() {
         let broken = io::Error::from(io::ErrorKind::BrokenPipe);
-        assert!(output(Err(broken), "stdout").is_ok());
+        assert!(matches!(
+            output(Err(broken), "stdout"),
+            Err(Failure::Output { error, .. }) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
     }
 }

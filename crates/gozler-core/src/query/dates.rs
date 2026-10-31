@@ -1,10 +1,10 @@
 //! The date resolver: a `dm:` or `dc:` value turned into the UTC bounds the
 //! daemon compares, from the query start and its time zone.
 //!
-//! `today`, `yesterday` and an ISO date `YYYY-MM-DD` are calendar days in the
-//! time zone, from midnight to the next midnight, so a day around a
-//! daylight-saving change lasts 23 or 25 hours. `Ndays` is the N times 24
-//! hours that end at the query start. A comparison compares times, as es
+//! Calendar periods run between local midnights, with weeks starting on the
+//! user's first day of the week, so a daylight-saving change can make a day
+//! last 23 or 25 hours. Day and week durations end at the query start and
+//! count whole multiples of 24 hours. A comparison compares times, as es
 //! does at the value's granularity: `>today` is after today, `<=today` up to
 //! the end of today, and `<7days` older than the last 7 days. A range
 //! `lower..upper` runs from the start of `lower` to the end of `upper`.
@@ -15,9 +15,9 @@
 
 use super::parse::{Malformed, QueryError};
 use crate::output::unix_ms_to_filetime;
-use jiff::civil::Date;
+use jiff::civil::{Date, Weekday};
 use jiff::tz::TimeZone;
-use jiff::{SignedDuration, Timestamp};
+use jiff::{SignedDuration, Span, Timestamp};
 use serde::{Deserialize, Serialize};
 
 /// Which date of an entry a date function tests.
@@ -45,12 +45,12 @@ impl std::fmt::Display for DateField {
     }
 }
 
-/// When a query starts and the time zone its calendar days are in: what a
-/// date value resolves against.
+/// The clock and regional calendar against which date values resolve.
 #[derive(Clone, Debug)]
 pub struct QueryStart {
     pub now: Timestamp,
     pub time_zone: TimeZone,
+    pub week_start: Weekday,
 }
 
 /// An inclusive range of FILETIMEs: 100-nanosecond ticks since 1601-01-01
@@ -142,7 +142,7 @@ pub(crate) fn date_range(
     })
 }
 
-/// The period one date value names: a calendar day or the last N days.
+/// Calendar periods use local midnight; durations end at the query start.
 fn period(value: &str, start: &QueryStart, field: DateField) -> Result<Period, QueryError> {
     let value = value.trim();
     let malformed = |reason: fn(DateField, String) -> Malformed| {
@@ -151,24 +151,49 @@ fn period(value: &str, start: &QueryStart, field: DateField) -> Result<Period, Q
     let out_of_range = |_| malformed(Malformed::DateOutOfRange);
     let today = || start.now.to_zoned(start.time_zone.clone()).date();
     let lower = value.to_ascii_lowercase();
-    let date = match lower.as_str() {
-        "today" => today(),
-        "yesterday" => today().yesterday().map_err(out_of_range)?,
+    let (first, end) = match lower.as_str() {
+        "today" => (today(), today().tomorrow().map_err(out_of_range)?),
+        "yesterday" => (today().yesterday().map_err(out_of_range)?, today()),
+        "tomorrow" => {
+            let first = today().tomorrow().map_err(out_of_range)?;
+            (first, first.tomorrow().map_err(out_of_range)?)
+        }
         _ => {
-            if let Some(count) = lower.strip_suffix("days") {
-                let days = count
+            let duration = lower.strip_prefix("last").unwrap_or(&lower);
+            for (unit, seconds) in [
+                ("minutes", 60),
+                ("hours", 3_600),
+                ("days", 86_400),
+                ("weeks", 604_800),
+            ] {
+                let Some(count) = duration.strip_suffix(unit) else {
+                    continue;
+                };
+                let count = count
                     .parse::<u32>()
                     .ok()
-                    .filter(|&days| days > 0)
-                    .ok_or_else(|| malformed(Malformed::Days))?;
-                let length = SignedDuration::from_secs(i64::from(days) * 24 * 60 * 60);
+                    .filter(|&count| count > 0)
+                    .ok_or_else(|| {
+                        malformed(if unit == "days" {
+                            Malformed::Days
+                        } else {
+                            Malformed::Date
+                        })
+                    })?;
+                let length = SignedDuration::from_secs(i64::from(count) * seconds);
                 let first = start.now.checked_sub(length).map_err(out_of_range)?;
                 return Ok(Period {
                     start: first,
                     end: start.now,
                 });
             }
-            iso_date(value).ok_or_else(|| malformed(Malformed::Date))?
+            match calendar_period(&lower, today(), start.week_start).map_err(out_of_range)? {
+                Some(period) => period,
+                None => {
+                    let date = iso_date(value).ok_or_else(|| malformed(Malformed::Date))?;
+                    (date, date.tomorrow().map_err(out_of_range)?)
+                }
+            }
         }
     };
     let midnight = |date: Date| -> Result<Timestamp, QueryError> {
@@ -178,9 +203,40 @@ fn period(value: &str, start: &QueryStart, field: DateField) -> Result<Period, Q
             .timestamp())
     };
     Ok(Period {
-        start: midnight(date)?,
-        end: midnight(date.tomorrow().map_err(out_of_range)?)?,
+        start: midnight(first)?,
+        end: midnight(end)?,
     })
+}
+
+fn calendar_period(
+    value: &str,
+    today: Date,
+    week_start: Weekday,
+) -> Result<Option<(Date, Date)>, jiff::Error> {
+    let Some((unit, offset)) = [
+        ("this", 0),
+        ("current", 0),
+        ("last", -1),
+        ("past", -1),
+        ("prev", -1),
+        ("next", 1),
+        ("coming", 1),
+    ]
+    .into_iter()
+    .find_map(|(prefix, offset)| value.strip_prefix(prefix).map(|unit| (unit, offset))) else {
+        return Ok(None);
+    };
+    let (first, length) = match unit {
+        "week" => (
+            today.checked_sub(Span::new().days(today.weekday().since(week_start)))?,
+            Span::new().weeks(1),
+        ),
+        "month" => (today.first_of_month(), Span::new().months(1)),
+        "year" => (today.first_of_year(), Span::new().years(1)),
+        _ => return Ok(None),
+    };
+    let first = first.checked_add(length.checked_mul(offset)?)?;
+    Ok(Some((first, first.checked_add(length)?)))
 }
 
 /// The date `YYYY-MM-DD` writes, when it is a real one.
@@ -215,6 +271,7 @@ mod tests {
 
     fn start(now: &str, time_zone: TimeZone) -> QueryStart {
         QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: now.parse().expect("an RFC 3339 instant"),
             time_zone,
         }
@@ -237,6 +294,25 @@ mod tests {
 
     fn range(value: &str, start: &QueryStart) -> DateRange {
         date_range(value, start, DateField::Modified).unwrap_or_else(|e| panic!("{value}: {e}"))
+    }
+
+    #[test]
+    fn recent_minutes_and_hours_end_at_the_query_start() {
+        let start = start("2026-10-31T12:00:00Z", TimeZone::UTC);
+        assert_eq!(
+            range("10minutes", &start),
+            between("2026-10-31T11:50:00Z", "2026-10-31T12:00:00Z")
+        );
+        assert_eq!(
+            range("last2hours", &start),
+            between("2026-10-31T10:00:00Z", "2026-10-31T12:00:00Z")
+        );
+        for value in ["0minutes", "-1hours", "999999999999hours"] {
+            assert!(
+                date_range(value, &start, DateField::Modified).is_err(),
+                "{value}"
+            );
+        }
     }
 
     /// A calendar day starts at local midnight, not at UTC midnight or at the
@@ -273,6 +349,42 @@ mod tests {
         assert!(range("today", &start).contains(future));
         assert!(range(">7days", &start).contains(future));
         assert!(!range(">today", &start).contains(future));
+        assert_eq!(range("last7days", &start), week);
+        assert_eq!(range("1weeks", &start), week);
+    }
+
+    #[test]
+    fn calendar_periods_follow_the_regional_week_start() {
+        let mut start = start("2026-10-18T12:00:00Z", TimeZone::UTC);
+        assert_eq!(
+            range("thisweek", &start),
+            between("2026-10-12T00:00:00Z", "2026-10-19T00:00:00Z")
+        );
+        start.week_start = Weekday::Sunday;
+        assert_eq!(
+            range("thisweek", &start),
+            between("2026-10-18T00:00:00Z", "2026-10-25T00:00:00Z")
+        );
+        assert_eq!(
+            range("lastweek", &start),
+            between("2026-10-11T00:00:00Z", "2026-10-18T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn calendar_periods_cross_month_and_year_boundaries() {
+        let start = start("2024-01-15T12:00:00Z", TimeZone::UTC);
+        for (value, from, until) in [
+            ("lastmonth", "2023-12-01T00:00:00Z", "2024-01-01T00:00:00Z"),
+            ("thismonth", "2024-01-01T00:00:00Z", "2024-02-01T00:00:00Z"),
+            ("nextmonth", "2024-02-01T00:00:00Z", "2024-03-01T00:00:00Z"),
+            ("lastyear", "2023-01-01T00:00:00Z", "2024-01-01T00:00:00Z"),
+            ("thisyear", "2024-01-01T00:00:00Z", "2025-01-01T00:00:00Z"),
+        ] {
+            assert_eq!(range(value, &start), between(from, until), "{value}");
+        }
+        assert_eq!(range("pastmonth", &start), range("lastmonth", &start));
+        assert_eq!(range(">=lastmonth", &start).min, ft("2023-12-01T00:00:00Z"));
     }
 
     /// A day of a daylight-saving change lasts 23 or 25 hours, and the last
@@ -289,6 +401,10 @@ mod tests {
             between("2026-11-01T04:00:00Z", "2026-11-02T05:00:00Z")
         );
         assert_eq!(range("7days", &start).min, ft("2026-03-03T12:00:00Z"));
+        assert_eq!(
+            range("lastweek", &start),
+            between("2026-03-02T05:00:00Z", "2026-03-09T04:00:00Z")
+        );
     }
 
     /// A comparison compares times at the value's granularity, as es does,
@@ -329,6 +445,9 @@ mod tests {
             "7days..30days",
             "2026-02-30",
             "0days",
+            "0weeks",
+            "lastdays",
+            "999999999999weeks",
             "10/18/2026",
             "",
         ] {

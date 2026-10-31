@@ -128,6 +128,7 @@ mod tests {
     #[test]
     fn a_filter_keeps_its_clause_whatever_the_text_holds() {
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };
@@ -157,6 +158,7 @@ mod tests {
     #[test]
     fn a_regular_expression_text_is_one_pattern() {
         let start = QueryStart {
+            week_start: jiff::civil::Weekday::Monday,
             now: jiff::Timestamp::UNIX_EPOCH,
             time_zone: jiff::tz::TimeZone::UTC,
         };

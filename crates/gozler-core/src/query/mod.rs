@@ -23,8 +23,9 @@ pub use dates::{DateField, DateRange, QueryStart};
 pub use engine::{CompiledQuery, MatchSums, MatchedParts, SizeOverflow, Totals, extension};
 pub use mask::{EmptyMask, MaskScratch, NameMask};
 pub use parse::{
-    Clause, Kind, Malformed, ParseOptions, ParsedQuery, QueryError, SIZE_WORDS, SizeRange,
-    SizeWord, Term, TermMatch, Test, parse_query, parse_query_with, regex_test,
+    Clause, Kind, LengthTarget, Malformed, Metadata, ParseOptions, ParsedQuery, QueryError,
+    SIZE_WORDS, SizeRange, SizeWord, Term, TermMatch, Test, parse_query, parse_query_with,
+    regex_test,
 };
 pub use paths::{FolderId, ResultNames};
 pub use rows::{

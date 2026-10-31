@@ -109,13 +109,15 @@ const ROWS: &[Row] = &[
       "path": "C:\\repo\\report.txt",
       "size": 4096,
       "mtime_ft": 134367140960000000,
-      "is_dir": false
+      "is_dir": false,
+      "mtime": "2026-10-17T12:34:56"
     },
     {
       "path": "C:\\repo\\docs",
       "size": 8192,
       "mtime_ft": 134367140960000000,
-      "is_dir": true
+      "is_dir": true,
+      "mtime": "2026-10-17T12:34:56"
     },
     {
       "path": "C:\\tmp\\unread.bin",
@@ -125,7 +127,8 @@ const ROWS: &[Row] = &[
       "path": "C:\\repo\\a, \"b\".txt",
       "size": 7,
       "mtime_ft": 134367140960000000,
-      "is_dir": false
+      "is_dir": false,
+      "mtime": "2026-10-17T12:34:56"
     }
   ],
   "more": false,
@@ -370,4 +373,40 @@ fn every_row_prints_what_it_recorded() {
         changed.len(),
         changed.join("\n")
     );
+}
+
+#[test]
+fn json_more_reports_matches_left_out_after_the_last_page() {
+    for mut pages in [vec![results()], two_pages()] {
+        pages.last_mut().expect("a final page").total = 9;
+        let json: serde_json::Value =
+            serde_json::from_str(&print(&["--json"], pages)).expect("the writer emits JSON");
+        assert_eq!(json["total"], 9);
+        assert_eq!(json["more"], true);
+    }
+    let mut empty = results();
+    empty.items.clear();
+    let json: serde_json::Value =
+        serde_json::from_str(&print(&["--json"], vec![empty])).expect("the writer emits JSON");
+    assert_eq!(json["more"], true);
+}
+
+#[test]
+fn json_dates_preserve_filetimes_and_use_the_requested_time_zone() {
+    let mut page = results();
+    page.items.truncate(1);
+    page.items[0].created_ft = Some(134367140960000000);
+    let mut bytes = Vec::new();
+    let mut writer = ResultWriter::new(
+        super::ResultFormat::Json,
+        jiff::tz::TimeZone::posix("EST5").expect("a fixed time zone"),
+        &mut bytes,
+    );
+    writer.page(page).expect("writing to memory cannot fail");
+    writer.finish().expect("writing to memory cannot fail");
+    let json: serde_json::Value = serde_json::from_slice(&bytes).expect("the writer emits JSON");
+    assert_eq!(json["items"][0]["mtime"], "2026-10-17T07:34:56");
+    assert_eq!(json["items"][0]["created"], "2026-10-17T07:34:56");
+    assert_eq!(json["items"][0]["mtime_ft"], 134367140960000000i64);
+    assert_eq!(json["items"][0]["created_ft"], 134367140960000000i64);
 }

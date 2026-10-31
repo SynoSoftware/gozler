@@ -57,9 +57,7 @@ pub(crate) fn list_message(model: &Model) -> Option<ListCaption> {
 pub(super) fn query_error(strings: &Strings, error: &QueryError) -> String {
     let as_typed = |function: &str, value: &str| format!("{function}{value}");
     match error {
-        QueryError::UnsupportedOperator(c) => {
-            strings.format("query.unsupported_operator", &[&c.to_string()])
-        }
+        QueryError::GroupDepth(n) => strings.format("query.group_depth", &[&n.to_string()]),
         QueryError::UnknownFunction(name) => {
             strings.format("query.unknown_function", &[&format!("{name}:")])
         }
@@ -70,6 +68,8 @@ pub(super) fn query_error(strings: &Strings, error: &QueryError) -> String {
             strings.format("query.too_many_regexes", &[&n.to_string()])
         }
         QueryError::Malformed(reason) => match reason {
+            Malformed::Grouping => strings.text("query.grouping").to_owned(),
+            Malformed::Length(value) => strings.format("query.length", &[value]),
             Malformed::MisplacedNot => strings.text("query.misplaced_not").to_owned(),
             Malformed::NotWithoutTerm => strings.text("query.not_without_term").to_owned(),
             Malformed::OrWithoutTerms => strings.text("query.or_without_terms").to_owned(),

@@ -27,7 +27,8 @@ mod request;
 
 pub use answer::{Answer, Warning};
 pub use argv::{
-    Command, Count, DEFAULT_LIMIT, EsFatal, EsPlan, HelpScreen, Limit, ScopeFolder, parse_argv,
+    Command, Count, DEFAULT_LIMIT, EsFatal, EsPlan, HelpScreen, Limit, Report, ScopeFolder,
+    parse_argv,
 };
 pub use exit::ExitCode;
 pub use help::{help, search_syntax, set_linked, version};

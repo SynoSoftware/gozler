@@ -1,9 +1,9 @@
-//! Color in the console. A Windows console draws ANSI color codes only after
+//! Console color and width. Windows draws ANSI color codes only after
 //! a program turns on virtual terminal processing for it.
 
 use windows_sys::Win32::System::Console::{
-    CONSOLE_MODE, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle,
-    STD_OUTPUT_HANDLE, SetConsoleMode,
+    CONSOLE_MODE, CONSOLE_SCREEN_BUFFER_INFO, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode,
+    GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE, SetConsoleMode,
 };
 
 /// Turns on ANSI color codes for the console that stdout writes to, and says
@@ -24,4 +24,20 @@ pub fn enable_console_color() -> bool {
     }
     // SAFETY: `out` is a console handle, as GetConsoleMode just confirmed.
     unsafe { SetConsoleMode(out, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0 }
+}
+
+/// The visible console's column count, or `None` for redirected stdout.
+pub fn console_width() -> Option<usize> {
+    // SAFETY: GetStdHandle takes no pointers; a missing or non-console handle
+    // makes GetConsoleScreenBufferInfo fail. `info` is a valid output buffer.
+    let info = unsafe {
+        let out = GetStdHandle(STD_OUTPUT_HANDLE);
+        let mut info = std::mem::zeroed::<CONSOLE_SCREEN_BUFFER_INFO>();
+        if GetConsoleScreenBufferInfo(out, &mut info) == 0 {
+            return None;
+        }
+        info
+    };
+    let width = i32::from(info.srWindow.Right) - i32::from(info.srWindow.Left) + 1;
+    usize::try_from(width).ok().filter(|&width| width > 0)
 }

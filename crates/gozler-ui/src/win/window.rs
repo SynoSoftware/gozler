@@ -45,7 +45,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, UnhookWindowsHookEx, WA_INACTIVE, WH_MSGFILTER, WINDOWPLACEMENT,
     WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND,
     WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DEVICECHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
+    WM_DEVICECHANGE, WM_DPICHANGED, WM_ENABLE, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
     WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
     WM_NOTIFY, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE,
@@ -191,6 +191,7 @@ pub(crate) enum Message<'a> {
         tag: usize,
         text: String,
     },
+    Enabled(bool),
     Close,
     Destroy,
     Other(u32),
@@ -1098,9 +1099,18 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         },
         WM_HOTKEY => Message::Hotkey(wparam.0 as i32),
         WM_COPYDATA => {
+            if lparam.0 == 0 {
+                return Message::Other(msg);
+            }
             // SAFETY: WM_COPYDATA's lparam points to a COPYDATASTRUCT whose
             // data, `cbData` bytes, lives while the message is sent.
             let data = unsafe { &*(lparam.0 as *const COPYDATASTRUCT) };
+            if data.cbData as usize > crate::core::startup::MAX_HANDOFF_BYTES
+                || data.cbData % 2 != 0
+                || data.cbData != 0 && data.lpData.is_null()
+            {
+                return Message::Other(msg);
+            }
             let units = data.cbData as usize / 2;
             let text = if units == 0 || data.lpData.is_null() {
                 String::new()
@@ -1122,6 +1132,7 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
                 text,
             }
         }
+        WM_ENABLE => Message::Enabled(wparam.0 != 0),
         WM_CLOSE => Message::Close,
         WM_DESTROY => Message::Destroy,
         _ => Message::Other(msg),
