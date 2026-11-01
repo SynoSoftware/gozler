@@ -1,5 +1,6 @@
-//! The quick help and the full reference. The quick help is the examples
-//! marked quick, so it fits one console screen. The full reference is
+//! The quick help and the full reference. The quick help is the examples,
+//! so it fits one console screen; the full reference opens with the same
+//! examples, because each option and function has its own row. It is
 //! generated from the vocabulary tables: [`SWITCHES`], [`SORT_KEYS`],
 //! [`SEARCH_FUNCTIONS`], the attribute [`LETTERS`] and [`ExitCode::ALL`], and
 //! from this module's examples, search terms and notes, so a row added to a
@@ -96,7 +97,6 @@ pub fn help(screen: HelpScreen, color: bool, columns: Option<usize>) -> String {
             out.push('\n');
             let examples: Vec<Entry> = EXAMPLES
                 .iter()
-                .filter(|example| example.quick)
                 .map(|example| command(example.usage.to_string(), example.text))
                 .collect();
             render(&mut out, &examples, color, line_width);
@@ -133,11 +133,11 @@ fn quick_exit_codes(out: &mut String, color: bool) {
     };
     out.push_str("gozler exits ");
     code(out, ExitCode::Complete);
-    out.push_str(" when done, ");
+    out.push_str(" when the results are complete, ");
     code(out, ExitCode::Incomplete);
-    out.push_str(" if results may be missing, ");
+    out.push_str(" if some may be missing,\nand ");
     code(out, ExitCode::Truncated);
-    out.push_str(" if some are hidden.\n");
+    out.push_str(" if the result limit left some out.\n");
 }
 
 const INTRO: &str = "Find files and folders by name, path, size, date or attribute. \
@@ -148,27 +148,15 @@ const INTRO: &str = "Find files and folders by name, path, size, date or attribu
 struct Example {
     usage: &'static str,
     text: &'static str,
-    /// Whether the quick help lists it.
-    quick: bool,
     /// The same search as typed in the window's search box, for an example
     /// that uses no option; [`search_syntax`] lists it.
     search_box: Option<&'static str>,
 }
 
-const fn quick(usage: &'static str, text: &'static str) -> Example {
+const fn example(usage: &'static str, text: &'static str) -> Example {
     Example {
         usage,
         text,
-        quick: true,
-        search_box: None,
-    }
-}
-
-const fn full_only(usage: &'static str, text: &'static str) -> Example {
-    Example {
-        usage,
-        text,
-        quick: false,
         search_box: None,
     }
 }
@@ -185,85 +173,48 @@ impl Example {
 
 /// Complete command lines that work as typed in cmd and in PowerShell.
 const EXAMPLES: &[Example] = &[
-    quick("gozler report", "Find names that contain report").typed("report"),
-    quick(
+    example("gozler report", "Find names that contain report").typed("report"),
+    example(
         "gozler readme*.txt",
         "Find .txt files that start with readme",
     )
     .typed("readme*.txt"),
-    quick(
+    example(
         "gozler report !draft",
         "Find names with report but not draft",
     )
     .typed("report !draft"),
-    quick(r#"gozler "ext:cs;txt""#, "Find .cs and .txt files").typed("ext:cs;txt"),
-    quick(
+    example(r#"gozler "ext:cs;txt""#, "Find .cs and .txt files").typed("ext:cs;txt"),
+    example(
         r"gozler C:\repo\ *.cs",
         r"Find .cs files anywhere in C:\repo",
     )
     .typed(r"C:\repo\ *.cs"),
-    quick(
+    example(
         "gozler *.log dm:7days",
         "Find .log files changed in the last 7 days",
     )
     .typed("*.log dm:7days"),
-    quick(
+    example(
         r#"gozler "size:>1gb""#,
         "Find files and folders larger than 1 GB",
     )
     .typed("size:>1gb"),
-    quick(r#"gozler "*.jpg|*.png""#, "Find .jpg and .png files").typed("*.jpg|*.png"),
-    quick(
+    example(r#"gozler "*.jpg|*.png""#, "Find .jpg and .png files").typed("*.jpg|*.png"),
+    example(
         "gozler *.iso -sort size -n 10",
         "Show the 10 largest .iso files",
     ),
-    quick(
+    example(
         "gozler -n all report",
         "Show every match, not just the first 20",
     ),
-    quick("gozler -i README", "Find README but not readme"),
-    quick(
+    example("gozler -i README", "Find README but not readme"),
+    example(
         "gozler -export-csv out.csv ext:cs",
         "Save the .cs files to out.csv",
     ),
-    quick("gozler --status", "Check whether the index is ready"),
-    full_only(
-        r"gozler -path C:\repo ext:cs",
-        r"Find .cs files anywhere in C:\repo, with -path",
-    ),
-    full_only(
-        "gozler /a-d report",
-        "Find files, not folders, that contain report",
-    ),
-    full_only(
-        r"gozler -parent C:\repo -n all",
-        r"List everything directly in C:\repo",
-    ),
-    full_only(
-        r#"gozler -r "^test[0-9]+\.cs$" -path C:\repo"#,
-        "Find names that match a regular expression",
-    ),
-    full_only(
-        r"gozler /ah -attributes -path C:\repo",
-        r"Find hidden items anywhere in C:\repo, with their attributes",
-    ),
-    full_only(
-        "gozler -export-csv out.csv -size -dm ext:cs",
-        "Save every .cs file to out.csv, with sizes and dates",
-    ),
-    full_only("gozler -get-result-count ext:cs", "Count the .cs files"),
-    full_only(
-        r"gozler -get-folder-size C:\repo",
-        r"Show the total size of everything in C:\repo",
-    ),
-    full_only(
-        "gozler --json -n 0 report",
-        "Count matches as JSON without fetching rows",
-    ),
-    full_only(
-        "gozler -timeout 5000 -no-result-error report",
-        "Wait up to 5 seconds for indexing, and exit 9 if nothing matches",
-    ),
+    example("gozler --status", "Check whether the index is ready"),
 ];
 
 /// Search terms as gozler receives them, after the shell removes its quotes.
@@ -272,15 +223,15 @@ const SEARCH_TERMS: &[(&str, &str)] = &[
     ("*.cs", "Whole name matches a wildcard, `*` or `?`"),
     ("\"two words\"", "Name contains the phrase"),
     ("!test", "Name does not contain test"),
-    ("a|b", "Either term; `|` binds tighter than a space"),
+    (
+        "a|b",
+        "Either term; `a|b c` finds names with a or b that also contain c",
+    ),
     (
         "<a b>|<c d>",
         "Both a and b, or both c and d; `!<a b>` negates a group",
     ),
     (r"C:\repo\", "Everything below that folder"),
-    ("ext:cs;txt", "Extension is cs or txt"),
-    ("dm:7days", "Modified in the last 7 days"),
-    ("size:>1mb", "Larger than 1 MB"),
     (
         r"docs\agents",
         r"Full path contains `docs\agents`; `/` works as `\` too",
@@ -332,133 +283,162 @@ enum Reader {
     Both,
 }
 
-const NOTES: &[(Reader, &str)] = &[
+/// The notes, each topic under its own title, so a reader finds a rule by
+/// its topic. Results and exit codes come last, beside the exit codes.
+const NOTES: &[(&str, &[(Reader, &str)])] = &[
     (
-        Reader::CommandLine,
-        "Single-dash options also accept `/`, and dashes inside their names are \
-         optional. Double-dash options must be written exactly as listed. \
-         A recognized `/` option is an option, as `/p` is `-p`, so write a relative \
-         path without a leading `/`: `docs/agents`.",
+        "Notes on the command line:",
+        &[
+            (
+                Reader::CommandLine,
+                "Single-dash options also accept `/`, and dashes inside their names are \
+                 optional. Double-dash options must be written exactly as listed. \
+                 A recognized `/` option is an option, as `/p` is `-p`, so write a relative \
+                 path without a leading `/`: `docs/agents`.",
+            ),
+            (
+                Reader::CommandLine,
+                "gozler joins its arguments with spaces and splits them into terms again, \
+                 so the single argument `\"ext:cs report\"` is two terms. A bare `--` is \
+                 search text; it does not end option parsing.",
+            ),
+            (
+                Reader::CommandLine,
+                "In `/a`, each `-` applies only to the letter after it: `/a-h-s` excludes \
+                 hidden and system items, while `/a-hs` excludes hidden items and requires \
+                 system ones.",
+            ),
+        ],
     ),
     (
-        Reader::CommandLine,
-        "gozler joins its arguments with spaces and splits them into terms again, \
-         so the single argument `\"ext:cs report\"` is two terms. A bare `--` is \
-         search text; it does not end option parsing.",
+        "Notes on search syntax:",
+        &[
+            (
+                Reader::SearchBox,
+                "The Match list decides how a plain name term matches. The descriptions \
+                 here say \"contains\", as Anywhere matches; the default, Start of words, \
+                 matches only where a word of the name starts.",
+            ),
+            (
+                Reader::Both,
+                "Use `<` and `>` to group expressions, and `!` to negate a group. \
+                 Put a space after an unquoted regular expression before a closing `>`, \
+                 or quote the expression, so `>` is not read as part of the pattern. \
+                 Nesting and expanded query terms are bounded.",
+            ),
+            (
+                Reader::CommandLine,
+                r"`regex:` and `-r` use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with `-p`, or when it contains `\\`, it matches the full path, whose separators are `\`, so write `\\` or `[\\/]` for a separator. `|` and `!` inside a pattern belong to the expression.",
+            ),
+            (
+                Reader::SearchBox,
+                r"With Regular expression in the Match list, the whole search box is one pattern. `regex:` and that pattern use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with Match path, or when it contains `\\`, it matches the full path, whose separators are `\`, so write `\\` or `[\\/]` for a separator.",
+            ),
+            (
+                Reader::CommandLine,
+                "An unknown search function, such as `unknown:`, or an unbalanced or empty \
+                 group is invalid input and exits 4.",
+            ),
+        ],
     ),
     (
-        Reader::CommandLine,
-        "`/ad` finds folders, `/a-d` files. Prefix each unwanted attribute letter \
-         with `-`: `/a-h-s` excludes hidden and system; `/a-hs` excludes hidden \
-         and requires system.",
+        "Notes on sizes and dates:",
+        &[
+            (
+                Reader::Both,
+                "Sizes use 1,024-based units: `size:1kb` and `size:=1kb` both mean exactly \
+                 1,024 bytes. Use comparisons or a range such as `size:1kb..2kb` for other sizes.",
+            ),
+            (
+                Reader::Both,
+                "Sizes and dates that gozler does not know never match numeric or date \
+                 comparisons, even negated. Use `size:unknown`, `dm:unknown` or \
+                 `dc:unknown` to find them. A folder with only a lower-bound size also \
+                 matches `size:unknown`.",
+            ),
+            (
+                Reader::CommandLine,
+                "A folder's size is the total of the known sizes of the files below it, \
+                 each name of a hard-linked file counted; `size:`, `-size` and `-sort size` \
+                 use it. `-get-total-size` and `-get-folder-size` add only files, so no file \
+                 is counted twice.",
+            ),
+            (
+                Reader::CommandLine,
+                "Files whose size or date Windows did not report add nothing to the size \
+                 totals. When reading sizes and dates failed on a volume in scope, a search \
+                 that uses them warns and exits 2. When the read succeeded, the rare file \
+                 it could not read is left out of the totals without a warning.",
+            ),
+            (
+                Reader::Both,
+                "Dates use local time. `today`, `yesterday` and `tomorrow` are calendar days. \
+                 `this`, `last` and `next` before `week`, `month` or `year` select a calendar \
+                 period; weeks start on the first day set in Windows. `current` means `this`, \
+                 `past` and `prev` mean `last`, and `coming` means `next`. \
+                 `7days` and `last7days` are the 7 times 24 hours before the search starts; \
+                 `1weeks` is the same duration. `10minutes` and `2hours` count back from \
+                 the search start. `dm:<30days` finds files older than 30 days.",
+            ),
+        ],
     ),
     (
-        Reader::CommandLine,
-        "Without `-n`, gozler shows 20 results. When the limit hides matches, gozler \
-         writes the shown and total counts to stderr and exits 10. `-export-*` writes \
-         every match unless `-n` is given, and `-get-result-count` and the size totals \
-         count every match.",
+        "Notes on output:",
+        &[
+            (
+                Reader::CommandLine,
+                "Dates print as ISO 8601 in local time, whatever the locale. Plain output \
+                 groups the digits of a size with commas; CSV and TSV print plain bytes. \
+                 Attributes print as letters, such as HA, and in CSV and TSV as their \
+                 FILE_ATTRIBUTE_* number, such as 34.",
+            ),
+            (
+                Reader::CommandLine,
+                concat!(
+                    "JSON search results include readable local `mtime` and `created` dates \
+                     beside `mtime_ft` and `created_ft`. Unknown dates are omitted. `total` \
+                     counts every match, and `more` is true when matching rows were left \
+                     out, so `--json -n 0` counts matches without rows. Check \
+                     `volumes_incomplete`, `metadata_pending` and the exit code before \
+                     treating an answer as complete. Warnings and errors go to stderr, not \
+                     into JSON. See ",
+                    env!("CARGO_PKG_REPOSITORY"),
+                    "/blob/main/docs/JSON.md for fields and script examples."
+                ),
+            ),
+        ],
     ),
     (
-        Reader::CommandLine,
-        "When a volume in scope is not ready (indexing, rescanning, offline or \
-         failed), gozler prints the results it has, warns on stderr and exits 2. With `-path`, \
-         scope includes volumes reached through folder mounts and links. `--status` \
-         exits 2 when any volume is not ready or its sizes and dates could not be read. \
-         With both `--status` and `--server-version`, the last report wins.",
-    ),
-    (
-        Reader::CommandLine,
-        "When several exit codes apply, the most serious wins: a failure, then 2, \
-         then 9 or 10, then 0. So no matches while a volume in scope is indexing \
-         exits 2, because the matches may still appear.",
-    ),
-    (
-        Reader::SearchBox,
-        "The Match list decides how a plain name term matches. The descriptions \
-         here say \"contains\", as Anywhere matches; the default, Start of words, \
-         matches only where a word of the name starts.",
-    ),
-    (
-        Reader::Both,
-        "Sizes use 1,024-based units: `size:1kb` and `size:=1kb` both mean exactly \
-         1,024 bytes. Use comparisons or a range such as `size:1kb..2kb` for other sizes.",
-    ),
-    (
-        Reader::Both,
-        "Missing sizes and dates never match numeric or date comparisons, even \
-         negated. Use `size:unknown`, `dm:unknown` or `dc:unknown` to find them. \
-         A folder with only a lower-bound size also matches `size:unknown`.",
-    ),
-    (
-        Reader::Both,
-        "Use `<` and `>` to group expressions, and `!` to negate a group. \
-         Put a space after an unquoted regular expression before a closing `>`, \
-         or quote the expression, so `>` is not read as part of the pattern. \
-         Nesting and expanded query terms are bounded.",
-    ),
-    (
-        Reader::CommandLine,
-        "Files whose size or date Windows did not report add nothing to the size \
-         totals. When reading sizes and dates failed on a volume in scope, a search \
-         that uses them warns and exits 2. When the read succeeded, a file it could \
-         not read is rare and is left out without a warning.",
-    ),
-    (
-        Reader::CommandLine,
-        "A folder's size is the total of the known sizes of the files below it, \
-         each name of a hard-linked file counted; `size:`, `-size` and `-sort size` \
-         use it. `-get-total-size` and `-get-folder-size` add only files, so no file \
-         is counted twice.",
-    ),
-    (
-        Reader::CommandLine,
-        "A search shows the files in folders you can open, and folder sizes only if \
-         you see every file. The users and groups that `gozlerd see-every-file` \
-         lists see every file.",
-    ),
-    (
-        Reader::Both,
-        "Dates use local time. `today`, `yesterday` and `tomorrow` are calendar days. \
-         `this`, `last` and `next` before `week`, `month` or `year` select a calendar \
-         period; weeks start on the first day set in Windows. `current` means `this`, \
-         `past` and `prev` mean `last`, and `coming` means `next`. \
-         `7days` and `last7days` are the 7 times 24 hours before the search starts; \
-         `1weeks` is the same duration. `10minutes` and `2hours` count back from \
-         the search start. `dm:<30days` finds files older than 30 days.",
-    ),
-    (
-        Reader::CommandLine,
-        r"`regex:` and `-r` use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with `-p`, or when it contains `\\`, it matches the full path, whose separators are `\`, so write `\\` or `[\\/]` for a separator. `|` and `!` inside a pattern belong to the expression.",
-    ),
-    (
-        Reader::SearchBox,
-        r"With Regular expression in the Match list, the whole search box is one pattern. `regex:` and that pattern use Rust regular expressions, without look-around or backreferences. A pattern matches the name; with Match path, or when it contains `\\`, it matches the full path, whose separators are `\`, so write `\\` or `[\\/]` for a separator.",
-    ),
-    (
-        Reader::CommandLine,
-        "Dates print as ISO 8601 in local time, whatever the locale. Plain output \
-         groups the digits of a size with commas; CSV and TSV print plain bytes. \
-         Attributes print as letters, such as HA, and in CSV and TSV as their \
-         FILE_ATTRIBUTE_* number, such as 34.",
-    ),
-    (
-        Reader::CommandLine,
-        concat!(
-            "JSON search results include readable local `mtime` and `created` dates \
-             beside `mtime_ft` and `created_ft`. Unknown dates are omitted. `total` \
-             counts every match; `more` is true when matching rows were left out. \
-             Check `volumes_incomplete`, `metadata_pending` and the exit code before \
-             treating an answer as complete. Warnings and errors go to stderr, not \
-             into JSON. See ",
-            env!("CARGO_PKG_REPOSITORY"),
-            "/blob/main/docs/JSON.md for fields and script examples."
-        ),
-    ),
-    (
-        Reader::CommandLine,
-        "An unknown search function, such as `unknown:`, or an unbalanced or empty \
-         group is invalid input and exits 4.",
+        "Notes on results and exit codes:",
+        &[
+            (
+                Reader::CommandLine,
+                "A search shows the files in folders you can open, and folder sizes only if \
+                 you see every file. Users and groups listed by `gozlerd see-every-file` \
+                 see every file.",
+            ),
+            (
+                Reader::CommandLine,
+                "When the result limit leaves matches out, gozler writes the shown and \
+                 total counts to stderr and exits 10. `-export-*` writes every match unless \
+                 `-n` is given, and `-get-result-count` and the size totals count every \
+                 match.",
+            ),
+            (
+                Reader::CommandLine,
+                "When a volume in scope is not ready (indexing, rescanning, offline or \
+                 failed), gozler prints the results it has, warns on stderr and exits 2. With `-path`, \
+                 scope includes volumes reached through folder mounts and links. `--status` \
+                 exits 2 when any volume is not ready or its sizes and dates could not be read. \
+                 With both `--status` and `--server-version`, the last report wins.",
+            ),
+            (
+                Reader::CommandLine,
+                "When several exit codes apply, the most serious wins: a failure, then 2, \
+                 then 9 or 10, then 0. So no matches while a volume in scope is indexing \
+                 exits 2, because the matches may still appear.",
+            ),
+        ],
     ),
 ];
 
@@ -482,6 +462,9 @@ struct Entry {
     usage: String,
     text: &'static str,
     usage_kind: Usage,
+    /// The other names of an option or search function, which follow the
+    /// description, so the usage column holds one name to scan.
+    aliases: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -530,9 +513,7 @@ fn full_sections() -> Vec<Section> {
         .collect();
     let mut sections = vec![
         section("Examples:", examples),
-        search_terms(
-            "Search syntax (what gozler receives; quote it for the shell as shown below):",
-        ),
+        search_terms("Search syntax (the text gozler receives):"),
         section(
             "Quoting in the shell:",
             QUOTING
@@ -547,9 +528,13 @@ fn full_sections() -> Vec<Section> {
         let options = SWITCHES
             .iter()
             .filter(|switch| switch.group == group)
-            .map(|switch| Entry {
-                usage_kind: Usage::Options,
-                ..entry(switch_usage(&switch.spelling), switch.help)
+            .map(|switch| {
+                let (usage, aliases) = switch_usage(&switch.spelling);
+                Entry {
+                    usage_kind: Usage::Options,
+                    aliases,
+                    ..entry(usage, switch.help)
+                }
             })
             .collect();
         sections.push(section(title, options));
@@ -576,12 +561,14 @@ fn search_functions() -> Section {
         SEARCH_FUNCTIONS
             .iter()
             .map(|function| {
-                let forms: Vec<String> = function
+                let (first, others) = function
                     .names
-                    .iter()
-                    .map(|name| format!("{name}:{}", function.example))
-                    .collect();
-                entry(forms.join(", "), function.help)
+                    .split_first()
+                    .expect("every search function has a name");
+                Entry {
+                    aliases: others.iter().map(|name| format!("{name}:")).collect(),
+                    ..entry(format!("{first}:{}", function.example), function.help)
+                }
             })
             .collect(),
     )
@@ -624,6 +611,7 @@ fn entry(usage: String, text: &'static str) -> Entry {
         usage,
         text,
         usage_kind: Usage::Expression,
+        aliases: Vec::new(),
     }
 }
 
@@ -638,18 +626,20 @@ fn section(title: &'static str, entries: Vec<Entry>) -> Section {
     Section { title, entries }
 }
 
-/// The forms of a switch the help lists, such as `-n N, -max-results N`.
-fn switch_usage(spelling: &Spelling) -> String {
+/// The usage of a switch the help lists, such as `-n N`, and its other
+/// names, such as `-max-results`.
+fn switch_usage(spelling: &Spelling) -> (String, Vec<String>) {
     match spelling {
         Spelling::Es { names, action } => {
             let param = action.param().map(|p| format!(" {p}")).unwrap_or_default();
-            let forms: Vec<String> = names.iter().map(|n| format!("-{n}{param}")).collect();
-            forms.join(", ")
+            let (first, others) = names.split_first().expect("every switch has a name");
+            let aliases = others.iter().map(|name| format!("-{name}")).collect();
+            (format!("-{first}{param}"), aliases)
         }
-        Spelling::Family { usage, .. } => (*usage).to_string(),
+        Spelling::Family { usage, .. } => ((*usage).to_string(), Vec::new()),
         Spelling::Native { name, action } => {
             let param = action.param().map(|p| format!(" {p}")).unwrap_or_default();
-            format!("--{name}{param}")
+            (format!("--{name}{param}"), Vec::new())
         }
     }
 }
@@ -671,49 +661,59 @@ fn render_section(out: &mut String, section: &Section, color: bool, line_width: 
     render(out, &section.entries, color, line_width);
 }
 
-/// Writes the notes for `reader` and for both helps, after a blank line.
+/// Writes the notes for `reader` and for both helps, each topic that has
+/// any after a blank line and its title.
 fn render_notes(out: &mut String, reader: Reader, color: bool, line_width: usize) {
-    out.push('\n');
-    wrap_usage(
-        out,
-        0,
-        "Notes:",
-        Usage::Styled(ColorToken::Strong),
-        color,
-        line_width,
-    );
-    for &(_, note) in NOTES
-        .iter()
-        .filter(|(note_reader, _)| [reader, Reader::Both].contains(note_reader))
-    {
-        out.push_str("  - ");
-        wrap(out, 4, note, 4, color, line_width);
+    for &(title, notes) in NOTES {
+        let notes: Vec<&str> = notes
+            .iter()
+            .filter(|(note_reader, _)| [reader, Reader::Both].contains(note_reader))
+            .map(|&(_, note)| note)
+            .collect();
+        if notes.is_empty() {
+            continue;
+        }
+        out.push('\n');
+        wrap_usage(
+            out,
+            0,
+            title,
+            Usage::Styled(ColorToken::Strong),
+            color,
+            line_width,
+        );
+        for note in notes {
+            out.push_str("  - ");
+            wrap(out, 4, note, 4, color, line_width);
+        }
     }
 }
 
 /// Uses one description column for the whole section, stacking every row
 /// when the longest usage would leave less than 24 columns for descriptions.
+/// A stacked description is indented below its usage, so the usages stand
+/// out when the reader scans the section. A row's other names follow its
+/// description on a line of their own.
 fn render(out: &mut String, entries: &[Entry], color: bool, line_width: usize) {
     let width = entries.iter().map(|e| e.usage.len()).max().unwrap_or(0) + 2;
     let longest = entries
         .iter()
-        .flat_map(|entry| entry.text.split(' '))
-        .map(word_width)
+        .flat_map(|entry| {
+            let aliases = entry.aliases.iter().map(|alias| alias.len() + 1);
+            entry.text.split(' ').map(word_width).chain(aliases)
+        })
         .max()
         .unwrap_or(0);
-    let indent = if 2 + width + longest.max(24) > line_width {
-        2
-    } else {
-        2 + width
-    };
+    let stacked = 2 + width + longest.max(24) > line_width;
+    let indent = if stacked { 6 } else { 2 + width };
     for entry in entries {
         out.push_str("  ");
-        if indent > 2 {
-            syntax(out, &entry.usage, entry.usage_kind, color);
-            out.push_str(&" ".repeat(width - entry.usage.len()));
-        } else {
+        if stacked {
             wrap_usage(out, 2, &entry.usage, entry.usage_kind, color, line_width);
             out.push_str(&" ".repeat(indent));
+        } else {
+            syntax(out, &entry.usage, entry.usage_kind, color);
+            out.push_str(&" ".repeat(width - entry.usage.len()));
         }
         let mut description = String::new();
         wrap(
@@ -724,6 +724,18 @@ fn render(out: &mut String, entries: &[Entry], color: bool, line_width: usize) {
             false,
             line_width,
         );
+        if !entry.aliases.is_empty() {
+            description.push_str(&" ".repeat(indent));
+            let aliases = format!("Other names: {}", entry.aliases.join(", "));
+            wrap(
+                &mut description,
+                indent,
+                &aliases,
+                indent,
+                false,
+                line_width,
+            );
+        }
         paint(out, ColorToken::Muted, &description, color);
     }
 }
@@ -910,8 +922,10 @@ mod tests {
         parse_query_with(query, options)
     }
 
-    /// The usages of the full reference's section whose title starts with
-    /// `title`.
+    /// The forms each row of the full reference's section whose title starts
+    /// with `title` lists, joined with `, `: its usage, then each other name
+    /// with the usage's value, as `-count N` beside `-n N`, or `whole:readme.txt`
+    /// beside `wfn:readme.txt`.
     fn entries(title: &str) -> Vec<String> {
         full_sections()
             .into_iter()
@@ -919,7 +933,22 @@ mod tests {
             .unwrap_or_else(|| panic!("the full reference has a {title} section"))
             .entries
             .into_iter()
-            .map(|entry| entry.usage)
+            .map(|entry| {
+                let mut forms = vec![entry.usage.clone()];
+                for alias in &entry.aliases {
+                    let form = if alias.ends_with(':') {
+                        let value = entry.usage.split_once(':').map_or("", |(_, value)| value);
+                        format!("{alias}{value}")
+                    } else {
+                        match entry.usage.split_once(' ') {
+                            Some((_, param)) => format!("{alias} {param}"),
+                            None => alias.clone(),
+                        }
+                    };
+                    forms.push(form);
+                }
+                forms.join(", ")
+            })
             .collect()
     }
 
@@ -1120,7 +1149,7 @@ mod tests {
         render(&mut narrow, &entries, false, 50);
         assert_eq!(
             narrow,
-            "  gozler report\n  Find reports\n  gozler -export-csv out.csv ext:cs\n  Save C# files\n"
+            "  gozler report\n      Find reports\n  gozler -export-csv out.csv ext:cs\n      Save C# files\n"
         );
     }
 

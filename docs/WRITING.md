@@ -105,5 +105,9 @@ The option table decides which words are options and which are their values;
 the help does not guess a search expression's meaning from its punctuation.
 Each help section aligns descriptions after its longest usage. When that
 leaves less than 24 columns for descriptions, every row in that section puts
-its description below the usage. Color changes neither text nor alignment;
-redirected output and `NO_COLOR` keep the same layout without ANSI sequences.
+its description below the usage, indented four columns more, so the usages
+stand out. A row's usage shows one name of an option or search function; its
+other names follow the description on a line that starts with "Other names:",
+so the usage column stays narrow enough to scan. Color changes neither text
+nor alignment; redirected output and `NO_COLOR` keep the same layout without
+ANSI sequences.

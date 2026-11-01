@@ -510,16 +510,17 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Regex,
         },
         group: Group::Search,
-        help: "Also match PATTERN as a regular expression, as `regex:` does; spaces \
+        help: "Match PATTERN as a regular expression, as `regex:` does; spaces \
                and quotes in PATTERN are part of it",
     },
     Switch {
         spelling: Spelling::Family {
-            usage: "/aLETTERS, /a-h-s",
+            usage: "/aLETTERS",
             parse: parse_attribute_switch,
         },
         group: Group::Search,
-        help: "Require letters; prefix each unwanted letter with `-`",
+        help: "Require each attribute letter; put `-` before a letter to exclude it, \
+               as in `/ad` for folders and `/a-d` for files",
     },
     Switch {
         spelling: Spelling::Es {
@@ -527,7 +528,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Limit,
         },
         group: Group::LimitAndSort,
-        help: "Show at most N results (default 20); `-n all` shows every result",
+        help: "Show at most N results; the default is 20, and `-n all` shows every result",
     },
     Switch {
         spelling: Spelling::Es {
@@ -535,7 +536,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::SortParam,
         },
         group: Group::LimitAndSort,
-        help: "Sort by KEY (listed below); add `-ascending` \
+        help: "Sort by KEY, one of the sort keys below; add `-ascending` \
                or `-descending` to KEY to set the order, as in `size-ascending`",
     },
     Switch {
@@ -559,12 +560,12 @@ pub(super) const SWITCHES: &[Switch] = &[
     },
     Switch {
         spelling: Spelling::Family {
-            usage: "/on, /o-n, /os, /o-s, /od, /o-d, /oe, /o-e",
+            usage: "/on, /os, /od, /oe",
             parse: parse_order_switch,
         },
         group: Group::LimitAndSort,
         help: "Sort as dir does by name, size, date or extension: A to Z, smallest \
-               or oldest first; `/o-` reverses the order",
+               or oldest first; put `-` after `/o` to reverse the order, as in `/o-d`",
     },
     Switch {
         spelling: Spelling::Es {
@@ -596,7 +597,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Json,
         },
         group: Group::Output,
-        help: "Print the results or daemon report as JSON",
+        help: "Print the results, or the `--status` report, as JSON",
     },
     Switch {
         spelling: Spelling::Es {
@@ -645,8 +646,9 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::FullPath),
         },
         group: Group::Output,
-        help: "Put the Filename column (the full path) here; without this option, \
-               gozler adds it last unless `-name` or `-path-column` is given",
+        help: "Add the Filename column, the full path, where this option stands among \
+               the column options, as in `-full-path-and-name -size`; without it, the \
+               full path is the last column, and `-name` or `-path-column` leaves it out",
     },
     Switch {
         spelling: Spelling::Es {

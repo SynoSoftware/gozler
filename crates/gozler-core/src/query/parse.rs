@@ -419,7 +419,8 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         example: ">1mb",
         help: "Size of a file, or of the files below a folder; also `<`, `<=`, `>=`, `=`, \
                ranges such as `1mb..10mb`, and `empty`, `tiny`, `small`, `medium`, `large`, \
-               `huge` or `gigantic`; `unknown` finds missing sizes",
+               `huge` or `gigantic`; `empty` is 0 bytes, and `unknown` finds items whose \
+               size gozler does not know",
     },
     SearchFunction {
         names: &["dm", "datemodified", "date-modified"],
@@ -427,7 +428,8 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         example: "today",
         help: "Date modified: `today`, `yesterday`, `YYYY-MM-DD`, `Nminutes`, `Nhours`, `Ndays`, `lastNdays`, `Nweeks`, \
                or `thisweek`, `lastmonth`, `thisyear` and other calendar periods; also `<`, `<=`, `>`, \
-               `>=`, ranges such as `2026-01-01..2026-03-31`, and `unknown`",
+               `>=` and ranges such as `2026-01-01..2026-03-31`; `unknown` finds items whose \
+               date gozler does not know",
     },
     SearchFunction {
         names: &["dc", "datecreated", "date-created"],
@@ -478,8 +480,9 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["ww"],
         function: Function::WholeWord,
         example: "word",
-        help: "Name contains word, with no letter or digit right before or after it; \
-               with `\\` or `/` in the value, the full path must contain it",
+        help: "Name contains word, with no letter or digit right before or after it, \
+               so `ww:log` finds app.log but not catalog; with `\\` or `/` in the value, \
+               the full path must contain it",
     },
     SearchFunction {
         names: &["wordstart"],
