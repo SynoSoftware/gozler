@@ -35,8 +35,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR, DefWindowProcW, DispatchMessageW,
     EndMenu, GA_ROOT, GWLP_USERDATA, GetAncestor, GetCursorPos, GetMessageW, GetScrollInfo,
     GetSystemMetrics, GetWindowLongPtrW, GetWindowThreadProcessId, HHOOK, HICON, HTCLIENT,
-    IDC_ARROW, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR, LoadCursorW,
-    LoadImageW, MINMAXINFO, MSG, MSGF_DIALOGBOX, MSGF_MESSAGEBOX, MWMO_INPUTAVAILABLE,
+    IDC_ARROW, IDC_IBEAM, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR,
+    LoadCursorW, LoadImageW, MINMAXINFO, MSG, MSGF_DIALOGBOX, MSGF_MESSAGEBOX, MWMO_INPUTAVAILABLE,
     MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostQuitMessage, PostThreadMessageW,
     QS_ALLINPUT, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
     SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS,
@@ -1308,6 +1308,16 @@ pub(crate) fn show_resize_cursor() {
     // SAFETY: IDC_SIZENS is a predefined cursor, which is never destroyed.
     unsafe {
         if let Ok(cursor) = LoadCursorW(None, IDC_SIZENS) {
+            SetCursor(Some(cursor));
+        }
+    }
+}
+
+/// Shows the I-beam, as over text that a drag selects.
+pub(crate) fn show_text_cursor() {
+    // SAFETY: IDC_IBEAM is a predefined cursor, which is never destroyed.
+    unsafe {
+        if let Ok(cursor) = LoadCursorW(None, IDC_IBEAM) {
             SetCursor(Some(cursor));
         }
     }

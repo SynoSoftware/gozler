@@ -954,7 +954,8 @@
     "end": "Son",
     "percent": "%{0}",
     "copy_too_large_text": "{0} kopyalanamayacak kadar büyük. Kopyala, metin olarak en fazla {1} boyutundaki dosyaları kopyalar.",
-    "copy_too_large_hex": "{0} kopyalanamayacak kadar büyük. Kopyala, onaltılık olarak en fazla {1} boyutundaki dosyaları kopyalar."
+    "copy_too_large_hex": "{0} kopyalanamayacak kadar büyük. Kopyala, onaltılık olarak en fazla {1} boyutundaki dosyaları kopyalar.",
+    "copy_too_large_selection": "Seçim kopyalanamayacak kadar büyük. Kopyala, en fazla {0} metin kopyalar."
   },
   "message": {
     "argument_missing": "{0} seçeneğinden sonra bir değer girin.",

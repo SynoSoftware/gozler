@@ -207,22 +207,141 @@ pub(crate) fn without_terminator(line: &str) -> &str {
         .unwrap_or(line)
 }
 
-/// `line` with each tab replaced by the spaces that reach the next multiple
-/// of 8 columns. A column is one character.
+/// Each character of `line` with the column where it starts and the
+/// columns it takes: one, or for a tab those that reach the next multiple of
+/// [`TAB_COLUMNS`]. A column is one character.
+fn cells(line: &str) -> impl Iterator<Item = (char, usize, usize)> + '_ {
+    line.chars().scan(0, |column, c| {
+        let width = if c == '\t' {
+            TAB_COLUMNS - *column % TAB_COLUMNS
+        } else {
+            1
+        };
+        let at = *column;
+        *column += width;
+        Some((c, at, width))
+    })
+}
+
+/// `line` with each tab replaced by the spaces of its [`cells`].
 pub(crate) fn expand_tabs(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
-    let mut column = 0;
-    for c in line.chars() {
+    for (c, _, width) in cells(line) {
         if c == '\t' {
-            let spaces = TAB_COLUMNS - column % TAB_COLUMNS;
-            out.extend(std::iter::repeat_n(' ', spaces));
-            column += spaces;
+            out.extend(std::iter::repeat_n(' ', width));
         } else {
             out.push(c);
-            column += 1;
         }
     }
     out
+}
+
+/// The column where the character `index` of `line` starts once its tabs
+/// expand; an `index` past the end gives the line's width.
+pub(crate) fn column_of(line: &str, index: usize) -> usize {
+    cells(line).take(index).map(|(_, _, width)| width).sum()
+}
+
+/// The place between characters of `line` nearest to `column` once its
+/// tabs expand: a column inside a tab goes to its nearer side, and one past
+/// the end to the end.
+pub(crate) fn index_at_column(line: &str, column: usize) -> usize {
+    match cells(line)
+        .enumerate()
+        .find(|(_, (_, at, width))| column < at + width)
+    {
+        Some((index, (_, at, width))) => index + usize::from((column - at) * 2 > width),
+        None => line.chars().count(),
+    }
+}
+
+/// The character of `line` whose cell holds `column` once its tabs expand;
+/// a column past the end gives the line's last character.
+pub(crate) fn index_under_column(line: &str, column: usize) -> usize {
+    cells(line)
+        .position(|(_, at, width)| column < at + width)
+        .unwrap_or_else(|| line.chars().count().saturating_sub(1))
+}
+
+/// The characters of `line` that a double-click on its character `index`
+/// selects: a run of letters, digits and `_`, a run of white space, or a
+/// single other character.
+pub(crate) fn word_at(line: &str, index: usize) -> std::ops::Range<usize> {
+    let chars: Vec<char> = line.chars().collect();
+    let Some(&c) = chars.get(index) else {
+        return index..index;
+    };
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let same: fn(char) -> bool = if word(c) {
+        word
+    } else if c.is_whitespace() {
+        char::is_whitespace
+    } else {
+        return index..index + 1;
+    };
+    let start = index
+        - chars[..index]
+            .iter()
+            .rev()
+            .take_while(|&&c| same(c))
+            .count();
+    let end = index + chars[index..].iter().take_while(|&&c| same(c)).count();
+    start..end
+}
+
+/// A place between two characters of the text: the line piece that holds
+/// it, by the offset where it starts, and how many characters of that
+/// piece, without its terminator, come before it. Places order as they
+/// follow in the file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TextPoint {
+    pub(crate) line: u64,
+    pub(crate) char: usize,
+}
+
+/// The text between `from` and `to`, at or after it, with the file's own
+/// line ends and tabs, as Copy puts a selection on the clipboard. `bytes`
+/// are the file's bytes from `from.line` through the piece that starts at
+/// `to.line`, or to the file's end, with `last` set. A piece decodes as
+/// [`decode_piece`] shows it. Fewer bytes than that copy less, and never
+/// panic.
+pub(crate) fn text_between(
+    encoding: Encoding,
+    bytes: &[u8],
+    from: TextPoint,
+    to: TextPoint,
+    last: bool,
+    ansi: &dyn Fn(&[u8]) -> String,
+) -> String {
+    let piece_end =
+        |at: usize| at + piece_len(encoding, &bytes[at..], last).unwrap_or(bytes.len() - at);
+    let to_offset = usize::try_from(to.line.saturating_sub(from.line))
+        .unwrap_or(usize::MAX)
+        .min(bytes.len());
+    let tail = decode_piece(encoding, &bytes[to_offset..piece_end(to_offset)], ansi);
+    let tail = without_terminator(&tail);
+    let tail = &tail[..char_offset(tail, to.char)];
+    if to_offset == 0 {
+        return tail[char_offset(tail, from.char)..].to_owned();
+    }
+    // `to.line` can start inside the piece at `from.line`, where the line
+    // started too far back for the two directions to agree on its pieces.
+    let first_end = piece_end(0).min(to_offset);
+    let head = decode_piece(encoding, &bytes[..first_end], ansi);
+    let skip = from.char.min(without_terminator(&head).chars().count());
+    // Pieces start at characters, so the whole span decodes as its pieces
+    // do, in one string of up to Copy's limit.
+    let mut text = decode_piece(encoding, &bytes[..to_offset], ansi);
+    text.drain(..char_offset(&text, skip));
+    text.push_str(tail);
+    text
+}
+
+/// The byte offset of the character `index` of `text`, or its length.
+pub(crate) fn char_offset(text: &str, index: usize) -> usize {
+    text.char_indices()
+        .nth(index)
+        .map_or(text.len(), |(i, _)| i)
 }
 
 /// The offset where the line, or the piece of a long line, that holds
@@ -642,8 +761,72 @@ mod tests {
         assert_eq!(without_terminator("end"), "end");
     }
 
+    /// The pointer over a tab selects up to its nearer side, and a click
+    /// past a line's end reaches its end.
+    #[test]
+    fn a_column_inside_a_tab_maps_to_its_nearer_side() {
+        // "a\tb": a in column 0, the tab in 1 to 7, b in 8.
+        assert_eq!(column_of("a\tb", 2), 8);
+        assert_eq!(index_at_column("a\tb", 4), 1);
+        assert_eq!(index_at_column("a\tb", 5), 2);
+        assert_eq!(index_at_column("a\tb", 20), 3);
+        assert_eq!(index_under_column("a\tb", 7), 1);
+        assert_eq!(index_under_column("a\tb", 20), 2);
+    }
+
+    #[test]
+    fn a_double_click_selects_a_word_a_space_run_or_one_mark() {
+        let line = "let x_1 =  (5);";
+        assert_eq!(word_at(line, 5), 4..7);
+        assert_eq!(word_at(line, 9), 9..11);
+        assert_eq!(word_at(line, 11), 11..12);
+    }
+
     // "one\n" 0..4, "two\r\n" 4..9, "three\r" 9..15, "four" 15..19.
     const LINES: &[u8] = b"one\ntwo\r\nthree\rfour";
+
+    /// A selection copies the file's own line ends between its first and
+    /// its last character, and a place at a line's end takes the line end.
+    #[test]
+    fn a_selection_copies_from_its_first_character_to_its_last() {
+        let point = |line, char| TextPoint { line, char };
+        let between = |from: TextPoint, to| {
+            let bytes = &LINES[from.line as usize..];
+            text_between(Encoding::Utf8, bytes, from, to, true, &latin1)
+        };
+        assert_eq!(between(point(0, 1), point(15, 2)), "ne\ntwo\r\nthree\rfo");
+        assert_eq!(between(point(4, 1), point(4, 3)), "wo");
+        assert_eq!(between(point(4, 3), point(9, 0)), "\r\n");
+        let wide = utf16le("one\r\ntwo");
+        assert_eq!(
+            text_between(
+                Encoding::Utf16Le,
+                &wide,
+                point(0, 2),
+                point(10, 2),
+                true,
+                &latin1
+            ),
+            "e\r\ntw"
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn a_selection_over_any_bytes_never_panics(
+            bytes in proptest::collection::vec(proptest::num::u8::ANY, 0..64),
+            to in 0u64..80,
+            from_char in 0usize..80,
+            to_char in 0usize..80,
+            last: bool,
+        ) {
+            let from = TextPoint { line: 0, char: from_char };
+            let to = TextPoint { line: to, char: to_char };
+            for encoding in [Encoding::Utf8, Encoding::Utf16Le] {
+                let _ = text_between(encoding, &bytes, from, to, last, &latin1);
+            }
+        }
+    }
 
     #[test]
     fn a_line_starts_after_the_terminator_before_any_byte() {

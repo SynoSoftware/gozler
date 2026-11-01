@@ -954,7 +954,8 @@
     "end": "End",
     "percent": "{0}%",
     "copy_too_large_text": "{0} is too large to copy. Copy takes files up to {1} as text.",
-    "copy_too_large_hex": "{0} is too large to copy. Copy takes files up to {1} as hex."
+    "copy_too_large_hex": "{0} is too large to copy. Copy takes files up to {1} as hex.",
+    "copy_too_large_selection": "The selection is too large to copy. Copy takes up to {0} of text."
   },
   "message": {
     "argument_missing": "Enter a value after {0}.",

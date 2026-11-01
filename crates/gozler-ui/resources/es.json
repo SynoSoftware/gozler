@@ -954,7 +954,8 @@
     "end": "Final",
     "percent": "{0} %",
     "copy_too_large_text": "{0} es demasiado grande para copiarlo. Copiar admite archivos de hasta {1} como texto.",
-    "copy_too_large_hex": "{0} es demasiado grande para copiarlo. Copiar admite archivos de hasta {1} en hexadecimal."
+    "copy_too_large_hex": "{0} es demasiado grande para copiarlo. Copiar admite archivos de hasta {1} en hexadecimal.",
+    "copy_too_large_selection": "La selección es demasiado grande para copiarla. Copiar admite hasta {0} de texto."
   },
   "message": {
     "argument_missing": "Escribe un valor después de {0}.",

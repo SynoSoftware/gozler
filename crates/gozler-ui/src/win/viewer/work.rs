@@ -3,7 +3,6 @@
 
 use super::ViewerEvent;
 use crate::core::clipboard::{Publication, RETRY_AFTER};
-use crate::core::viewer::copy_text;
 use crate::core::viewer_window::{BLOCK_BYTES, CopyText};
 use crate::win::clipboard::{ClipboardBlock, CopyAttempt, CopyFailure};
 use crate::win::folder::{Register, reason, unregister, verbatim_wide};
@@ -242,9 +241,9 @@ impl Reading {
             .map(|bytes| ViewerEvent::Block { index, bytes })
     }
 
-    /// Reads the file whole and puts its text on the clipboard, retrying
-    /// while another program holds the clipboard as the main window's Copy
-    /// does; `None` when a newer command replaced it.
+    /// Reads the selection's bytes and puts its text on the clipboard,
+    /// retrying while another program holds the clipboard as the main
+    /// window's Copy does; `None` when a newer command replaced it.
     fn copy(
         &self,
         copy: CopyText,
@@ -253,8 +252,12 @@ impl Reading {
         cancel: &CancelToken,
         worker: &OffThread,
     ) -> Result<Option<ViewerEvent>, WinError> {
-        let mut bytes = Vec::with_capacity(usize::try_from(copy.len).unwrap_or(0));
-        for index in 0..copy.len.div_ceil(BLOCK_BYTES as u64) {
+        let block_bytes = BLOCK_BYTES as u64;
+        let first = copy.bytes.start / block_bytes;
+        let base = first * block_bytes;
+        let wanted = copy.bytes.end - base;
+        let mut bytes = Vec::with_capacity(usize::try_from(wanted).unwrap_or(0));
+        for index in first..copy.bytes.end.div_ceil(block_bytes) {
             if !current() {
                 return Ok(None);
             }
@@ -265,8 +268,11 @@ impl Reading {
                 break;
             }
         }
-        bytes.truncate(usize::try_from(copy.len).unwrap_or(usize::MAX));
-        let text = copy_text(copy.mode, copy.detected, &bytes, &ansi_text);
+        bytes.truncate(usize::try_from(wanted).unwrap_or(usize::MAX));
+        let skip = usize::try_from(copy.bytes.start - base)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let text = copy.text(&bytes[skip..], &ansi_text);
         drop(bytes);
         let Some(mut block) = ClipboardBlock::text(&text) else {
             let error = windows::core::Error::from_hresult(E_OUTOFMEMORY);
