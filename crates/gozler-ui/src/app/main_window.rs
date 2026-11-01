@@ -2535,10 +2535,16 @@ impl MainWindow {
                         };
                         if !offered {
                             let reason = win::error_text(&failure.error);
-                            let text = {
+                            let (title, text) = {
                                 let model = self.model.borrow();
                                 let strings = model.strings();
-                                match failure.target {
+                                // A path that does not open says so under
+                                // "Open", as a panel's does.
+                                let title = match failure.target {
+                                    OpenTarget::Command(_) => "window.title",
+                                    _ => "panel.open_title",
+                                };
+                                let text = match failure.target {
                                     OpenTarget::Command(program) => {
                                         strings.format("message.open_failed", &[&program, &reason])
                                     }
@@ -2553,13 +2559,22 @@ impl MainWindow {
                                     OpenTarget::Administrator => {
                                         strings.format("panel.administrator_failed", &[&reason])
                                     }
-                                }
+                                };
+                                (strings.text(title).to_owned(), text)
                             };
-                            self.error_box(self.fix_owner(hwnd), &text);
+                            win::dialog::error_box(Some(self.fix_owner(hwnd)), &text, &title);
                         }
                     }
                     if self.created().work.borrow().shell.is_current(purpose, id) {
-                        self.report_missing(hwnd, opened.missing);
+                        // An entry that is gone when the person opens it
+                        // says so under "Open", as a panel's does.
+                        let title = match purpose {
+                            ShellPurpose::Entries(_, EntryAction::Open)
+                            | ShellPurpose::Commander(_)
+                            | ShellPurpose::Reveal => "panel.open_title",
+                            _ => "window.title",
+                        };
+                        self.report_missing(hwnd, opened.missing, title);
                     }
                 }
                 ModalStep::Paired(id, _, _)
@@ -3452,7 +3467,7 @@ impl MainWindow {
             return;
         };
         let missing = shell::drag(&entries.dragged());
-        self.report_missing(hwnd, missing);
+        self.report_missing(hwnd, missing, "window.title");
     }
 
     /// Redraws the rows that a drop's highlight left or reached.
@@ -3498,17 +3513,20 @@ impl MainWindow {
         self.drag_over(point, keys, allowed);
     }
 
-    /// Says that `missing`, which the person chose, no longer exists
-    /// (DESIGN.md: Feedback).
-    fn report_missing(&self, hwnd: Hwnd, missing: Option<Vec<u16>>) {
+    /// Says that `missing`, which the person chose, no longer exists, under
+    /// the title whose catalogue key is `title` (DESIGN.md: Feedback).
+    fn report_missing(&self, hwnd: Hwnd, missing: Option<Vec<u16>>, title: &str) {
         let Some(path) = missing else { return };
         let path = String::from_utf16_lossy(&path);
-        let text = self
-            .model
-            .borrow()
-            .strings()
-            .format("message.no_longer_exists", &[&path]);
-        self.error_box(hwnd, &text);
+        let (title, text) = {
+            let model = self.model.borrow();
+            let strings = model.strings();
+            (
+                strings.text(title).to_owned(),
+                strings.format("message.no_longer_exists", &[&path]),
+            )
+        };
+        win::dialog::error_box(Some(hwnd), &text, &title);
     }
 
     /// Puts the selected files on the clipboard in `format` (DESIGN.md: C8, C9,
