@@ -110,8 +110,8 @@ owner has run it, and file an issue for each item that fails.
   folders and Open files. Then Open on a folder and on a file opens it in
   Total Commander, and Open file location, left empty, opens File Explorer
   with the entry selected.
-- After a restart of Windows with "Start Gozler when I sign in" on: with "Keep
-  Gozler running in the notification area" off, the window starts minimized;
+- After a restart of Windows with "Start when I sign in" on: with "Keep
+  running in the notification area" off, the window starts minimized;
   with it on, Gozler starts in the notification area with no window, and the
   shortcut or the tray icon shows it. Turned off, the `gozler` value under the
   current user's `Run` key is gone. Turned off in Task Manager's Startup apps,

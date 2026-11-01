@@ -6,7 +6,7 @@ use crate::core::text::{self, Numbers, Strings};
 use gozler_core::proto::ResultItem;
 
 /// The labels of the inspector's fields: one entry's, in the pane's order,
-/// then the several entries' Total size.
+/// then the several entries' Size of files.
 pub(super) const FIELD_LABELS: [&str; 5] = [
     "inspector.folder",
     "inspector.size",

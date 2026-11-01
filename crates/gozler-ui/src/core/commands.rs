@@ -1766,7 +1766,7 @@ pub(crate) const INSPECTOR_COPY_FOLDER: CommandButton = CommandButton {
     tip: None,
 };
 
-/// Hide details, the icon at the right end of the inspector's heading row.
+/// Hide inspector, the icon at the right end of the inspector's heading row.
 pub(crate) const HIDE_DETAILS: CommandButton = CommandButton {
     control: ControlId::InspectorHide,
     command: CommandId::Inspector,
@@ -1774,7 +1774,7 @@ pub(crate) const HIDE_DETAILS: CommandButton = CommandButton {
     tip: Some("inspector.hide"),
 };
 
-/// Show details, the icon at the right end of the status bar while the
+/// Show inspector, the icon at the right end of the status bar while the
 /// inspector is hidden, where the inspector comes up from.
 pub(crate) const SHOW_DETAILS: CommandButton = CommandButton {
     control: ControlId::StatusShowDetails,

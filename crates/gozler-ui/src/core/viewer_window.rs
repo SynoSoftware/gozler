@@ -749,7 +749,7 @@ impl Document {
             .collect()
     }
 
-    /// The status bar's position: "Top", "37 %" or "End" in Text, the first
+    /// The status bar's position: "Top", "37%" or "End" in Text, the first
     /// row's offset in Hex.
     pub(crate) fn place(&self, strings: &Strings, numbers: &dyn Numbers) -> String {
         if self.mode == Mode::Hex {
@@ -888,7 +888,7 @@ impl Shown {
 }
 
 /// The status bar's position part at its widest, which sets its width:
-/// "Top", "End", "99 %" or a 16-digit offset.
+/// "Top", "End", "99%" or a 16-digit offset.
 pub(crate) fn place_samples(strings: &Strings, numbers: &dyn Numbers) -> [String; 4] {
     [
         strings.text("viewer.top").to_owned(),

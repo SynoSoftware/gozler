@@ -245,7 +245,7 @@ pub(crate) struct ControlSizes {
 /// The height of the toolbars' buttons, each as tall as the control beside
 /// it: the search box's, also in the filter pane's header and beside the
 /// inspector's heading; a field row's for the inspector's copy icons; a
-/// status bar button's for Show details.
+/// status bar button's for Show inspector.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ToolHeights {
     pub(crate) row: Px,
@@ -994,7 +994,7 @@ impl FilterLayout {
 }
 
 /// The inspector's controls in the client area (DESIGN.md: Inspector pane).
-/// The heading's row holds the icon, the heading and Hide details; the fields
+/// The heading's row holds the icon, the heading and Hide inspector; the fields
 /// follow, a label and a value in each row. Copy path stands at the right end
 /// of the Date modified row, and the buttons at the right end of one entry's
 /// last row, the bottom right of the content, in one column. No control
@@ -1009,7 +1009,7 @@ pub(crate) struct InspectorLayout {
     pub(crate) splitter: Rect,
     pub(crate) icon: Rect,
     pub(crate) heading: Rect,
-    /// Hide details, a square icon at the right end of the heading's row.
+    /// Hide inspector, a square icon at the right end of the heading's row.
     pub(crate) hide: Rect,
     /// At the right end of the Date modified row, above the buttons and as
     /// wide.
@@ -1188,7 +1188,7 @@ impl InspectorLayout {
         Self::button_line(dpi, font_height, Self::FIELD_ROWS - 1).bottom()
     }
 
-    /// The narrowest pane whose heading's row fits with Hide details, and
+    /// The narrowest pane whose heading's row fits with Hide inspector, and
     /// whose labels and buttons fit side by side.
     fn min_width(dpi: Dpi, font_height: Px, captions: &CaptionWidths) -> Px {
         let px = |dip: Dip| dip.to_px(dpi);
@@ -1427,7 +1427,7 @@ impl Layout {
         let line_height = font_height + px(ROW_PADDING);
         let list_min_width = LIST_MIN_WIDTH.to_px(dpi);
         let list_min_height = Px(line_height.0 * LIST_MIN_ROWS);
-        // The memory group shows as in Search; Show details does not,
+        // The memory group shows as in Search; Show inspector does not,
         // because Commander mode has no inspector.
         let mut status = StatusLayout::compute(
             &captions.status,
@@ -1838,18 +1838,18 @@ pub(crate) struct StatusLayout {
     pub(crate) progress: Rect,
     pub(crate) cancel: Rect,
     minimum_middle: Px,
-    /// Show details, a square icon at the right end before the size grip,
+    /// Show inspector, a square icon at the right end before the size grip,
     /// in a part of its own, while the inspector is hidden.
     pub(crate) show_details: Option<Rect>,
     /// The main window's memory group, in parts of its own before Show
-    /// details and the size grip, while Settings > General shows it.
+    /// inspector and the size grip, while Settings > General shows it.
     pub(crate) memory: Option<MemoryLayout>,
     /// The main window's right group's width, which its parts share, to
-    /// the memory group, Show details or the size grip; `None` in the
+    /// the memory group, Show inspector or the size grip; `None` in the
     /// Settings dialog, whose right group is one part.
     right: Option<Px>,
     /// What the right end takes from the bar's width: the memory group,
-    /// Show details and the size grip.
+    /// Show inspector and the size grip.
     end: Px,
 }
 
@@ -2159,7 +2159,7 @@ impl StatusLayout {
     /// The widths of the status bar's parts but the last, which takes the
     /// rest: the left and middle groups, the right group's shown parts,
     /// which need `right`, the last taking the rest of the group, and the
-    /// memory figures' parts, the app's only when Show details has the last
+    /// memory figures' parts, the app's only when Show inspector has the last
     /// part.
     pub(crate) fn part_widths(&self, right: &[Px]) -> Vec<Px> {
         let before_last = right.split_last().map_or(&[][..], |(_, before)| before);
@@ -2773,7 +2773,7 @@ mod tests {
                 assert!((right.width.0 - left.width.0).abs() <= 1);
                 assert_eq!(layout.status.groups[0], Px(0));
                 // The memory group shows as in Search, after the right
-                // group, and Show details does not.
+                // group, and Show inspector does not.
                 assert_eq!(layout.status.memory.is_some(), show_memory);
                 assert_eq!(layout.status.show_details, None);
                 let parts = (layout.status.part_widths(&[]).into_iter())

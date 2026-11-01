@@ -3,7 +3,7 @@
 //! service on the right. The main window and the Settings dialog each have
 //! one; Settings shows only its changes and its own work. It owns the native
 //! job controls and, in the main window, the transfer summary, memory group
-//! and Show details. The core supplies the captions and layout; Windows draws
+//! and Show inspector. The core supplies the captions and layout; Windows draws
 //! every control.
 
 mod indexing;
@@ -67,7 +67,7 @@ pub(super) struct StatusBar {
     view: Label,
     work: Vec<(WorkId, Work)>,
     indexing: RefCell<Vec<Indexing>>,
-    /// The main window's Show details, a toolbar of its one icon.
+    /// The main window's Show inspector, a toolbar of its one icon.
     show_details: Option<Toolbar>,
     /// The tooltips of the main window's memory figures and files total.
     part_tips: Option<Tooltip>,
@@ -79,7 +79,7 @@ pub(super) struct StatusBar {
 impl StatusBar {
     /// Creates the main window's status bar at the bottom of `parent`, with
     /// the size grip, because the person resizes the window, the memory
-    /// group and Show details.
+    /// group and Show inspector.
     pub(super) fn for_window(parent: Hwnd) -> windows::core::Result<StatusBar> {
         let mut status = StatusBar::create(parent, true)?;
         status.transfer = Some(Transfer::create(status.bar.hwnd())?);
@@ -126,12 +126,12 @@ impl StatusBar {
         Ok(status)
     }
 
-    /// Show details, whose tooltip the main window gives.
+    /// Show inspector, whose tooltip the main window gives.
     pub(super) fn show_details(&self) -> Option<Toolbar> {
         self.show_details
     }
 
-    /// Gives Show details the name that screen readers say.
+    /// Gives Show inspector the name that screen readers say.
     pub(super) fn set_show_details_caption(&self, caption: &str) {
         if let Some(show) = self.show_details {
             show.set_text(ControlId::StatusShowDetails.id(), caption);
@@ -199,7 +199,7 @@ impl StatusBar {
         self.place_controls(layout);
     }
 
-    /// Places the main window's groups and controls, and shows Show details
+    /// Places the main window's groups and controls, and shows Show inspector
     /// while `layout` has a place for it, `right` in the right group and
     /// `memory` in the memory figures' parts.
     pub(super) fn place_in_window(
@@ -564,7 +564,7 @@ impl StatusBar {
                 .flatten()
                 .map(|figure| Some((figure, figure.text.as_str()))),
         );
-        // The parts after them, Show details' or none, show nothing.
+        // The parts after them, Show inspector's or none, show nothing.
         let parts = (right_group..=part_widths.len()).zip(items.chain(std::iter::repeat(None)));
         for (part, item) in parts {
             let text = item.map_or("", |(_, text)| text);

@@ -25,7 +25,7 @@
 #define IDC_STATUS_TEXT 3044
 #define IDC_STATUS_ACTIVITY 3047
 #define IDC_STATUS_VIEW 3048
-// Show details, at the right end of the status bar while the inspector is
+// Show inspector, at the right end of the status bar while the inspector is
 // hidden.
 #define IDC_STATUS_SHOW_DETAILS 63
 // The toolbars of the search row (Clear, Match case and Match path) and of
@@ -125,7 +125,7 @@
 #define IDC_INSPECTOR_VALUE_3 59
 #define IDC_INSPECTOR_LABEL_4 60
 #define IDC_INSPECTOR_VALUE_4 61
-// Hide details, the icon at the right end of the heading's row.
+// Hide inspector, the icon at the right end of the heading's row.
 #define IDC_INSPECTOR_HIDE 62
 // The hint under the heading while nothing is selected.
 #define IDC_INSPECTOR_NOTE 68

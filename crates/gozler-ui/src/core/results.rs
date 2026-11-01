@@ -219,10 +219,12 @@ impl Fix {
     pub(crate) const DOWNGRADE_LABEL: &'static str = "fix.downgrade";
 
     /// The fix buttons that show together, each as its catalogue key and
-    /// whether it shows the administrator shield: Use local beside Update
-    /// or Downgrade, and every other fix alone. The list's message and the
-    /// Service group show them, so each group's access keys differ, and the
-    /// buttons are as wide as the widest of them from the start.
+    /// whether it shows the administrator shield: Use local beside each
+    /// other fix. The Service group shows Use local, disabled when it has
+    /// nothing to offer, beside every fix, and the list's message shows
+    /// each fix alone or beside Use local, so each group's access keys
+    /// differ, and the buttons are as wide as the widest of them from the
+    /// start.
     pub(crate) fn label_groups() -> Vec<Vec<(&'static str, bool)>> {
         let label = |fix: &Fix| (fix.label(), fix.needs_administrator());
         let use_local = label(&Fix::UseLocal(LocalService {
@@ -230,7 +232,7 @@ impl Fix {
             version: String::new(),
             installed: None,
         }));
-        let alone = [
+        [
             Fix::Repair(Repair::StartService),
             Fix::Repair(Repair::TurnOnService),
             Fix::Repair(Repair::InstallService {
@@ -238,15 +240,13 @@ impl Fix {
             }),
             Fix::Repair(Repair::Download),
             Fix::OpenServices,
-        ];
-        alone
-            .iter()
-            .map(|fix| vec![label(fix)])
-            .chain([
-                vec![use_local, label(&Fix::Update)],
-                vec![use_local, (Fix::DOWNGRADE_LABEL, false)],
-            ])
-            .collect()
+            Fix::Update,
+        ]
+        .iter()
+        .map(label)
+        .chain([(Fix::DOWNGRADE_LABEL, false)])
+        .map(|fix| vec![use_local, fix])
+        .collect()
     }
 
     /// The button's catalogue key.
