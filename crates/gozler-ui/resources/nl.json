@@ -954,7 +954,8 @@
     "end": "Einde",
     "percent": "{0}%",
     "copy_too_large_text": "{0} is te groot om te kopiëren. Kopiëren werkt voor bestanden tot {1} als tekst.",
-    "copy_too_large_hex": "{0} is te groot om te kopiëren. Kopiëren werkt voor bestanden tot {1} als hex."
+    "copy_too_large_hex": "{0} is te groot om te kopiëren. Kopiëren werkt voor bestanden tot {1} als hex.",
+    "copy_too_large_selection": "De selectie is te groot om te kopiëren. Kopiëren werkt voor tekst tot {0}."
   },
   "message": {
     "argument_missing": "Voer een waarde in na {0}.",

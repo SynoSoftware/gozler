@@ -13,10 +13,13 @@ use super::commands::{Key, Keystroke, Mark, MenuNode};
 use super::glyph::Glyph;
 use super::layout::{Dpi, Px, Rect, Size};
 use super::text::{self, Numbers, Strings, menu_label};
-use super::viewer::{self, Detected, HEX_ROW_BYTES, LINE_BYTES, Mode, Place, SNIFF_BYTES};
+use super::viewer::{
+    self, Detected, Encoding, HEX_ROW_BYTES, LINE_BYTES, Mode, Place, SNIFF_BYTES, TextPoint,
+};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::ops::Range;
+use std::rc::Rc;
 
 /// The bytes the reading thread reads at once. The first block holds the
 /// bytes that choose Text or Hex and the encoding.
@@ -127,14 +130,59 @@ struct RowAt {
     row: usize,
 }
 
-/// One row of the page.
+/// One row of the page: the row `at.row` of its decoded line.
 #[derive(Clone, Debug)]
 struct Row {
-    text: String,
-    /// How many characters at the start of `text` show in the gray text
-    /// colour: a hex row's offset.
-    muted: usize,
     at: RowAt,
+    line: Rc<LineRows>,
+}
+
+impl Row {
+    fn text(&self) -> &str {
+        &self.line.rows[self.at.row]
+    }
+
+    /// The column of the line where the row starts.
+    fn start(&self) -> usize {
+        self.at.row * self.line.columns
+    }
+
+    /// The column of the line after the row's last character.
+    fn end(&self) -> usize {
+        self.start() + self.text().chars().count()
+    }
+
+    /// Whether a line end follows the row: it is the last row of a line
+    /// that has one.
+    fn breaks(&self) -> bool {
+        self.line.broken && self.at.row + 1 == self.line.rows.len()
+    }
+
+    /// Which of the `shown` characters of `text` from its character `skip`
+    /// lie between `from` and `to`, and the cell after them for a line end
+    /// between them, when the row's last character shows.
+    fn selected(&self, from: TextPoint, to: TextPoint, skip: usize, shown: usize) -> Range<usize> {
+        let line = self.at.line;
+        if line < from.line || line > to.line {
+            return 0..0;
+        }
+        let end = self.end();
+        let first = if line == from.line {
+            viewer::column_of(&self.line.text, from.char)
+        } else {
+            0
+        };
+        let last = if line == to.line {
+            viewer::column_of(&self.line.text, to.char).min(end)
+        } else {
+            end + usize::from(self.breaks())
+        };
+        let left = self.start() + skip;
+        let right = left + shown + usize::from(left + shown == end);
+        let first = first.clamp(left, right) - left;
+        let last = last.clamp(left, right) - left;
+        if first < last { first..last } else { 0..0 }
+    }
 }
 
 /// What follows the page's last row.
@@ -163,12 +211,35 @@ enum Task {
     },
 }
 
-/// The rows of the line decoded last, which the rows of one wrapped line
-/// share.
+/// A decoded line and its rows, which the page's rows of it share.
+#[derive(Debug)]
 struct LineRows {
     line: u64,
     rows: Vec<String>,
+    /// How many characters at the start of each row show in the gray text
+    /// colour: a hex row's offset.
     muted: usize,
+    /// The characters of each row but the last.
+    columns: usize,
+    /// The line without its terminator, before its tabs expand; empty in
+    /// Hex.
+    text: String,
+    /// A line end follows the line.
+    broken: bool,
+}
+
+/// What the Viewer has selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Selection {
+    None,
+    /// Select all: the whole file, in Text and in Hex.
+    All,
+    /// The text from `anchor`, where the button went down, to `focus`,
+    /// where the pointer is; nothing while both are the same place.
+    Text {
+        anchor: TextPoint,
+        focus: TextPoint,
+    },
 }
 
 /// A file as the Viewer shows it.
@@ -187,21 +258,74 @@ pub(crate) struct Document {
     rows: Vec<Row>,
     after: After,
     task: Task,
-    decoded: Option<LineRows>,
+    decoded: Option<Rc<LineRows>>,
     /// The wheel's turn not yet scrolled, less than a row.
     wheel: i32,
-    /// Select all selected the whole file, until a click clears it.
-    selected: bool,
+    selection: Selection,
 }
 
-/// What Copy reads, and how it makes the clipboard's text of it with
-/// [`viewer::copy_text`].
-#[derive(Clone, Copy, Debug)]
+/// What Copy reads, and how [`CopyText::text`] makes the clipboard's text
+/// of it.
+#[derive(Clone, Debug)]
 pub(crate) struct CopyText {
-    pub(crate) mode: Mode,
-    pub(crate) detected: Detected,
-    /// The bytes from the file's start: its length as the Viewer shows it.
-    pub(crate) len: u64,
+    /// The bytes of the file that Copy reads.
+    pub(crate) bytes: Range<u64>,
+    copied: Copied,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Copied {
+    /// Select all: the whole file, with [`viewer::copy_text`].
+    File { mode: Mode, detected: Detected },
+    /// Part of the text, with [`viewer::text_between`]; `last` when the
+    /// bytes reach the file's end.
+    Between {
+        encoding: Encoding,
+        from: TextPoint,
+        to: TextPoint,
+        last: bool,
+    },
+}
+
+impl CopyText {
+    /// The clipboard's text of `read`, the bytes of [`CopyText::bytes`]
+    /// that the reading thread read: fewer when the file shrank since.
+    pub(crate) fn text(&self, read: &[u8], ansi: &dyn Fn(&[u8]) -> String) -> String {
+        match self.copied {
+            Copied::File { mode, detected } => viewer::copy_text(mode, detected, read, ansi),
+            Copied::Between {
+                encoding,
+                from,
+                to,
+                last,
+            } => {
+                let short = (read.len() as u64) < self.bytes.end - self.bytes.start;
+                viewer::text_between(encoding, read, from, to, last || short, ansi)
+            }
+        }
+    }
+}
+
+/// Why Copy copies nothing: the selection's text could pass
+/// [`COPY_UNITS`]. Each holds the most that Copy takes, in bytes of the
+/// file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TooLarge {
+    /// Select all in Text.
+    Text(u64),
+    /// Select all in Hex.
+    Hex(u64),
+    /// Part of the text.
+    Selection(u64),
+}
+
+/// A shown row: its text from the first shown column, cut after the
+/// area's width, how many of its first characters show in gray, and which
+/// show selected, up to one past the text for a line end.
+pub(crate) struct ShownRow<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) muted: usize,
+    pub(crate) selected: Range<usize>,
 }
 
 impl Document {
@@ -229,7 +353,7 @@ impl Document {
             task: Task::Page,
             decoded: None,
             wheel: 0,
-            selected: false,
+            selection: Selection::None,
         };
         document.show_from(document.start_row());
         document
@@ -311,6 +435,10 @@ impl Document {
     /// Shows the file as `mode`, from the byte the page shows first.
     pub(crate) fn set_mode(&mut self, mode: Mode) {
         if mode != self.mode {
+            // Select all stays, but a place in the text has none in Hex.
+            if matches!(self.selection, Selection::Text { .. }) {
+                self.selection = Selection::None;
+            }
             self.jump_as(mode, self.top.line);
         }
     }
@@ -428,7 +556,7 @@ impl Document {
         if self.rows.len() >= self.height {
             return Ok(false);
         }
-        let line = self.line_rows(at.line, ansi)?;
+        let line = Rc::clone(self.line_rows(at.line, ansi)?);
         let count = line.rows.len();
         if count == 0 {
             self.after = After::End;
@@ -436,7 +564,6 @@ impl Document {
         }
         // A row that a narrower width took away is the line's last.
         let row = at.row.min(count - 1);
-        let (text, muted) = (line.rows[row].clone(), line.muted);
         // Before the row is added, because it may wait for a block.
         let after = if row + 1 < count {
             After::Row(RowAt { row: row + 1, ..at })
@@ -450,16 +577,16 @@ impl Document {
         if self.rows.is_empty() {
             self.top = at;
         }
-        self.rows.push(Row { text, muted, at });
+        self.rows.push(Row { at, line });
         self.after = after;
         Ok(true)
     }
 
     /// The rows of the line that starts at `line`.
-    fn line_rows(&mut self, line: u64, ansi: &dyn Fn(&[u8]) -> String) -> Need<&LineRows> {
+    fn line_rows(&mut self, line: u64, ansi: &dyn Fn(&[u8]) -> String) -> Need<&Rc<LineRows>> {
         if !matches!(&self.decoded, Some(decoded) if decoded.line == line) {
             let decoded = self.decode_line(line, ansi)?;
-            self.decoded = Some(decoded);
+            self.decoded = Some(Rc::new(decoded));
         }
         Ok(self.decoded.as_ref().expect("the line was just decoded"))
     }
@@ -473,6 +600,9 @@ impl Document {
                         line,
                         rows: Vec::new(),
                         muted: 0,
+                        columns: self.columns,
+                        text: String::new(),
+                        broken: false,
                     });
                 }
                 let bytes = self.blocks.bytes(line..(line + HEX_ROW).min(len))?;
@@ -480,22 +610,29 @@ impl Document {
                     line,
                     rows: vec![viewer::hex_row(len, line, &bytes)],
                     muted: viewer::offset_text(len, line).len(),
+                    columns: self.columns,
+                    text: String::new(),
+                    broken: false,
                 })
             }
             Mode::Text => {
                 let end = self.line_end(line)?;
                 let bytes = self.blocks.bytes(line..end)?;
                 let decoded = viewer::decode_piece(self.detected.encoding, &bytes, ansi);
-                let text = viewer::expand_tabs(viewer::without_terminator(&decoded));
+                let text = viewer::without_terminator(&decoded);
+                let expanded = viewer::expand_tabs(text);
                 let rows = if self.wrap {
-                    wrapped(text, self.columns)
+                    wrapped(expanded, self.columns)
                 } else {
-                    vec![text]
+                    vec![expanded]
                 };
                 Ok(LineRows {
                     line,
                     rows,
                     muted: 0,
+                    columns: self.columns,
+                    text: text.to_owned(),
+                    broken: text.len() != decoded.len(),
                 })
             }
         }
@@ -690,7 +827,7 @@ impl Document {
         let widest = self
             .rows
             .iter()
-            .map(|row| row.text.chars().count())
+            .map(|row| row.text().chars().count())
             .max()
             .unwrap_or(0);
         if self.sideways() && self.left + self.columns < widest {
@@ -698,53 +835,200 @@ impl Document {
         }
     }
 
+    /// The first shown column of every row.
+    fn skip(&self) -> usize {
+        if self.sideways() { self.left } else { 0 }
+    }
+
     pub(crate) fn select_all(&mut self) {
-        self.selected = true;
+        self.selection = Selection::All;
     }
 
-    pub(crate) fn clear_selection(&mut self) {
-        self.selected = false;
+    /// Whether a press and a drag select text, which they do in Text.
+    pub(crate) fn selects_text(&self) -> bool {
+        self.mode == Mode::Text
     }
 
-    pub(crate) fn selected(&self) -> bool {
-        self.selected
-    }
-
-    /// What Copy reads for the whole file as the shown mode, or `Err` with
-    /// the largest file that Copy takes as that mode, when the file's text
-    /// could pass [`COPY_UNITS`].
-    pub(crate) fn copy(&self) -> Result<CopyText, u64> {
-        let len = self.blocks.len;
-        let (units, limit) = match self.mode {
-            // Every encoding makes at most one UTF-16 unit of each byte.
-            Mode::Text => {
-                let start = self.start();
-                (len - start, COPY_UNITS + start)
-            }
-            Mode::Hex => {
-                let row = viewer::hex_row(len, 0, &[0; HEX_ROW_BYTES]).len() as u64 + 2;
-                (len.div_ceil(HEX_ROW) * row, COPY_UNITS / row * HEX_ROW)
-            }
+    /// The left button went down at `column`, a place between two
+    /// characters, of the shown `row`, both counted from the area's first.
+    /// With `extend`, as with Shift, the selection reaches there from where
+    /// it started, or from the text's start. In Hex the selection clears.
+    pub(crate) fn press(&mut self, row: usize, column: usize, extend: bool) {
+        let Some(point) = self.point_at(row, column) else {
+            self.selection = Selection::None;
+            return;
         };
-        if units > COPY_UNITS {
-            return Err(limit);
+        let anchor = match self.selection {
+            Selection::Text { anchor, .. } if extend => anchor,
+            _ if extend => self.text_start(),
+            _ => point,
+        };
+        self.selection = Selection::Text {
+            anchor,
+            focus: point,
+        };
+    }
+
+    /// The pointer moved, with the button down since [`Document::press`],
+    /// to `column` of the shown `row`; `true` when the selection changed.
+    pub(crate) fn drag(&mut self, row: usize, column: usize) -> bool {
+        let (Selection::Text { anchor, focus }, Some(point)) =
+            (self.selection, self.point_at(row, column))
+        else {
+            return false;
+        };
+        self.selection = Selection::Text {
+            anchor,
+            focus: point,
+        };
+        point != focus
+    }
+
+    /// A double-click on the character in the cell `column` of the shown
+    /// `row` selects its word, as [`viewer::word_at`] decides it.
+    pub(crate) fn select_word(&mut self, row: usize, column: usize) {
+        let Some(row) = self.text_row(row) else {
+            return;
+        };
+        let column = (row.start() + self.skip() + column).min(row.end().saturating_sub(1));
+        let line = &row.line.text;
+        let word = viewer::word_at(line, viewer::index_under_column(line, column));
+        let point = |char| TextPoint {
+            line: row.at.line,
+            char,
+        };
+        self.selection = Selection::Text {
+            anchor: point(word.start),
+            focus: point(word.end),
+        };
+    }
+
+    /// The shown row `row` in Text, or the last when the rows end above it.
+    fn text_row(&self, row: usize) -> Option<&Row> {
+        if !self.selects_text() {
+            return None;
         }
-        Ok(CopyText {
-            mode: self.mode,
-            detected: self.detected,
-            len,
+        self.rows.get(row.min(self.rows.len().checked_sub(1)?))
+    }
+
+    /// The place in the text at `column` of the shown `row`, or at the
+    /// row's end when the row ends before it.
+    fn point_at(&self, row: usize, column: usize) -> Option<TextPoint> {
+        let row = self.text_row(row)?;
+        let column = (row.start() + self.skip() + column).min(row.end());
+        Some(TextPoint {
+            line: row.at.line,
+            char: viewer::index_at_column(&row.line.text, column),
         })
     }
 
-    /// Each shown row from the first shown column, cut after the area's
-    /// width, with how many of its first characters show in gray.
-    pub(crate) fn shown(&self) -> Vec<(&str, usize)> {
-        let skip = if self.sideways() { self.left } else { 0 };
+    /// The place before the text's first character.
+    fn text_start(&self) -> TextPoint {
+        TextPoint {
+            line: self.start(),
+            char: 0,
+        }
+    }
+
+    /// The selected text, from its first place to its last; `None` while
+    /// nothing is selected.
+    fn selected_text(&self) -> Option<(TextPoint, TextPoint)> {
+        match self.selection {
+            Selection::None => None,
+            Selection::All => Some((
+                self.text_start(),
+                TextPoint {
+                    line: self.blocks.len,
+                    char: 0,
+                },
+            )),
+            Selection::Text { anchor, focus } => {
+                (anchor != focus).then(|| (anchor.min(focus), anchor.max(focus)))
+            }
+        }
+    }
+
+    pub(crate) fn selected(&self) -> bool {
+        self.selected_text().is_some()
+    }
+
+    /// What Copy reads for the selection, or why it copies nothing: the
+    /// selection's text could pass [`COPY_UNITS`]. In Text every encoding
+    /// makes at most one UTF-16 unit of each byte, so the bytes bound the
+    /// text. `None` while nothing is selected.
+    pub(crate) fn copy(&self) -> Option<Result<CopyText, TooLarge>> {
+        match self.selection {
+            Selection::None => None,
+            Selection::All => Some(self.copy_file()),
+            Selection::Text { .. } => {
+                let (from, to) = self.selected_text()?;
+                Some(self.copy_between(from, to))
+            }
+        }
+    }
+
+    fn copy_between(&self, from: TextPoint, to: TextPoint) -> Result<CopyText, TooLarge> {
+        let len = self.blocks.len;
+        let end = to.line.saturating_add(LINE_BYTES as u64).min(len);
+        let start = from.line.min(end);
+        if end - start > COPY_UNITS {
+            return Err(TooLarge::Selection(COPY_UNITS));
+        }
+        Ok(CopyText {
+            bytes: start..end,
+            copied: Copied::Between {
+                encoding: self.detected.encoding,
+                from,
+                to,
+                last: end == len,
+            },
+        })
+    }
+
+    fn copy_file(&self) -> Result<CopyText, TooLarge> {
+        let len = self.blocks.len;
+        let (units, too_large) = match self.mode {
+            Mode::Text => {
+                let start = self.start();
+                (len - start, TooLarge::Text(COPY_UNITS + start))
+            }
+            Mode::Hex => {
+                let row = viewer::hex_row(len, 0, &[0; HEX_ROW_BYTES]).len() as u64 + 2;
+                let limit = COPY_UNITS / row * HEX_ROW;
+                (len.div_ceil(HEX_ROW) * row, TooLarge::Hex(limit))
+            }
+        };
+        if units > COPY_UNITS {
+            return Err(too_large);
+        }
+        Ok(CopyText {
+            bytes: 0..len,
+            copied: Copied::File {
+                mode: self.mode,
+                detected: self.detected,
+            },
+        })
+    }
+
+    /// The shown rows.
+    pub(crate) fn shown(&self) -> Vec<ShownRow<'_>> {
+        let skip = self.skip();
+        let selected = self.selected_text();
         self.rows
             .iter()
             .map(|row| {
-                let text = characters(&row.text, skip, self.columns + 1);
-                (text, row.muted.saturating_sub(skip))
+                let text = characters(row.text(), skip, self.columns + 1);
+                let count = text.chars().count();
+                let selected = match (self.mode, selected) {
+                    (_, None) => 0..0,
+                    (Mode::Hex, Some(_)) => 0..count,
+                    (Mode::Text, Some((from, to))) => row.selected(from, to, skip, count),
+                };
+                ShownRow {
+                    text,
+                    muted: row.line.muted.saturating_sub(skip),
+                    selected,
+                }
             })
             .collect()
     }
@@ -812,10 +1096,8 @@ fn wrapped(text: String, columns: usize) -> Vec<String> {
 /// The part of `text` from its character `skip` on, at most `take`
 /// characters long.
 fn characters(text: &str, skip: usize, take: usize) -> &str {
-    let at = |n: usize| text.char_indices().nth(n).map_or(text.len(), |(i, _)| i);
-    let from = at(skip);
-    let rest = &text[from..];
-    &rest[..rest.char_indices().nth(take).map_or(rest.len(), |(i, _)| i)]
+    let rest = &text[viewer::char_offset(text, skip)..];
+    &rest[..viewer::char_offset(rest, take)]
 }
 
 /// The area's vertical scroll bar.
@@ -841,7 +1123,7 @@ pub(crate) enum Shown {
     /// Until the first block arrives.
     Reading,
     Cancelled,
-    File(Document),
+    File(Box<Document>),
     /// Windows could not open the file, or, when `opened`, read it.
     Failed {
         opened: bool,
@@ -854,14 +1136,14 @@ pub(crate) enum Shown {
 impl Shown {
     pub(crate) fn document(&self) -> Option<&Document> {
         match self {
-            Shown::File(document) => Some(document),
+            Shown::File(document) => Some(document.as_ref()),
             _ => None,
         }
     }
 
     pub(crate) fn document_mut(&mut self) -> Option<&mut Document> {
         match self {
-            Shown::File(document) => Some(document),
+            Shown::File(document) => Some(document.as_mut()),
             _ => None,
         }
     }
@@ -969,6 +1251,33 @@ pub(crate) fn text_room(size: Size, char_width: Px, line_height: Px, dpi: Dpi) -
         fit(size.width - x - x, char_width),
         fit(size.height - y - y, line_height),
     )
+}
+
+/// Where a point of the area falls on its text, each counted from the
+/// area's first row or column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TextAt {
+    pub(crate) row: usize,
+    /// The place between two characters nearest to the point.
+    pub(crate) place: usize,
+    /// The character cell under the point.
+    pub(crate) cell: usize,
+}
+
+/// Where `point`, in the area's client coordinates, falls on its text in a
+/// font whose characters are `char_width` wide and whose rows are
+/// `line_height` tall. A point before the text counts as on its first row
+/// or column.
+pub(crate) fn text_at(point: (i32, i32), char_width: Px, line_height: Px, dpi: Dpi) -> TextAt {
+    let (left, top) = text_inset(dpi);
+    let (width, height) = (char_width.0.max(1), line_height.0.max(1));
+    let count = |at: i32, unit: i32| usize::try_from(at.div_euclid(unit)).unwrap_or(0);
+    let x = point.0 - left.0;
+    TextAt {
+        row: count(point.1 - top.0, height),
+        place: count(x + width / 2, width),
+        cell: count(x, width),
+    }
 }
 
 /// A command of the Viewer's menus.
@@ -1095,7 +1404,7 @@ pub(crate) fn menu_bar(strings: &Strings) -> Vec<MenuNode> {
 
 /// Each menu item's ID, whether it is enabled and whether it is checked,
 /// while the Viewer shows a file as `mode`, or none yet, wraps long lines
-/// when `wrap`, and has the file selected when `selected`. Wrap long lines
+/// when `wrap`, and has something selected when `selected`. Wrap long lines
 /// is disabled in Hex, because a hex row is always 16 bytes, and Copy
 /// without a selection, as in Notepad.
 pub(crate) fn menu_states(
@@ -1196,7 +1505,11 @@ mod tests {
     }
 
     fn texts(document: &Document) -> Vec<String> {
-        document.rows.iter().map(|row| row.text.clone()).collect()
+        document
+            .rows
+            .iter()
+            .map(|row| row.text().to_owned())
+            .collect()
     }
 
     #[test]
@@ -1275,24 +1588,46 @@ mod tests {
     fn copy_gives_the_shown_text_of_a_file_within_the_limit() {
         let file = b"\xEF\xBB\xBFone\r\ntwo\n";
         let mut document = open(file, true, 80, 4);
-        let copy = document.copy().expect("a small file copies");
-        assert_eq!(
-            viewer::copy_text(copy.mode, copy.detected, file, &latin1),
-            "one\r\ntwo\n"
-        );
+        document.select_all();
+        let copy = document.copy().unwrap().expect("a small file copies");
+        assert_eq!(copy.text(file, &latin1), "one\r\ntwo\n");
         document.set_mode(Mode::Hex);
-        let copy = document.copy().expect("a small file copies");
+        let copy = document.copy().unwrap().expect("a small file copies");
         let bytes = [b'a'; 17];
         assert_eq!(
-            viewer::copy_text(copy.mode, copy.detected, &bytes, &latin1),
+            copy.text(&bytes, &latin1),
             format!(
                 "{}\r\n{}",
                 viewer::hex_row(17, 0, &bytes),
                 viewer::hex_row(17, 16, &bytes[16..])
             )
         );
-        let large = Document::new(COPY_UNITS + 1, vec![b'x'; BLOCK_BYTES], true);
-        assert_eq!(large.copy().map(|_| ()), Err(COPY_UNITS));
+        let mut large = Document::new(COPY_UNITS + 1, vec![b'x'; BLOCK_BYTES], true);
+        large.select_all();
+        assert_eq!(
+            large.copy().unwrap().map(|_| ()),
+            Err(TooLarge::Text(COPY_UNITS))
+        );
+    }
+
+    /// A drag over wrapped rows shows the selection on each row, with the
+    /// line end it holds, and copies the text it shows, tab included.
+    #[test]
+    fn a_drag_over_wrapped_rows_copies_what_it_shows() {
+        // Rows of 8: "abcdefgh", "ij" and the tab, "k", "second l".
+        let file = b"abcdefghij\tk\r\nsecond line\n";
+        let mut document = open(file, true, 8, 4);
+        document.press(0, 3, false);
+        document.drag(3, 3);
+        let selected: Vec<_> = document
+            .shown()
+            .into_iter()
+            .map(|row| row.selected)
+            .collect();
+        assert_eq!(selected, [3..8, 0..8, 0..2, 0..3]);
+        let copy = document.copy().unwrap().expect("a small selection copies");
+        let read = &file[copy.bytes.start as usize..copy.bytes.end as usize];
+        assert_eq!(copy.text(read, &latin1), "defghij\tk\r\nsec");
     }
 
     #[test]

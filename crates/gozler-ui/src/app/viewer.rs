@@ -15,8 +15,8 @@ use crate::core::settings::{Placement, ViewerState};
 use crate::core::text::{self, Strings};
 use crate::core::viewer::Mode;
 use crate::core::viewer_window::{
-    Document, ScrollBar, Shown, ViewerCommand, ViewerKey, file_text, menu_bar, menu_states,
-    place_samples, text_inset, text_room, viewer_key, waiting_layout,
+    Document, ScrollBar, Shown, TextAt, TooLarge, ViewerCommand, ViewerKey, file_text, menu_bar,
+    menu_states, place_samples, text_at, text_inset, text_room, viewer_key, waiting_layout,
 };
 use crate::core::work::{Waiting, waiting};
 use crate::win::clipboard;
@@ -28,8 +28,8 @@ use crate::win::locale::{WindowsNumbers, ansi_text};
 use crate::win::menu::{Menu, replace_menu_bar};
 use crate::win::notify::Command;
 use crate::win::viewer::{
-    AREA_CLICKED, AREA_PAINT, AreaText, ViewerEvent, caption_height, create_area, paint_area,
-    register_area, set_area_scroll,
+    AREA_CLICKED, AREA_DOUBLE_CLICKED, AREA_PAINT, AreaText, ViewerEvent, caption_height,
+    create_area, paint_area, register_area, set_area_scroll,
 };
 use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
@@ -41,6 +41,8 @@ use windows::Win32::Foundation::LRESULT;
 
 const WINDOW_CLASS: &str = "gozler.ui.viewer";
 const READ_TIMER: usize = 1;
+/// Scrolls toward the pointer while a drag holds it outside the area.
+const SCROLL_TIMER: usize = 2;
 
 /// The open Viewers, as the main window holds them, and what they remember
 /// in `ui.json`.
@@ -109,6 +111,7 @@ impl Viewers {
             read_timer: Cell::new(false),
             wrap: Cell::new(state.wrap),
             focused: Cell::new(None),
+            dragging: Cell::new(false),
         });
         let hwnd = window::create_window(WINDOW_CLASS, Rc::clone(&viewer), placement)?;
         if let Err(error) = viewer.start(hwnd) {
@@ -236,6 +239,9 @@ struct Viewer {
     wrap: Cell<bool>,
     /// The control that had the focus when the window was deactivated.
     focused: Cell<Option<Hwnd>>,
+    /// A drag over the text runs, and the window holds the mouse until the
+    /// button goes up.
+    dragging: Cell<bool>,
 }
 
 impl Viewer {
@@ -566,7 +572,6 @@ impl Viewer {
             &AreaText {
                 font: &fonts.text,
                 rows: &rows,
-                selected: shown.document().is_some_and(Document::selected),
                 line_height: fonts.line_height,
                 char_width: fonts.char_width,
                 inset: text_inset(hwnd.dpi()),
@@ -597,7 +602,7 @@ impl Viewer {
                     if let Some((mode, offset)) = self.resume.take() {
                         document.jump_as(mode, offset);
                     }
-                    self.set_shown(hwnd, Shown::File(document));
+                    self.set_shown(hwnd, Shown::File(Box::new(document)));
                 }
                 ViewerEvent::Block { index, bytes } => {
                     self.in_flight.set(None);
@@ -775,13 +780,12 @@ impl Viewer {
         }
     }
 
-    /// Puts the selected file's text on the clipboard. The reader reads the
-    /// file whole and publishes the text, so the window never waits for the
+    /// Puts the selected text on the clipboard. The reader reads the bytes
+    /// it needs and publishes the text, so the window never waits for the
     /// disk or the clipboard (DESIGN.md: The Viewer).
     fn copy(&self, hwnd: Hwnd) {
-        let (mode, copy) = match self.shown.borrow().document() {
-            Some(document) if document.selected() => (document.mode(), document.copy()),
-            _ => return,
+        let Some(copy) = self.shown.borrow().document().and_then(Document::copy) else {
+            return;
         };
         match copy {
             Ok(copy) => {
@@ -790,19 +794,111 @@ impl Viewer {
                 }
                 self.in_flight.set(None);
             }
-            Err(limit) => {
+            Err(too_large) => {
                 let text = {
                     let strings = self.strings.borrow();
-                    let key = match mode {
-                        Mode::Text => "viewer.copy_too_large_text",
-                        Mode::Hex => "viewer.copy_too_large_hex",
-                    };
-                    let limit = text::bytes(&strings, &*self.numbers.borrow(), limit);
-                    strings.format(key, &[&self.name, &limit])
+                    let size = |limit| text::bytes(&strings, &*self.numbers.borrow(), limit);
+                    match too_large {
+                        TooLarge::Text(limit) => strings
+                            .format("viewer.copy_too_large_text", &[&self.name, &size(limit)]),
+                        TooLarge::Hex(limit) => {
+                            strings.format("viewer.copy_too_large_hex", &[&self.name, &size(limit)])
+                        }
+                        TooLarge::Selection(limit) => {
+                            strings.format("viewer.copy_too_large_selection", &[&size(limit)])
+                        }
+                    }
                 };
                 self.error_box(hwnd, &text);
             }
         }
+    }
+
+    /// Where the pointer is on the area's text; `None` before the window
+    /// has its controls.
+    fn pointer(&self, hwnd: Hwnd) -> Option<TextAt> {
+        let point = self.controls.get()?.area.cursor_point()?;
+        let fonts = self.fonts.borrow();
+        let fonts = fonts.as_ref()?;
+        Some(text_at(
+            point,
+            fonts.char_width,
+            fonts.line_height,
+            hwnd.dpi(),
+        ))
+    }
+
+    /// Has `select` change the shown file's selection at the pointer, and
+    /// repaints the area when it says the selection changed.
+    fn select(&self, hwnd: Hwnd, select: impl FnOnce(&mut Document, TextAt) -> bool) {
+        let Some(at) = self.pointer(hwnd) else {
+            return;
+        };
+        let changed = self
+            .shown
+            .borrow_mut()
+            .document_mut()
+            .is_some_and(|document| select(document, at));
+        if changed {
+            self.controls().area.invalidate();
+        }
+    }
+
+    /// The left button went down on the area: the selection starts there,
+    /// or reaches there with Shift, and a drag over text follows the
+    /// pointer, with the mouse held until the button goes up.
+    fn press(&self, hwnd: Hwnd) {
+        self.select(hwnd, |document, at| {
+            document.press(at.row, at.place, window::shift_held());
+            self.dragging.set(document.selects_text());
+            true
+        });
+        if self.dragging.get() {
+            hwnd.capture_mouse();
+            hwnd.set_timer(SCROLL_TIMER, 50);
+        }
+    }
+
+    fn drag(&self, hwnd: Hwnd) {
+        self.select(hwnd, |document, at| document.drag(at.row, at.place));
+    }
+
+    /// While a drag holds the pointer beyond an edge of the area, scrolls
+    /// one row or column toward it, as an edit control does, and selects
+    /// to the pointer on the text that scrolled in.
+    fn autoscroll(&self, hwnd: Hwnd) {
+        let area = self.controls().area;
+        let Some((x, y)) = area.cursor_point() else {
+            return;
+        };
+        let size = area.client_size();
+        let (above, below) = (y < 0, y >= size.height.0);
+        let (before, after) = (x < 0, x >= size.width.0);
+        if !(above || below || before || after) {
+            return;
+        }
+        if let Some(document) = self.shown.borrow_mut().document_mut() {
+            document.resume();
+            if above {
+                document.line_up();
+            } else if below {
+                document.line_down();
+            }
+            if before {
+                document.scroll_left();
+            } else if after {
+                document.scroll_right();
+            }
+        }
+        self.pump();
+        self.drag(hwnd);
+    }
+
+    fn select_word(&self, hwnd: Hwnd) {
+        self.select(hwnd, |document, at| {
+            document.select_word(at.row, at.cell);
+            true
+        });
     }
 
     /// A message box about Copy, which its title names.
@@ -858,19 +954,39 @@ impl WindowProc for Viewer {
                 Some(LRESULT(0))
             }
             Message::Other(AREA_PAINT) => Some(LRESULT(isize::from(self.paint(hwnd)))),
-            // A click clears Select all, as in Notepad.
             Message::Other(AREA_CLICKED) => {
-                let cleared = match self.shown.borrow_mut().document_mut() {
-                    Some(document) if document.selected() => {
-                        document.clear_selection();
-                        true
-                    }
-                    _ => false,
-                };
-                if cleared {
-                    self.show();
-                }
+                self.press(hwnd);
                 Some(LRESULT(0))
+            }
+            Message::Other(AREA_DOUBLE_CLICKED) => {
+                self.select_word(hwnd);
+                Some(LRESULT(0))
+            }
+            Message::MouseMove { .. } if self.dragging.get() => {
+                self.drag(hwnd);
+                Some(LRESULT(0))
+            }
+            Message::LeftButtonUp if self.dragging.get() => {
+                window::release_mouse();
+                Some(LRESULT(0))
+            }
+            Message::CaptureChanged => {
+                if self.dragging.replace(false) {
+                    hwnd.kill_timer(SCROLL_TIMER);
+                }
+                None
+            }
+            // The I-beam over text that a drag selects, the arrow in Hex.
+            Message::SetCursor { over, client: true }
+                if Some(over) == self.controls.get().map(|c| c.area)
+                    && self
+                        .shown
+                        .borrow()
+                        .document()
+                        .is_some_and(Document::selects_text) =>
+            {
+                window::show_text_cursor();
+                Some(LRESULT(1))
             }
             Message::Wake => {
                 if let Some(waker) = self.waker.get() {
@@ -881,6 +997,12 @@ impl WindowProc for Viewer {
             }
             Message::Timer(READ_TIMER) => {
                 self.poll_read(hwnd);
+                Some(LRESULT(0))
+            }
+            Message::Timer(SCROLL_TIMER) => {
+                if self.dragging.get() {
+                    self.autoscroll(hwnd);
+                }
                 Some(LRESULT(0))
             }
             Message::KeyDown {
@@ -1000,6 +1122,7 @@ impl WindowProc for Viewer {
                 self.remember_placement(hwnd);
                 self.hwnd.set(None);
                 hwnd.kill_timer(READ_TIMER);
+                hwnd.kill_timer(SCROLL_TIMER);
                 if let Some(waker) = self.waker.get() {
                     waker.close();
                 }
