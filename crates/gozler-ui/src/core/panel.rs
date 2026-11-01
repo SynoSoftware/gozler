@@ -507,10 +507,14 @@ impl ReadSizes {
 }
 
 /// Why the reading thread could not list a folder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReadFailure {
     /// The path names nothing.
     Missing,
+    /// The path is a junction or a symbolic link to `target`, which is gone.
+    BrokenLink {
+        target: String,
+    },
     /// The drive is not ready or is gone.
     NotReady,
     /// Windows does not let this window open a folder on this PC's drives,

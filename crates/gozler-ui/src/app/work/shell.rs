@@ -101,6 +101,11 @@ impl Invocation {
 pub(in crate::app) enum OpenTarget {
     Command(String),
     Path(Vec<u16>),
+    /// A junction or a symbolic link at `link` whose `target` is gone.
+    BrokenLink {
+        link: Vec<u16>,
+        target: String,
+    },
     /// This program, started as administrator.
     Administrator,
 }
@@ -108,6 +113,23 @@ pub(in crate::app) enum OpenTarget {
 pub(in crate::app) struct OpenFailure {
     pub(in crate::app) target: OpenTarget,
     pub(in crate::app) error: io::Error,
+}
+
+impl OpenFailure {
+    /// The failure to open `path`, which names the target that Windows did
+    /// not find when `path` is a junction or a symbolic link. Reads the
+    /// link, so it runs on the shell worker's thread.
+    fn of_path(path: Vec<u16>, error: io::Error) -> Self {
+        let link_target = match error.kind() {
+            io::ErrorKind::NotFound => folder::link_target(&path),
+            _ => None,
+        };
+        let target = match link_target {
+            Some(target) => OpenTarget::BrokenLink { link: path, target },
+            None => OpenTarget::Path(path),
+        };
+        Self { target, error }
+    }
 }
 
 #[derive(Default)]
@@ -399,10 +421,7 @@ fn invoke(
                     denied: (error.kind() == io::ErrorKind::PermissionDenied
                         && folder::on_this_pc(&folder))
                     .then_some(entry),
-                    failure: Some(OpenFailure {
-                        target: OpenTarget::Path(folder),
-                        error,
-                    }),
+                    failure: Some(OpenFailure::of_path(folder, error)),
                     ..Opened::default()
                 },
             }
@@ -470,10 +489,7 @@ fn act_on_entries(
             }
         };
         if let Err(error) = result {
-            failure.get_or_insert(OpenFailure {
-                target: OpenTarget::Path(entry.path),
-                error,
-            });
+            failure.get_or_insert_with(|| OpenFailure::of_path(entry.path, error));
         }
     }
     let mut folders: Vec<(Vec<u16>, Vec<Vec<u16>>)> = Vec::new();
@@ -486,10 +502,7 @@ fn act_on_entries(
     }
     for (folder, entries) in folders.into_iter().take_while(|_| !cancel.is_cancelled()) {
         if let Err(error) = session.show_in_folder(&folder, &entries) {
-            failure.get_or_insert(OpenFailure {
-                target: OpenTarget::Path(folder),
-                error,
-            });
+            failure.get_or_insert_with(|| OpenFailure::of_path(folder, error));
         }
     }
     match failure {

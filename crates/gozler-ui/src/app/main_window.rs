@@ -2546,6 +2546,10 @@ impl MainWindow {
                                         "panel.cannot_open",
                                         &[&String::from_utf16_lossy(&path), &reason],
                                     ),
+                                    OpenTarget::BrokenLink { link, target } => strings.format(
+                                        "panel.link_missing",
+                                        &[&String::from_utf16_lossy(&link), &target],
+                                    ),
                                     OpenTarget::Administrator => {
                                         strings.format("panel.administrator_failed", &[&reason])
                                     }

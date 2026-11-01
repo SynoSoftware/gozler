@@ -1368,6 +1368,9 @@ impl Panels {
                 let strings = model.strings();
                 let text = match failure {
                     ReadFailure::Missing => strings.format("panel.missing", &[&path]),
+                    ReadFailure::BrokenLink { target } => {
+                        strings.format("panel.link_missing", &[&path, &target])
+                    }
                     ReadFailure::NotReady => strings.format(
                         "panel.drive_not_ready",
                         &[&panel::drive_root(&path), &reason],

@@ -286,9 +286,15 @@ pub fn read_reparse_point(volume: &VolumeHandle, id: u128) -> Result<Option<Vec<
     if !matches!(tag, 0xA000_0003 | 0xA000_000C) {
         return Ok(None);
     }
+    reparse_data(file.as_handle())
+}
+
+/// The raw `REPARSE_DATA_BUFFER` of the open `file`; `Ok(None)` when it is
+/// not a reparse point.
+pub(crate) fn reparse_data(file: HANDLE) -> Result<Option<Vec<u8>>, WinError> {
     // MAXIMUM_REPARSE_DATA_BUFFER_SIZE: no reparse point holds more.
     let mut out = vec![0u8; 16 * 1024];
-    match ioctl_out_bytes(file.as_handle(), FSCTL_GET_REPARSE_POINT, &mut out) {
+    match ioctl_out_bytes(file, FSCTL_GET_REPARSE_POINT, &mut out) {
         Ok(written) => {
             out.truncate(written as usize);
             Ok(Some(out))

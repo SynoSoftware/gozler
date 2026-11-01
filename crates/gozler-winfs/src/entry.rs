@@ -257,6 +257,14 @@ impl Entry {
         })
     }
 
+    /// The raw `REPARSE_DATA_BUFFER` of an entry opened with
+    /// [`Reparse::Open`], which `gozler_core::links::parse_reparse_data`
+    /// reads; `Ok(None)` when it is not a reparse point. Ask only a link: a
+    /// cloud file's filter may run when its data is read.
+    pub fn reparse_point(&self) -> Result<Option<Vec<u8>>, WinError> {
+        crate::file_id::reparse_data(self.0.as_handle())
+    }
+
     pub fn identity(&self) -> Result<FileIdentity, WinError> {
         // SAFETY: as in `attribute_tag`.
         let info = unsafe {

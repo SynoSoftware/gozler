@@ -932,6 +932,7 @@
     "folder": "Klasör",
     "ext": "Uzantı",
     "missing": "{0} mevcut değil.",
+    "link_missing": "{0} öğesi {1} konumuna bir bağlantıdır ve bu konum mevcut değil.",
     "cannot_open": "Windows {0} öğesini açamadı: {1}",
     "denied_question": "{0} öğesini açma izniniz yok.",
     "denied_details": "Yönetici olarak açmak için Devam et'i seçin. Gozler yeniden başlar ve siz çıkana kadar yönetici olarak çalışır.",
