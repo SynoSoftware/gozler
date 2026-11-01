@@ -137,6 +137,9 @@ pub(crate) struct Entry {
     /// Whether `size` holds a folder's size from gozlerd: a flag, because an
     /// `Option` would add 8 bytes to each entry.
     sized: bool,
+    /// Whether the entry is a junction or a symbolic link, which its reparse
+    /// tag says and its attributes do not.
+    link: bool,
 }
 
 impl Entry {
@@ -148,7 +151,18 @@ impl Entry {
             size,
             modified,
             sized: false,
+            link: false,
         }
+    }
+
+    /// This entry, a junction or a symbolic link when `link` says so.
+    pub(crate) fn linked(self, link: bool) -> Entry {
+        Entry { link, ..self }
+    }
+
+    /// Whether the list shows Windows' link arrow on the entry's icon.
+    pub(crate) fn is_link(&self) -> bool {
+        self.link
     }
 
     /// A folder's size from gozlerd; `None` for a file, or while gozlerd has

@@ -289,6 +289,7 @@ fn read_folder(
                                 e.size,
                                 e.last_write,
                             )
+                            .linked(e.reparse_tag.is_some_and(super::is_link_tag))
                         }),
                 ),
                 Err(_) => {
@@ -350,7 +351,10 @@ fn stat(folder: &str, name: &[u16]) -> Option<Entry> {
         .unwrap_or_else(|| name.into());
     let is_folder = tag.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
     let size = if is_folder { 0 } else { stat.size };
-    Some(Entry::new(name, tag.attributes, size, stat.last_write))
+    Some(
+        Entry::new(name, tag.attributes, size, stat.last_write)
+            .linked(super::is_link_tag(tag.reparse_tag)),
+    )
 }
 
 /// The changes a watch's buffer holds, read again from the disk by name.

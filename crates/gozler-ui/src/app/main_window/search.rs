@@ -493,6 +493,12 @@ impl Search {
             info.set_image(icon.map(|(name, is_folder)| window.icons.index(&name, is_folder)));
         }
         if info.wants_state() {
+            let is_link = {
+                let model = window.model.borrow();
+                let row = model.search_list().results().row(info.row());
+                row.is_some_and(|row| window.icons.is_link(row))
+            };
+            info.set_overlay(window.row_overlay(is_link));
             // Rows that changed under the drag no longer show it.
             let target = {
                 let model = window.model.borrow();

@@ -2655,6 +2655,21 @@ impl MainWindow {
 
     fn refresh_dates(&self) {
         self.dates.borrow_mut().set_time(jiff::Zoned::now());
+        self.redraw_shown_lists();
+    }
+
+    /// The overlay of a row that `is_link` says is a junction or a symbolic
+    /// link: Windows' link arrow. Wakes the window to check the reparse
+    /// points that result rows asked about (`Icons::is_link`).
+    fn row_overlay(&self, is_link: bool) -> Option<u32> {
+        if self.icons.has_unchecked() {
+            self.created().waker.deliver(|| true);
+        }
+        self.icons.link_arrow().filter(|_| is_link)
+    }
+
+    /// Has the lists that the mode shows draw their visible rows again.
+    fn redraw_shown_lists(&self) {
         let mode = self.model.borrow().mode();
         match mode {
             Mode::Search => {
@@ -2682,6 +2697,19 @@ impl MainWindow {
             work.indexed.poll();
             let retired = work.indexed.take_retired();
             work.retire(retired);
+        }
+        // Result rows asked whether their reparse points are links.
+        let checked = {
+            let unchecked = self.icons.take_unchecked();
+            let mut work = self.created().work.borrow_mut();
+            if !unchecked.is_empty() {
+                work.links.check(unchecked);
+            }
+            work.links.take()
+        };
+        if let Some(checked) = checked {
+            self.icons.learn_links(checked);
+            self.redraw_shown_lists();
         }
         self.accept_told_selections(hwnd);
         if !self.update_live() {

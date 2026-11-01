@@ -20,6 +20,7 @@ pub(super) mod elevated;
 pub(super) mod fixes;
 pub(super) mod folders;
 pub(super) mod indexed;
+mod links;
 mod lists;
 mod local_service;
 mod operations;
@@ -105,6 +106,7 @@ pub(super) struct Work {
     pub(super) fixes: fixes::Fixes,
     pub(super) elevated: elevated::Saves,
     pub(super) indexed: indexed::Work,
+    pub(super) links: links::Work,
     pub(super) paste: paste::Work,
     pub(super) tray: Option<tray::Work>,
     pub(super) lists: lists::Work,
@@ -140,6 +142,7 @@ impl Work {
             fixes: fixes::Fixes::new(waker.clone()),
             elevated: elevated::Saves::new(waker.clone()),
             indexed: indexed::Work::new(waker.clone()),
+            links: links::Work::new(waker.clone()),
             paste: paste::Work::new(waker.clone()),
             tray: tray::Work::new(waker.clone(), crate::core::ids::IconId::Gozler.id()).ok(),
             lists: lists::Work::new(waker.clone()),
@@ -191,6 +194,7 @@ impl Work {
         active |= self.fixes.tick(now);
         active |= self.elevated.tick(now);
         active |= self.indexed.tick(now);
+        active |= self.links.tick(now);
         for task in &mut self.releases {
             active |= task.tick(now).is_some();
         }
@@ -339,6 +343,7 @@ impl Work {
         retired.append(self.fixes.take_retired());
         retired.append(self.elevated.take_retired());
         retired.append(self.indexed.take_retired());
+        retired.append(self.links.take_retired());
         self.retire(retired);
     }
 
@@ -368,6 +373,7 @@ impl Work {
         let mut retired = self.programs.close();
         retired.append(self.folders.close());
         retired.append(self.indexed.close());
+        retired.append(self.links.close());
         retired.append(self.lists.close());
         retired.append(self.panels.close());
         retired.append(self.clipboard.close());

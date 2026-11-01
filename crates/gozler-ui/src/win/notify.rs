@@ -22,12 +22,13 @@ use windows::Win32::UI::Controls::{
     CDIS_SELECTED, CDIS_SHOWKEYBOARDCUES, CDRF_DODEFAULT, CDRF_NEWFONT, CDRF_NOTIFYITEMDRAW,
     CDRF_NOTIFYPOSTPAINT, CDRF_NOTIFYSUBITEMDRAW, CDRF_SKIPDEFAULT, HDI_WIDTH,
     HDN_DIVIDERDBLCLICKW, HDN_ENDDRAG, HDN_ITEMCHANGEDW, LVIF_IMAGE, LVIF_STATE, LVIF_TEXT,
-    LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW,
-    LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG, LVN_BEGINRDRAG,
-    LVN_COLUMNCLICK, LVN_ENDSCROLL, LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE,
-    LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODFINDITEMW, LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW,
-    NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT,
-    NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW, NMLVODSTATECHANGE, NMMOUSE,
+    LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_OVERLAYMASK,
+    LVIS_SELECTED, LVITEMW, LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG,
+    LVN_BEGINRDRAG, LVN_COLUMNCLICK, LVN_ENDSCROLL, LVN_GETDISPINFOW, LVN_GETINFOTIPW,
+    LVN_ITEMACTIVATE, LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODFINDITEMW, LVN_ODSTATECHANGED,
+    NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMHDR, NMHEADERW,
+    NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW, NMLVODSTATECHANGE,
+    NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
@@ -405,6 +406,16 @@ impl DispInfo<'_> {
         self.0.item.mask.contains(LVIF_STATE)
     }
 
+    /// Shows the image list's `overlay`, such as Windows' link arrow
+    /// (`ImageList::link_overlay`), over the row's icon, or none.
+    pub(crate) fn set_overlay(&mut self, overlay: Option<u32>) {
+        let item = &mut self.0.item;
+        let mask = LVIS_OVERLAYMASK.0;
+        item.stateMask.0 |= mask;
+        // INDEXTOOVERLAYMASK
+        item.state.0 = (item.state.0 & !mask) | (overlay.unwrap_or(0) << 8);
+    }
+
     /// Shows the row highlighted as the folder that dragged files would be
     /// dropped into, as File Explorer does.
     pub(crate) fn set_drop_target(&mut self, target: bool) {
@@ -614,8 +625,9 @@ impl CustomDraw<'_> {
     fn draw_icon_on(&self, colour: COLORREF) {
         let icon = self.row_part(LVIR_ICON);
         self.fill(icon, colour);
-        if let (Some(images), Some(index)) = (ImageList::system_small(), self.row_image()) {
-            images.draw(self.draw.nmcd.hdc, index, icon);
+        let (index, overlay) = self.row_icon();
+        if let (Some(images), Some(index)) = (ImageList::system_small(), index) {
+            images.draw(self.draw.nmcd.hdc, index, overlay, icon);
         }
     }
 
@@ -640,11 +652,16 @@ impl CustomDraw<'_> {
     }
 
     /// The icon of the row being drawn, an index in the system image list,
-    /// which every list that draws its selection here shows.
-    fn row_image(&self) -> Option<i32> {
+    /// which every list that draws its selection here shows, and the overlay
+    /// over it ([`DispInfo::set_overlay`]).
+    fn row_icon(&self) -> (Option<i32>, Option<u32>) {
+        let Ok(row) = i32::try_from(self.draw.nmcd.dwItemSpec) else {
+            return (None, None);
+        };
         let mut item = LVITEMW {
-            mask: LVIF_IMAGE,
-            iItem: i32::try_from(self.draw.nmcd.dwItemSpec).ok()?,
+            mask: LVIF_IMAGE | LVIF_STATE,
+            iItem: row,
+            stateMask: LVIS_OVERLAYMASK,
             ..LVITEMW::default()
         };
         // SAFETY: `item` is a local the list fills in.
@@ -657,7 +674,9 @@ impl CustomDraw<'_> {
             )
         };
         // I_IMAGENONE and I_IMAGECALLBACK are negative.
-        (item.iImage >= 0).then_some(item.iImage)
+        let index = (item.iImage >= 0).then_some(item.iImage);
+        let overlay = (item.state.0 & LVIS_OVERLAYMASK.0) >> 8;
+        (index, (overlay != 0).then_some(overlay))
     }
 
     /// Has the list draw the row at `DrawStage::Row` in grey, unless the
@@ -750,7 +769,13 @@ impl CustomDraw<'_> {
     /// column's icon; other columns have none.
     fn draw_icon(&self, icon: Option<(ImageList, i32)>) {
         if let Some((images, index)) = icon.filter(|_| self.draw.iSubItem == 0) {
-            images.draw(self.draw.nmcd.hdc, index, self.cell_part(LVIR_ICON));
+            let (_, overlay) = self.row_icon();
+            images.draw(
+                self.draw.nmcd.hdc,
+                index,
+                overlay,
+                self.cell_part(LVIR_ICON),
+            );
         }
     }
 

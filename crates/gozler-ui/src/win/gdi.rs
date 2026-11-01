@@ -25,19 +25,20 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::Controls::{
-    HIMAGELIST, ILC_COLOR32, ILD_TRANSPARENT, ImageList_Create, ImageList_Draw, ImageList_GetIcon,
+    HIMAGELIST, HIMAGELIST_QueryInterface, IImageList, ILC_COLOR32, ILD_TRANSPARENT,
+    IMAGE_LIST_DRAW_STYLE, ImageList_Create, ImageList_Draw, ImageList_GetIcon,
     ImageList_GetIconSize, ImageList_ReplaceIcon,
 };
 use windows::Win32::UI::Shell::{
     PathCompactPathW, SHFILEINFOW, SHGFI_FLAGS, SHGFI_LARGEICON, SHGFI_SMALLICON,
     SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX, SHGetFileInfoW,
-    SHGetStockIconInfo, SHSTOCKICONINFO, SIID_FOLDEROPEN,
+    SHGetStockIconInfo, SHSTOCKICONINFO, SIID_FOLDEROPEN, SIID_LINK,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, HICON, ICONINFO, NONCLIENTMETRICSW, SPI_GETHIGHCONTRAST,
     SPI_GETNONCLIENTMETRICS, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
 };
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::core::{HSTRING, Interface, PCWSTR, w};
 
 /// An owned GDI font, deleted on drop. A control given it with
 /// [`Hwnd::set_font`] does not own it, so the owner replaces the control's
@@ -630,16 +631,48 @@ impl ImageList {
         Some(info.iSysImageIndex)
     }
 
-    /// Draws the icon `index` in the middle of `area`.
-    pub(super) fn draw(self, dc: HDC, index: i32, area: RECT) {
+    /// The overlay of the system image lists that holds Windows' link arrow,
+    /// which a list shows over a junction's or a symbolic link's icon as
+    /// File Explorer does; `None` when Windows set none. Reads the lists'
+    /// overlays, because `SHGetIconOverlayIndexW` would load every installed
+    /// overlay handler into the process.
+    pub(crate) fn link_overlay(self) -> Option<u32> {
+        let mut info = SHSTOCKICONINFO {
+            cbSize: size_of::<SHSTOCKICONINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `info` is a local with its size set, which the call fills.
+        unsafe { SHGetStockIconInfo(SIID_LINK, SHGSI_SYSICONINDEX, &mut info) }.ok()?;
+        let mut raw = std::ptr::null_mut();
+        // SAFETY: the system image list lives as long as the process; on
+        // success `raw` holds a reference that `from_raw` takes over.
+        let list = unsafe {
+            HIMAGELIST_QueryInterface(self.0, &IImageList::IID, &mut raw).ok()?;
+            IImageList::from_raw(raw)
+        };
+        let image_of = |overlay: i32| {
+            // SAFETY: a call on a live interface with a value argument.
+            unsafe { list.GetOverlayImage(overlay) }
+        };
+        // An image list has overlays 1 to 15 (`ILD_OVERLAYMASK`).
+        (1..=15)
+            .find(|&overlay| image_of(overlay) == Ok(info.iSysImageIndex))
+            .map(|overlay| overlay as u32)
+    }
+
+    /// Draws the icon `index` in the middle of `area`, with `overlay`, such
+    /// as [`Self::link_overlay`], over it.
+    pub(super) fn draw(self, dc: HDC, index: i32, overlay: Option<u32>, area: RECT) {
         let (mut width, mut height) = (0, 0);
+        // INDEXTOOVERLAYMASK
+        let style = ILD_TRANSPARENT | IMAGE_LIST_DRAW_STYLE(overlay.unwrap_or(0) << 8);
         // SAFETY: the system image list lives as long as the process; `dc`
         // is the caller's for the length of its message.
         unsafe {
             let _ = ImageList_GetIconSize(self.0, Some(&mut width), Some(&mut height));
             let x = area.left + (area.right - area.left - width) / 2;
             let y = area.top + (area.bottom - area.top - height) / 2;
-            let _ = ImageList_Draw(self.0, index, dc, x, y, ILD_TRANSPARENT);
+            let _ = ImageList_Draw(self.0, index, dc, x, y, style);
         }
     }
 }
