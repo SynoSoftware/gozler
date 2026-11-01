@@ -54,6 +54,17 @@ $rustdocFlags = $env:RUSTDOCFLAGS
 Push-Location $PSScriptRoot
 try {
     $process.PriorityClass = 'BelowNormal'
+    # A new toolchain rebuilds every artifact under new file names and cargo
+    # never deletes the old ones, so each update would leave a full stale build
+    # behind. Cleaning first costs nothing, because everything rebuilds anyway.
+    $targetDir = $env:CARGO_TARGET_DIR ?? (Join-Path $PSScriptRoot 'target')
+    $toolchainFile = Join-Path $targetDir 'toolchain.txt'
+    $toolchain = (& rustc -vV) -join "`n"
+    if ((Test-Path $toolchainFile) -and (Get-Content $toolchainFile -Raw) -ne $toolchain) {
+        Invoke-Cargo clean
+    }
+    New-Item -ItemType Directory -Force $targetDir | Out-Null
+    Set-Content $toolchainFile $toolchain -NoNewline
     if ($Timing) {
         Invoke-Cargo test --release --workspace --no-run $Timing
         $process.PriorityClass = $priority
