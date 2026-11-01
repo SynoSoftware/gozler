@@ -970,6 +970,7 @@
     "clipboard_busy": "Otro programa está usando el Portapapeles. Vuelve a intentarlo en un momento.",
     "drag_limit": "Gozler arrastra hasta {0} elementos a la vez y hay {1} seleccionados. Para copiarlos todos, usa Edición > Copiar y pégalos.",
     "drag_limit_panel": "Gozler arrastra hasta {0} elementos a la vez y hay {1} seleccionados. Para copiarlos todos al otro panel, presiona F5.",
+    "drag_title": "Arrastrar y colocar",
     "no_longer_exists": "{0} ya no existe. Presiona F5 para volver a buscar.",
     "open_failed": "No se pudo iniciar {0}. {1} Revisa el comando en Archivo > Configuración > Menú contextual.",
     "shortcut_taken": "Otro programa usa {0}, así que ese método abreviado ya no muestra Gozler. Elige otro método abreviado en Archivo > Configuración > Teclado.",

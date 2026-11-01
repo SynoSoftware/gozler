@@ -43,6 +43,7 @@ use crate::core::fetch::{
     ChunkAsk, DaemonFailure, Fetch, List, LocalService, Purpose, WriteFailure,
 };
 use crate::core::file_operations::{QueueAction, delete_question, exit_question};
+use crate::core::fixer::SetupFix;
 use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId, DialogId};
 use crate::core::include::{
@@ -97,6 +98,7 @@ use crate::win::tray::TrayEvent;
 use crate::win::wake::OpenWaker;
 use crate::win::window::{Message, WindowProc};
 use crate::win::{self, Hwnd};
+use gozler_client::Repair;
 use gozler_core::include::IndexSettings;
 use gozler_core::proto::ResultItem;
 use gozler_core::query::QueryStart;
@@ -535,7 +537,7 @@ enum ModalStep {
     SettingsNotSaved(std::io::Error),
     WindowsShortcutFailed(std::io::Error),
     OpenSettings(Id, RegistryRead),
-    CopyFailed(Id, CopyFailure),
+    CopyFailed(Id, CopyFailure, ClipboardFormat),
     Opened(ShellPurpose, crate::core::work::Id, Opened),
     PreparedPaths(PathPurpose, Id, PreparedPaths),
     Paired(crate::core::work::Id, LocalService, bool),
@@ -1281,10 +1283,16 @@ impl MainWindow {
         let text = {
             let model = self.model.borrow();
             (model.fix().found_no_setup())
-                .then(|| model.strings().text("fixing.no_setup").to_owned())
+                .map(|fix| (fix, model.strings().text("fixing.no_setup").to_owned()))
         };
-        if let Some(text) = text {
-            self.error_box(self.fix_owner(hwnd), &text);
+        if let Some((fix, text)) = text {
+            // The title is the button the person clicked, such as Downgrade.
+            let button = ListButton::Fix(match fix {
+                SetupFix::Update => Fix::Update,
+                SetupFix::Download => Fix::Repair(Repair::Download),
+            });
+            let title = self.model.borrow().button_label(&button);
+            self.error_box(self.fix_owner(hwnd), &text, title);
         }
     }
 
@@ -1960,7 +1968,7 @@ impl MainWindow {
                     if let Some(entry) =
                         self.selected_source(list).and_then(|entries| entries.one())
                     {
-                        self.show_in_commander(list, entry);
+                        self.show_in_commander(list, entry, CommandId::ShowInCommander);
                     }
                     return;
                 }
@@ -2412,7 +2420,7 @@ impl MainWindow {
                             &win::error_text(&error),
                         ],
                     );
-                    self.error_box(hwnd, &text);
+                    self.error_box(hwnd, &text, "settings.title");
                 }
                 ModalStep::SettingsNotSaved(_) => {}
                 ModalStep::WindowsShortcutFailed(error) => {
@@ -2420,14 +2428,21 @@ impl MainWindow {
                         "settings_keyboard.windows_failed",
                         &[&win::error_text(&error)],
                     );
-                    self.error_box(hwnd, &text);
+                    self.error_box(hwnd, &text, "settings.title");
                 }
-                ModalStep::CopyFailed(id, failure) => {
+                ModalStep::CopyFailed(id, failure, format) => {
                     if !self.created().work.borrow().clipboard.is_current(id) {
                         continue;
                     }
                     let text = failure.message(self.model.borrow().strings());
-                    self.error_box(hwnd, &text);
+                    let command = match format {
+                        ClipboardFormat::Files => CommandId::Copy,
+                        ClipboardFormat::CutFiles => CommandId::Cut,
+                        ClipboardFormat::Paths => CommandId::CopyAsPath,
+                        ClipboardFormat::Names => CommandId::CopyName,
+                        ClipboardFormat::Folders => CommandId::CopyFolder,
+                    };
+                    self.error_box(hwnd, &text, command.row().label);
                 }
                 ModalStep::PreparedPaths(purpose, id, prepared) => {
                     if !self
@@ -2524,6 +2539,12 @@ impl MainWindow {
                         }
                         continue;
                     }
+                    // What does not open, or is gone, says so under the
+                    // command that asked, and under "Open" when no command
+                    // did, as a panel's does.
+                    let title = opened
+                        .command
+                        .map_or("panel.open_title", |command| command.row().label);
                     if let Some(failure) = opened.failure {
                         let offered = match (&failure.target, opened.denied) {
                             (OpenTarget::Path(folder), Some(entry)) => self.offer_administrator(
@@ -2535,16 +2556,10 @@ impl MainWindow {
                         };
                         if !offered {
                             let reason = win::error_text(&failure.error);
-                            let (title, text) = {
+                            let text = {
                                 let model = self.model.borrow();
                                 let strings = model.strings();
-                                // A path that does not open says so under
-                                // "Open", as a panel's does.
-                                let title = match failure.target {
-                                    OpenTarget::Command(_) => "window.title",
-                                    _ => "panel.open_title",
-                                };
-                                let text = match failure.target {
+                                match failure.target {
                                     OpenTarget::Command(program) => {
                                         strings.format("message.open_failed", &[&program, &reason])
                                     }
@@ -2559,21 +2574,12 @@ impl MainWindow {
                                     OpenTarget::Administrator => {
                                         strings.format("panel.administrator_failed", &[&reason])
                                     }
-                                };
-                                (strings.text(title).to_owned(), text)
+                                }
                             };
-                            win::dialog::error_box(Some(self.fix_owner(hwnd)), &text, &title);
+                            self.error_box(self.fix_owner(hwnd), &text, title);
                         }
                     }
                     if self.created().work.borrow().shell.is_current(purpose, id) {
-                        // An entry that is gone when the person opens it
-                        // says so under "Open", as a panel's does.
-                        let title = match purpose {
-                            ShellPurpose::Entries(_, EntryAction::Open)
-                            | ShellPurpose::Commander(_)
-                            | ShellPurpose::Reveal => "panel.open_title",
-                            _ => "window.title",
-                        };
                         self.report_missing(hwnd, opened.missing, title);
                     }
                 }
@@ -2581,15 +2587,10 @@ impl MainWindow {
                     if !self.created().work.borrow().settings.pairing_is_current(id) => {}
                 ModalStep::Paired(_, local, true) => self.start_fix(hwnd, &Fix::UseLocal(local)),
                 ModalStep::Paired(_, _, false) => {
-                    let (text, title) = {
-                        let model = self.model.borrow();
-                        let text = |key: &str| model.strings().text(key).to_owned();
-                        (
-                            text("fixing.use_local_not_paired"),
-                            text("fixing.use_local_caption"),
-                        )
-                    };
-                    win::dialog::error_box(Some(self.fix_owner(hwnd)), &text, &title);
+                    let text = (self.model.borrow().strings())
+                        .text("fixing.use_local_not_paired")
+                        .to_owned();
+                    self.error_box(self.fix_owner(hwnd), &text, "fixing.use_local_caption");
                 }
                 ModalStep::PanelRefused(refused) => {
                     self.controls().panels.refuse(self, hwnd, refused)
@@ -2882,8 +2883,8 @@ impl MainWindow {
                 Timer::Clipboard.id(),
                 crate::core::clipboard::RETRY_AFTER.as_millis() as u32,
             ),
-            Some(CopyNotice::Failed(id, error)) => {
-                self.defer(hwnd, ModalStep::CopyFailed(id, error))
+            Some(CopyNotice::Failed(id, error, format)) => {
+                self.defer(hwnd, ModalStep::CopyFailed(id, error, format))
             }
             Some(CopyNotice::Finished) | None => {}
         }
@@ -3392,7 +3393,7 @@ impl MainWindow {
                     let commanded = Entries::Ready(commanded);
                     self.open_entries(list, EntryAction::Open, commanded);
                 }
-                self.show_in_commander(list, entry);
+                self.show_in_commander(list, entry, CommandId::Open);
             }
         }
     }
@@ -3404,15 +3405,15 @@ impl MainWindow {
         self.open_entries(list, action, entries);
     }
 
-    /// Shows `entry` in Commander once its folder opens (DESIGN.md:
-    /// Searching, "where Open goes").
-    fn show_in_commander(&self, list: List, entry: Selected) {
+    /// Shows `entry` in Commander once its folder opens, for `command`
+    /// (DESIGN.md: Searching, "where Open goes").
+    fn show_in_commander(&self, list: List, entry: Selected, command: CommandId) {
         self.cancel_reveal();
         self.created()
             .work
             .borrow_mut()
             .shell
-            .show_in_commander(list, entry);
+            .show_in_commander(list, entry, command);
     }
 
     /// The open commands of Settings > Context menu that `list` runs.
@@ -3455,7 +3456,7 @@ impl MainWindow {
                 let count = |n: usize| numbers.integer(n as u64);
                 (self.model.borrow().strings()).format(key, &[&count(DRAG_LIMIT), &count(selected)])
             };
-            self.error_box(hwnd, &text);
+            self.error_box(hwnd, &text, "message.drag_title");
             return;
         }
         if selected == 0 {
@@ -3467,7 +3468,7 @@ impl MainWindow {
             return;
         };
         let missing = shell::drag(&entries.dragged());
-        self.report_missing(hwnd, missing, "window.title");
+        self.report_missing(hwnd, missing, "message.drag_title");
     }
 
     /// Redraws the rows that a drop's highlight left or reached.
@@ -3518,15 +3519,12 @@ impl MainWindow {
     fn report_missing(&self, hwnd: Hwnd, missing: Option<Vec<u16>>, title: &str) {
         let Some(path) = missing else { return };
         let path = String::from_utf16_lossy(&path);
-        let (title, text) = {
-            let model = self.model.borrow();
-            let strings = model.strings();
-            (
-                strings.text(title).to_owned(),
-                strings.format("message.no_longer_exists", &[&path]),
-            )
-        };
-        win::dialog::error_box(Some(hwnd), &text, &title);
+        let text = self
+            .model
+            .borrow()
+            .strings()
+            .format("message.no_longer_exists", &[&path]);
+        self.error_box(hwnd, &text, title);
     }
 
     /// Puts the selected files on the clipboard in `format` (DESIGN.md: C8, C9,
@@ -4474,16 +4472,13 @@ impl MainWindow {
                 ),
             }
         };
-        self.error_box(hwnd, &text);
+        self.error_box(hwnd, &text, "export.title");
     }
 
-    fn error_box(&self, hwnd: Hwnd, text: &str) {
-        let title = self
-            .model
-            .borrow()
-            .strings()
-            .text("window.title")
-            .to_owned();
+    /// A message box titled with the command or feature it reports, whose
+    /// catalogue key is `title`; a command's caption loses its access key.
+    fn error_box(&self, hwnd: Hwnd, text: &str, title: &str) {
+        let title = without_access_key(self.model.borrow().strings().text(title));
         win::dialog::error_box(Some(hwnd), text, &title);
     }
 

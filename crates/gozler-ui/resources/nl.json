@@ -970,6 +970,7 @@
     "clipboard_busy": "Een ander programma gebruikt het Klembord. Probeer het zo meteen opnieuw.",
     "drag_limit": "Gozler sleept maximaal {0} items tegelijk en er zijn er {1} geselecteerd. Gebruik Bewerken > Kopiëren en plak ze om ze allemaal te kopiëren.",
     "drag_limit_panel": "Gozler sleept maximaal {0} items tegelijk en er zijn er {1} geselecteerd. Druk op F5 om ze allemaal naar het andere paneel te kopiëren.",
+    "drag_title": "Slepen en neerzetten",
     "no_longer_exists": "{0} bestaat niet meer. Druk op F5 om opnieuw te zoeken.",
     "open_failed": "Kan {0} niet starten. {1} Controleer de opdracht in Bestand > Instellingen > Snelmenu.",
     "shortcut_taken": "Een ander programma gebruikt {0}, dus deze sneltoets geeft Gozler niet meer weer. Kies een andere sneltoets in Bestand > Instellingen > Toetsenbord.",

@@ -2,6 +2,7 @@
 
 use super::Surface;
 use crate::core::clipboard::folder_of;
+use crate::core::commands::CommandId;
 use crate::core::fetch::List;
 use crate::core::open::{Commands, Entries, EntryAction, Selected};
 use crate::core::work::{Id, Replacement, Retirement, Waiting};
@@ -58,10 +59,12 @@ enum Invocation {
         commands: Commands,
     },
     /// Show in Commander, which waits until the entry's folder opens
-    /// (DESIGN.md: Searching, "where Open goes").
+    /// (DESIGN.md: Searching, "where Open goes"), for `command`: Open or
+    /// Show in Commander.
     Commander {
         list: List,
         entry: Selected,
+        command: CommandId,
     },
     Reveal(Selected),
     /// A copy of this window that runs as administrator and shows `entry`
@@ -83,6 +86,23 @@ impl Invocation {
             | Self::Commander { .. }
             | Self::Reveal(_)
             | Self::Administrator { .. } => 0,
+        }
+    }
+
+    /// The command that started it, which titles its messages; none for
+    /// work that no command starts, which reports under "Open".
+    fn command(&self) -> Option<CommandId> {
+        match self {
+            Self::Entries { action, .. } => Some(match action {
+                EntryAction::Open => CommandId::Open,
+                EntryAction::OpenFileLocation => CommandId::OpenFileLocation,
+                EntryAction::Explore => CommandId::Explore,
+                EntryAction::Properties => CommandId::Properties,
+            }),
+            Self::Commander { command, .. } => Some(*command),
+            Self::Target(..) | Self::Setup(_) | Self::Reveal(_) | Self::Administrator { .. } => {
+                None
+            }
         }
     }
 
@@ -141,6 +161,8 @@ pub(in crate::app) struct Opened {
     /// The entry whose folder Windows refused this window, beside the
     /// failure, which a copy that runs as administrator can show.
     pub(in crate::app) denied: Option<Selected>,
+    /// The command that asked, as [`Invocation::command`] says.
+    pub(in crate::app) command: Option<CommandId>,
 }
 
 pub(in crate::app) struct Work {
@@ -218,8 +240,17 @@ impl Work {
         });
     }
 
-    pub(in crate::app) fn show_in_commander(&mut self, list: List, entry: Selected) {
-        self.invoke(Invocation::Commander { list, entry });
+    pub(in crate::app) fn show_in_commander(
+        &mut self,
+        list: List,
+        entry: Selected,
+        command: CommandId,
+    ) {
+        self.invoke(Invocation::Commander {
+            list,
+            entry,
+            command,
+        });
     }
 
     pub(in crate::app) fn reveal(&mut self, entry: Selected) {
@@ -346,6 +377,19 @@ impl Work {
 }
 
 fn invoke(
+    invocation: Invocation,
+    session: &crate::win::shell::Session,
+    worker: &OffThread,
+    cancel: &CancelToken,
+) -> Opened {
+    let command = invocation.command();
+    Opened {
+        command,
+        ..open(invocation, session, worker, cancel)
+    }
+}
+
+fn open(
     invocation: Invocation,
     session: &crate::win::shell::Session,
     _worker: &OffThread,

@@ -395,16 +395,16 @@ impl Fixer {
         }
     }
 
-    /// Whether the fix ended because the latest release has no setup to
-    /// install, which a message box says.
-    pub(crate) fn found_no_setup(&self) -> bool {
-        matches!(
-            self,
+    /// The fix, if it ended because the latest release has no setup to
+    /// install, which a message box titled with the fix says.
+    pub(crate) fn found_no_setup(&self) -> Option<SetupFix> {
+        match self {
             Fixer::Setup {
+                fix,
                 state: FixState::Ended(SetupResult::NoSetup),
-                ..
-            }
-        )
+            } => Some(*fix),
+            _ => None,
+        }
     }
 
     /// The person answered whether to download the setup the fix asks

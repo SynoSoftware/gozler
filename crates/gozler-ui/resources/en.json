@@ -970,6 +970,7 @@
     "clipboard_busy": "Another program is using the clipboard. Try again in a moment.",
     "drag_limit": "Gozler drags up to {0} items at a time, and {1} are selected. To copy them all, use Edit > Copy and paste them.",
     "drag_limit_panel": "Gozler drags up to {0} items at a time, and {1} are selected. To copy them all to the other panel, press F5.",
+    "drag_title": "Drag and drop",
     "no_longer_exists": "{0} no longer exists. Press F5 to search again.",
     "open_failed": "Couldn't start {0}. {1} Check the command in File > Settings > Context menu.",
     "shortcut_taken": "Another program uses {0}, so that shortcut no longer shows Gozler. Choose another shortcut in File > Settings > Keyboard.",

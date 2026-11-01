@@ -970,6 +970,7 @@
     "clipboard_busy": "Başka bir program panoyu kullanıyor. Biraz sonra yeniden deneyin.",
     "drag_limit": "Gozler bir seferde en fazla {0} öğe sürükler ve {1} öğe seçili. Hepsini kopyalamak için Düzen > Kopyala'yı kullanıp yapıştırın.",
     "drag_limit_panel": "Gozler bir seferde en fazla {0} öğe sürükler ve {1} öğe seçili. Hepsini diğer panele kopyalamak için F5'e basın.",
+    "drag_title": "Sürükle ve bırak",
     "no_longer_exists": "{0} artık yok. Yeniden aramak için F5'e basın.",
     "open_failed": "{0} başlatılamadı. {1} Dosya > Ayarlar > Bağlam menüsü bölümündeki komutu denetleyin.",
     "shortcut_taken": "{0} kısayolunu başka bir program kullanıyor, bu yüzden bu kısayol artık Gozler'i göstermiyor. Dosya > Ayarlar > Klavye bölümünde başka bir kısayol seçin.",
