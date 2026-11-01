@@ -14,19 +14,21 @@ use std::time::{Duration, Instant};
 
 struct Copy {
     data: CopyData,
+    /// What the command puts there, which a failure names.
+    format: ClipboardFormat,
     publication: Publication,
     preceding: Arc<AtomicU32>,
 }
 
 enum CopyData {
-    Rows(Arc<[ResultItem]>, ClipboardFormat),
+    Rows(Arc<[ResultItem]>),
     Block(ClipboardBlock),
 }
 
 impl Copy {
     fn items(&self) -> usize {
         match &self.data {
-            CopyData::Rows(files, _) => files.len(),
+            CopyData::Rows(files) => files.len(),
             CopyData::Block(block) => block.items(),
         }
     }
@@ -35,7 +37,7 @@ impl Copy {
 enum Copied {
     Finished,
     Busy(Copy),
-    Failed(windows::core::Error),
+    Failed(windows::core::Error, ClipboardFormat),
 }
 
 struct CopyRetry {
@@ -46,7 +48,7 @@ struct CopyRetry {
 
 pub(in crate::app) enum CopyNotice {
     Retry,
-    Failed(Id, CopyFailure),
+    Failed(Id, CopyFailure, ClipboardFormat),
     Finished,
 }
 
@@ -70,7 +72,8 @@ impl Work {
     pub(in crate::app) fn copy(&mut self, files: Arc<[ResultItem]>, format: ClipboardFormat) {
         self.clear_copy_retry();
         self.task.replace(Copy {
-            data: CopyData::Rows(files, format),
+            data: CopyData::Rows(files),
+            format,
             publication: Publication::new(clipboard::sequence()),
             preceding: Arc::clone(&self.last_publication),
         });
@@ -105,7 +108,9 @@ impl Work {
         let (id, answer) = answer?;
         Some(match answer {
             Copied::Finished => CopyNotice::Finished,
-            Copied::Failed(error) => CopyNotice::Failed(id, CopyFailure::Native(error)),
+            Copied::Failed(error, format) => {
+                CopyNotice::Failed(id, CopyFailure::Native(error), format)
+            }
             Copied::Busy(mut copy) => {
                 if copy.publication.retry() {
                     self.retry = Some(CopyRetry {
@@ -115,8 +120,9 @@ impl Work {
                     });
                     CopyNotice::Retry
                 } else {
+                    let format = copy.format;
                     self.retire_copy(copy);
-                    CopyNotice::Failed(id, CopyFailure::Busy)
+                    CopyNotice::Failed(id, CopyFailure::Busy, format)
                 }
             }
         })
@@ -169,8 +175,8 @@ fn copy(copy: Copy, worker: &OffThread, cancel: &CancelToken) -> Copied {
         return Copied::Finished;
     }
     let block = match copy.data {
-        CopyData::Rows(files, format) => {
-            let Some(block) = ClipboardBlock::new(&ClipboardData::new(format, &files)) else {
+        CopyData::Rows(files) => {
+            let Some(block) = ClipboardBlock::new(&ClipboardData::new(copy.format, &files)) else {
                 return Copied::Finished;
             };
             block
@@ -181,9 +187,10 @@ fn copy(copy: Copy, worker: &OffThread, cancel: &CancelToken) -> Copied {
         CopyAttempt::Published | CopyAttempt::Superseded => Copied::Finished,
         CopyAttempt::Busy(block) => Copied::Busy(Copy {
             data: CopyData::Block(block),
+            format: copy.format,
             publication: copy.publication,
             preceding: copy.preceding,
         }),
-        CopyAttempt::Failed(error) => Copied::Failed(error),
+        CopyAttempt::Failed(error) => Copied::Failed(error, copy.format),
     }
 }

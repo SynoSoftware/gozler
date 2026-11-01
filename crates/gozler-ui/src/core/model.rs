@@ -2578,7 +2578,7 @@ impl Model {
             Some(Effect::RunSetup(setup.to_owned()))
         } else if self.fix.confirming().is_some() {
             Some(Effect::ConfirmSetup)
-        } else if self.fix.found_no_setup() {
+        } else if self.fix.found_no_setup().is_some() {
             Some(Effect::ExplainNoSetup)
         } else if self.fix.waits_for_service() {
             self.status_needed().map(Effect::Fetch)

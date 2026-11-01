@@ -201,7 +201,7 @@ impl Shortcuts {
         }
         for failure in self.failures.take() {
             let text = failure.message(window.model.borrow().strings(), true);
-            window.error_box(hwnd, &text);
+            window.error_box(hwnd, &text, "settings.title");
         }
     }
 
