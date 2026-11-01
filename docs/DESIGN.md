@@ -1876,6 +1876,11 @@ failure, never a copy that nothing waited for or counted.
 5. **One failure does not stop the rest.** A file that cannot be deleted is
    recorded with Windows' error, and its folders stay. A file the walk
    listed that is already gone counts as deleted.
+6. **A deleted file counts its size,** from its folder's listing, or from
+   its own handle for a selected file; a link counts its own size, not its
+   target's. The status bar then says how much went: "Deleted 3 items
+   (4.2 GB)". A delete's total from gozlerd has no bytes, so its progress
+   still counts entries.
 
 ### Copy
 

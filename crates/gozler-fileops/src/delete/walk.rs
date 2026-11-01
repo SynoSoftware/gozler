@@ -26,7 +26,7 @@ type Folder = crate::tree::Folder<()>;
 
 /// Deletes `entries` and everything below them on `workers` threads, and
 /// returns each entry it could not delete, in the order the failures
-/// happened. Counts each item deleted in `progress`. Stops when `cancel` is
+/// happened. Counts each item deleted in `progress`, with its file's size. Stops when `cancel` is
 /// set, leaving what it has not deleted, and waits between entries while
 /// `pause` holds it.
 pub(crate) fn delete(
@@ -126,8 +126,10 @@ impl Walk<'_> {
             Err(error) => return self.lost(path, &error, None),
         };
         if !is_folder(tag.attributes, tag.reparse_tag) {
+            // A link's own size, not its target's, as a listing gives it.
+            let size = entry.stat().map_or(0, |stat| stat.size);
             let access = Access::delete(tag.attributes);
-            self.delete_entry(path, &disposition, None, || entry.reopen(access));
+            self.delete_entry(path, size, &disposition, None, || entry.reopen(access));
             return;
         }
         let folder = entry.reopen(Access::List).and_then(|entry| {
@@ -212,9 +214,13 @@ impl Walk<'_> {
         };
         if !is_folder(tag.attributes, tag.reparse_tag) {
             let access = Access::delete(tag.attributes);
-            self.delete_entry(&path, &parent.disposition, Some(parent), || {
-                entry.reopen(access)
-            });
+            self.delete_entry(
+                &path,
+                listed.size,
+                &parent.disposition,
+                Some(parent),
+                || entry.reopen(access),
+            );
             return;
         }
         let view = if tag.reparse_tag == 0 {
@@ -255,18 +261,26 @@ impl Walk<'_> {
             let access = Access::delete(listed.attributes);
             let open = || (folder.children()).open_child(&listed.name, access, Reparse::Open);
             match remove(self.cancel, &folder.disposition, open) {
-                Ok(()) => self.progress.add_items(1),
+                Ok(()) => self.deleted(listed.size),
                 Err(error) => self.fail(&path, error, Some(&folder)),
             }
         }
         self.release(folder);
     }
 
-    /// Deletes one file or link, or keeps it with its failure. Returns
-    /// whether it went.
+    /// Counts one item deleted, with `size`, its file's bytes.
+    fn deleted(&self, size: u64) {
+        // Items first: a report that stops the walk reads them.
+        self.progress.add_items(1);
+        self.progress.add_bytes(size);
+    }
+
+    /// Deletes one file, link or folder of `size` bytes, or keeps it with
+    /// its failure. Returns whether it went.
     fn delete_entry(
         &self,
         path: &[u16],
+        size: u64,
         disposition: &Disposition,
         parent: Option<&Folder>,
         open: impl Fn() -> Result<Entry, WinError>,
@@ -274,7 +288,7 @@ impl Walk<'_> {
         self.progress.start_file(path, None, 0);
         match remove(self.cancel, disposition, open) {
             Ok(()) => {
-                self.progress.add_items(1);
+                self.deleted(size);
                 true
             }
             Err(error) => {
@@ -302,7 +316,7 @@ impl Walk<'_> {
             || self.cancelled(),
             |folder| {
                 let reopen = || folder.entry.reopen(Access::delete(folder.attributes));
-                self.delete_entry(&folder.path, &folder.disposition, None, reopen)
+                self.delete_entry(&folder.path, 0, &folder.disposition, None, reopen)
             },
         );
     }

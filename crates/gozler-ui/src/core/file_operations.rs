@@ -1608,6 +1608,8 @@ pub(crate) struct Completion {
     kind: Completed,
     end: End,
     items: u64,
+    /// The bytes of the files done, which a delete's line shows.
+    bytes: u64,
     failed: u64,
     pub(crate) numbered: bool,
 }
@@ -1639,6 +1641,7 @@ impl Completion {
             kind,
             end: outcome.end.clone(),
             items: outcome.completed,
+            bytes: outcome.bytes,
             failed: outcome.listed.len() as u64,
             numbered,
         }
@@ -2067,6 +2070,7 @@ fn completion_line(strings: &Strings, numbers: &dyn Numbers, completion: &Comple
     let failed = completion.failed;
     let done = completion.items;
     let count = |key: &str, to: &[&str]| strings.count(key, done, numbers, to);
+    let size = bytes(strings, numbers, completion.bytes);
     // A rename and a new folder are one step, which succeeded or failed;
     // cancelled, it did nothing, as the person chose, so it shows no line.
     if let Completed::Rename { source: path, name } = &completion.kind {
@@ -2092,7 +2096,7 @@ fn completion_line(strings: &Strings, numbers: &dyn Numbers, completion: &Comple
             };
             count(key, &[&text_of(destination)])
         }
-        Completed::Delete if cancelled => count("file_operations.cancelled_delete", &[]),
+        Completed::Delete if cancelled => count("file_operations.cancelled_delete", &[&size]),
         Completed::Synchronize(destination) => {
             let key = if cancelled {
                 "sync.cancelled"
@@ -2101,7 +2105,7 @@ fn completion_line(strings: &Strings, numbers: &dyn Numbers, completion: &Comple
             };
             strings.format(key, &[&text_of(destination)])
         }
-        Completed::Delete => count("file_operations.ended_delete", &[]),
+        Completed::Delete => count("file_operations.ended_delete", &[&size]),
         Completed::NewFolder(_) if cancelled => return String::new(),
         Completed::NewFolder(path) => {
             let key = match failed {
@@ -2590,7 +2594,7 @@ mod tests {
         let outcome = Outcome::new(
             End::Complete,
             1,
-            0,
+            512,
             vec![Listed {
                 path: "operations.json".into(),
                 reason: Reason::RecoveryFailed(5),
@@ -2603,7 +2607,7 @@ mod tests {
                 &English,
                 &Completion::of(&request, &outcome, false)
             ),
-            "Deleted 1 item · 1 failed or skipped"
+            "Deleted 1 item (512 bytes) · 1 failed or skipped"
         );
     }
 
