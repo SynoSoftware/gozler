@@ -255,6 +255,14 @@ question of its own. Reuse existing evidence that already answers it.
   implementation settles, and prune redundant tests. Code the current work
   will replace or delete gets no test.
 
+**Owner ruling: a test run ends when its tests end.** A test process, or a
+process that a test started, that is still running after the run has passed
+or failed, so that the run ends only at a timeout, is a failure of the test
+suite. Fix it at once, before other work, also when every test passed. Each
+such run waits out its timeout on the owner's shared laptop, and a process
+that stays open keeps its executable locked, so the next build cannot replace
+it.
+
 **Keep diagnosis proportional.** Trace the failing behavior and choose the
 smallest credible check. Reuse existing tests and fixtures before building
 new infrastructure. If a new probe or fixture fails before it reaches the
