@@ -2463,6 +2463,17 @@ impl Panels {
                 RowIcon::Item(name, is_folder) => window.icons.index(&name, is_folder),
             }));
         }
+        if info.wants_state() {
+            let is_link = {
+                let model = window.model.borrow();
+                match shown_or_taken(model.panels(), side, info.row()) {
+                    Some(Row::Entry(entry)) => entry.is_link(),
+                    Some(Row::Result(item)) => window.icons.is_link(item),
+                    Some(Row::Up) | None => false,
+                }
+            };
+            info.set_overlay(window.row_overlay(is_link));
+        }
     }
 
     /// Has the list draw `row` of `side` in grey when it is a hidden or

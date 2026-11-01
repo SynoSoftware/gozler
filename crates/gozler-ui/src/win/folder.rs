@@ -273,6 +273,12 @@ fn open_link(path: &[u16]) -> Option<gozler_winfs::Entry> {
     is_link_tag(entry.attribute_tag().ok()?.reparse_tag).then_some(entry)
 }
 
+/// Whether `path` is a junction or a symbolic link; `false` also when it
+/// cannot be read.
+pub(crate) fn is_link(path: &[u16]) -> bool {
+    open_link(path).is_some()
+}
+
 /// Where `path` leads when it is a junction or a symbolic link, so a message
 /// can name the target that an open through the link did not find; `None`
 /// for any other entry, or when the link cannot be read.

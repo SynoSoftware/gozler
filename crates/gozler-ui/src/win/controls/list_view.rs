@@ -12,7 +12,7 @@ use windows::Win32::UI::Controls::{
     HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO, HDI_FORMAT, HDITEMW, HDM_GETITEMRECT, HDM_GETITEMW,
     HDM_HITTEST, HDM_SETITEMW, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH,
     LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO, LVIR_BOUNDS, LVIR_LABEL, LVIS_DROPHILITED,
-    LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
+    LVIS_FOCUSED, LVIS_OVERLAYMASK, LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
     LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNW, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
     LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM,
     LVM_GETSELECTEDCOUNT, LVM_GETSELECTIONMARK, LVM_GETSTRINGWIDTHW, LVM_GETTOPINDEX, LVM_HITTEST,
@@ -105,8 +105,10 @@ impl ListView {
             extended as isize,
         );
         // A virtual list keeps only the selection and the focus, so it asks
-        // the window which row a drop would go to (DispInfo::set_drop_target).
-        send(list, LVM_SETCALLBACKMASK, LVIS_DROPHILITED.0 as usize, 0);
+        // the window which row a drop would go to (DispInfo::set_drop_target)
+        // and which row shows an overlay (DispInfo::set_overlay).
+        let asked = LVIS_DROPHILITED.0 | LVIS_OVERLAYMASK.0;
+        send(list, LVM_SETCALLBACKMASK, asked as usize, 0);
         // Without the visible-item proxy, Windows' own provider still serves
         // the list; only a full tree walk is slower.
         let _ = accessibility::attach(ListView(list));
