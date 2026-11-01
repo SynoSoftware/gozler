@@ -113,7 +113,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use windows::Win32::Foundation::LRESULT;
-use windows::Win32::UI::WindowsAndMessaging::BROADCAST_QUERY_DENY;
+use windows::Win32::UI::WindowsAndMessaging::{BROADCAST_QUERY_DENY, WM_COPYDATA};
 
 mod drops;
 mod filters;
@@ -411,6 +411,9 @@ pub(crate) struct MainWindow {
     /// The control that had the focus when the window was deactivated.
     focus_on_activate: Cell<Option<Hwnd>>,
     settings_file: PathBuf,
+    /// The folder that `--data-dir` gave, which a copy started as
+    /// administrator gets too, so it replaces this window and no other.
+    data_dir: Option<PathBuf>,
     settings_failure_shown: Cell<bool>,
     ending_session: Cell<bool>,
     show_message: u32,
@@ -565,6 +568,7 @@ impl MainWindow {
         class: &str,
         model: Model,
         settings_file: PathBuf,
+        data_dir: Option<PathBuf>,
         show_message: u32,
         sign_in: bool,
         request: Option<StartupRequest>,
@@ -582,6 +586,7 @@ impl MainWindow {
             dates: RefCell::new(dates),
             focus_on_activate: Cell::new(None),
             settings_file,
+            data_dir,
             settings_failure_shown: Cell::new(false),
             ending_session: Cell::new(false),
             show_message,
@@ -619,6 +624,18 @@ impl MainWindow {
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
         win::present::set_main_window(hwnd);
+        if window.model.borrow().elevated() {
+            win::instance::accept_from_lower(
+                hwnd,
+                &[
+                    show_message,
+                    window.exit_message,
+                    window.taskbar_created,
+                    window.taskbar_button_created,
+                    WM_COPYDATA,
+                ],
+            );
+        }
         // Only a status reply names the volumes, so it is asked for beside
         // the first search (DESIGN.md: Requests).
         let starts_search = matches!(
@@ -629,7 +646,7 @@ impl MainWindow {
             window.search(hwnd, List::Search);
         }
         let reveal = match request {
-            Some(request @ StartupRequest::Reveal(_)) => Some(request),
+            Some(request @ (StartupRequest::Reveal(_) | StartupRequest::Open(_))) => Some(request),
             Some(request) => {
                 window.apply_request(hwnd, request);
                 None
@@ -700,16 +717,22 @@ impl MainWindow {
                     .push(Effect::SearchAgain(vec![List::Search]));
                 self.apply(hwnd, accepted);
             }
-            StartupRequest::Reveal(path) => {
-                self.reveal
-                    .replace(Some(Reveal::Checking(self.model.borrow().navigation())));
-                self.created().work.borrow_mut().shell.reveal(Selected {
-                    path: path.encode_utf16().collect(),
-                    is_folder: false,
-                });
-                self.poll_work(hwnd);
-            }
+            StartupRequest::Reveal(path) => self.reveal_entry(hwnd, path, false),
+            // The shell worker reads whether the path is a folder.
+            StartupRequest::Open(path) => self.reveal_entry(hwnd, path, true),
         }
+    }
+
+    /// Shows `path` in Commander once its folder opens: a file in its
+    /// folder, with the cursor on it, or a folder itself.
+    fn reveal_entry(&self, hwnd: Hwnd, path: String, is_folder: bool) {
+        self.reveal
+            .replace(Some(Reveal::Checking(self.model.borrow().navigation())));
+        self.created().work.borrow_mut().shell.reveal(Selected {
+            path: path.encode_utf16().collect(),
+            is_folder,
+        });
+        self.poll_work(hwnd);
     }
 
     pub(super) fn cancel_reveal(&self) {
@@ -1192,6 +1215,27 @@ impl MainWindow {
             Fix::Repair(_) | Fix::Update => {}
         }
         self.start_fix(hwnd, &fix);
+    }
+
+    /// After Windows refused `folder` to this window, asks whether a copy
+    /// that runs as administrator shows `entry` in Commander, and starts it
+    /// on Continue (DESIGN.md: A panel). `false`, having asked nothing,
+    /// when Windows cannot start this program as administrator for the
+    /// same person.
+    pub(super) fn offer_administrator(&self, hwnd: Hwnd, folder: &str, entry: Selected) -> bool {
+        if !win::instance::may_run_as_administrator() {
+            return false;
+        }
+        let question = captions::administrator_question(self.model.borrow().strings(), folder);
+        if win::dialog::ask(hwnd, &question) {
+            self.created()
+                .work
+                .borrow_mut()
+                .shell
+                .start_as_administrator(entry, self.data_dir.clone());
+            self.poll_work(hwnd);
+        }
+        true
     }
 
     fn start_fix(&self, hwnd: Hwnd, fix: &Fix) {
@@ -2481,20 +2525,34 @@ impl MainWindow {
                         continue;
                     }
                     if let Some(failure) = opened.failure {
-                        let reason = win::error_text(&failure.error);
-                        let text = {
-                            let model = self.model.borrow();
-                            match failure.target {
-                                OpenTarget::Command(program) => model
-                                    .strings()
-                                    .format("message.open_failed", &[&program, &reason]),
-                                OpenTarget::Path(path) => model.strings().format(
-                                    "panel.cannot_open",
-                                    &[&String::from_utf16_lossy(&path), &reason],
-                                ),
-                            }
+                        let offered = match (&failure.target, opened.denied) {
+                            (OpenTarget::Path(folder), Some(entry)) => self.offer_administrator(
+                                hwnd,
+                                &String::from_utf16_lossy(folder),
+                                entry,
+                            ),
+                            _ => false,
                         };
-                        self.error_box(self.fix_owner(hwnd), &text);
+                        if !offered {
+                            let reason = win::error_text(&failure.error);
+                            let text = {
+                                let model = self.model.borrow();
+                                let strings = model.strings();
+                                match failure.target {
+                                    OpenTarget::Command(program) => {
+                                        strings.format("message.open_failed", &[&program, &reason])
+                                    }
+                                    OpenTarget::Path(path) => strings.format(
+                                        "panel.cannot_open",
+                                        &[&String::from_utf16_lossy(&path), &reason],
+                                    ),
+                                    OpenTarget::Administrator => {
+                                        strings.format("panel.administrator_failed", &[&reason])
+                                    }
+                                }
+                            };
+                            self.error_box(self.fix_owner(hwnd), &text);
+                        }
                     }
                     if self.created().work.borrow().shell.is_current(purpose, id) {
                         self.report_missing(hwnd, opened.missing);
@@ -5211,6 +5269,15 @@ impl WindowProc for MainWindow {
             Message::Other(msg) if msg == self.taskbar_button_created => {
                 if let Some(operations) = self.file_operations.get() {
                     operations.forget_taskbar();
+                }
+                let description = {
+                    let model = self.model.borrow();
+                    model
+                        .elevated()
+                        .then(|| model.strings().text("window.administrator").to_owned())
+                };
+                if let Some(description) = description {
+                    win::instance::mark_taskbar_button(hwnd, &description);
                 }
                 Some(LRESULT(0))
             }

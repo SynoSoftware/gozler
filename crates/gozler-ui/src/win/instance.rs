@@ -10,15 +10,23 @@ use std::time::{Duration, SystemTime};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, FILETIME, GetLastError, HANDLE, LPARAM, WPARAM,
 };
+use windows::Win32::Security::{
+    GetTokenInformation, TOKEN_ELEVATION, TOKEN_ELEVATION_TYPE, TOKEN_INFORMATION_CLASS,
+    TOKEN_QUERY, TokenElevation, TokenElevationType, TokenElevationTypeLimited,
+};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::Threading::{
-    CreateMutexW, GetProcessTimes, INFINITE, OpenProcess, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW,
-    WaitForSingleObject,
+    CreateMutexW, GetCurrentProcess, GetProcessTimes, INFINITE, OpenProcess, OpenProcessToken,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    QueryFullProcessImageNameW, WaitForSingleObject,
 };
+use windows::Win32::UI::Controls::{LIM_SMALL, LoadIconMetric};
+use windows::Win32::UI::Shell::{ITaskbarList3, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, FindWindowW, GetWindowThreadProcessId, RegisterWindowMessageW,
-    SMTO_ABORTIFHUNG, SMTO_NOTIMEOUTIFNOTHUNG, SendMessageTimeoutW, WM_COPYDATA,
+    AllowSetForegroundWindow, ChangeWindowMessageFilterEx, DestroyIcon, FindWindowW,
+    GetWindowThreadProcessId, IDI_SHIELD, MSGFLT_ALLOW, RegisterWindowMessageW, SMTO_ABORTIFHUNG,
+    SMTO_NOTIMEOUTIFNOTHUNG, SendMessageTimeoutW, WM_COPYDATA,
 };
 use windows::core::{HSTRING, PCWSTR, PWSTR};
 
@@ -123,6 +131,105 @@ impl Process {
     pub(crate) fn wait_for_end(&self) {
         // SAFETY: the handle is this value's own and has the right to wait.
         let _ = unsafe { WaitForSingleObject(self.0, INFINITE) };
+    }
+
+    /// Whether the process runs as administrator; `false` when Windows
+    /// does not say.
+    pub(crate) fn is_elevated(&self) -> bool {
+        // SAFETY: the handle is this value's own, and Windows answers
+        // `TokenElevation` with a `TOKEN_ELEVATION`.
+        unsafe { token_information::<TOKEN_ELEVATION>(self.0, TokenElevation) }
+            .is_some_and(|elevation| elevation.TokenIsElevated != 0)
+    }
+}
+
+/// Whether this process runs as administrator.
+pub(crate) fn is_elevated() -> bool {
+    // SAFETY: the pseudo-handle of this process needs no closing, and
+    // Windows answers `TokenElevation` with a `TOKEN_ELEVATION`.
+    unsafe { token_information::<TOKEN_ELEVATION>(GetCurrentProcess(), TokenElevation) }
+        .is_some_and(|elevation| elevation.TokenIsElevated != 0)
+}
+
+/// Whether Windows can start this program again as administrator for the
+/// same person: this process runs with an administrator's filtered token.
+/// A standard user's prompt asks for another account, whose Gozler has
+/// other settings, and a process that already runs as administrator gains
+/// nothing.
+pub(crate) fn may_run_as_administrator() -> bool {
+    // SAFETY: the pseudo-handle of this process needs no closing, and
+    // Windows answers `TokenElevationType` with a `TOKEN_ELEVATION_TYPE`.
+    let elevation_type = unsafe {
+        token_information::<TOKEN_ELEVATION_TYPE>(GetCurrentProcess(), TokenElevationType)
+    };
+    elevation_type == Some(TokenElevationTypeLimited)
+}
+
+/// The answer to `class` about the token of `process`; `None` when Windows
+/// refuses the token or the question.
+///
+/// # Safety
+///
+/// `process` is open with `PROCESS_QUERY_LIMITED_INFORMATION`, and `T` is
+/// the structure that Windows answers `class` with.
+unsafe fn token_information<T: Default>(
+    process: HANDLE,
+    class: TOKEN_INFORMATION_CLASS,
+) -> Option<T> {
+    let mut token = HANDLE::default();
+    // SAFETY: the caller gives an open process; `token` is a local the call
+    // fills in.
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.ok()?;
+    let mut answer = T::default();
+    let mut length = 0;
+    // SAFETY: `answer` holds the `T` that the caller says `class` answers
+    // with, and the call writes at most its size.
+    let read = unsafe {
+        GetTokenInformation(
+            token,
+            class,
+            Some((&raw mut answer).cast()),
+            size_of::<T>() as u32,
+            &mut length,
+        )
+    };
+    // SAFETY: the token is this function's own.
+    let _ = unsafe { CloseHandle(token) };
+    read.ok().map(|()| answer)
+}
+
+/// Puts the administrator shield on `window`'s taskbar button, because a
+/// taskbar that shows no labels hides the title; `description` is what a
+/// screen reader says for it. Explorer drops it when it makes the button
+/// again, which `TaskbarButtonCreated` tells.
+pub(crate) fn mark_taskbar_button(window: Hwnd, description: &str) {
+    // SAFETY: COM is initialized on this thread at start; the instance is
+    // released when it drops.
+    let taskbar: windows::core::Result<ITaskbarList3> =
+        unsafe { CoCreateInstance(&TaskbarList, None, CLSCTX_INPROC_SERVER) };
+    // SAFETY: Windows' own shield icon, loaded at the small icon size.
+    let shield = unsafe { LoadIconMetric(None, IDI_SHIELD, LIM_SMALL) };
+    let (Ok(taskbar), Ok(shield)) = (taskbar, shield) else {
+        return;
+    };
+    // SAFETY: HrInit comes before any other call; the taskbar keeps its own
+    // copy of the icon, so this one is destroyed after the call.
+    unsafe {
+        if taskbar.HrInit().is_ok() {
+            let _ = taskbar.SetOverlayIcon(window.0, shield, &HSTRING::from(description));
+        }
+        let _ = DestroyIcon(shield);
+    }
+}
+
+/// Lets programs that run without administrator rights send `messages` to
+/// `window`, which runs as administrator, such as a later start that hands
+/// over to it and Explorer. Windows otherwise drops a message from a lower
+/// integrity level.
+pub(crate) fn accept_from_lower(window: Hwnd, messages: &[u32]) {
+    for &message in messages {
+        // SAFETY: plain values; the filter belongs to `window`.
+        let _ = unsafe { ChangeWindowMessageFilterEx(window.0, message, MSGFLT_ALLOW, None) };
     }
 }
 

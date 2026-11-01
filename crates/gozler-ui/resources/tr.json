@@ -6,7 +6,9 @@
   },
   "window": {
     "title": "Gozler",
-    "title_search": "{0} – Gozler"
+    "title_search": "{0} – Gozler",
+    "title_administrator": "{0} (Admin)",
+    "administrator": "Yönetici olarak çalışıyor"
   },
   "menu": {
     "file": "&Dosya",
@@ -439,7 +441,8 @@
     "clear": "Temizle",
     "close": "Kapat",
     "ok": "Tamam",
-    "cancel": "İptal"
+    "cancel": "İptal",
+    "continue": "Devam et"
   },
   "custom_date": {
     "title": "Özel tarih",
@@ -930,6 +933,9 @@
     "ext": "Uzantı",
     "missing": "{0} mevcut değil.",
     "cannot_open": "Windows {0} öğesini açamadı: {1}",
+    "denied_question": "{0} öğesini açma izniniz yok.",
+    "denied_details": "Yönetici olarak açmak için Devam et'i seçin. Gozler yeniden başlar ve siz çıkana kadar yönetici olarak çalışır.",
+    "administrator_failed": "Gozler yönetici olarak başlatılamadı. {0}",
     "drive_not_ready": "{0} sürücüsü hazır değil. {1}",
     "open_title": "Aç",
     "indexing": "{0} dizinleniyor — boyutlar eksik olabilir.",

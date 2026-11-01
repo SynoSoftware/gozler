@@ -6,7 +6,9 @@
   },
   "window": {
     "title": "Gozler",
-    "title_search": "{0} – Gozler"
+    "title_search": "{0} – Gozler",
+    "title_administrator": "{0} (Admin)",
+    "administrator": "Wordt uitgevoerd als beheerder"
   },
   "menu": {
     "file": "&Bestand",
@@ -439,7 +441,8 @@
     "clear": "Wissen",
     "close": "Sluiten",
     "ok": "OK",
-    "cancel": "Annuleren"
+    "cancel": "Annuleren",
+    "continue": "Doorgaan"
   },
   "custom_date": {
     "title": "Aangepaste datum",
@@ -930,6 +933,9 @@
     "ext": "Ext.",
     "missing": "{0} bestaat niet.",
     "cannot_open": "Windows kan {0} niet openen: {1}",
+    "denied_question": "U hebt geen machtiging om {0} te openen.",
+    "denied_details": "Selecteer Doorgaan om de map als beheerder te openen. Gozler start opnieuw en wordt als beheerder uitgevoerd totdat u het afsluit.",
+    "administrator_failed": "Kan Gozler niet als beheerder starten. {0}",
     "drive_not_ready": "Station {0} is niet gereed. {1}",
     "open_title": "Openen",
     "indexing": "{0} wordt geïndexeerd — grootten kunnen ontbreken.",

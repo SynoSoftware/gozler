@@ -2159,6 +2159,7 @@ pub(crate) fn delete_question(
         confirm: strings.text("file_operations.delete_button").to_owned(),
         cancel: strings.text("button.cancel").to_owned(),
         guard: Guard::CancelFirst,
+        elevates: false,
     }
 }
 
@@ -2227,6 +2228,7 @@ pub(crate) fn exit_question(
         confirm: strings.text("file_operations.exit_button").to_owned(),
         cancel: strings.text("button.cancel").to_owned(),
         guard: Guard::CancelFirst,
+        elevates: false,
     })
 }
 

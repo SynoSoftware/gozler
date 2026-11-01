@@ -22,6 +22,8 @@ pub(crate) enum Request {
     Location(String),
     Search(Search),
     Reveal(String),
+    /// A folder to show in Commander, as `--open` asks.
+    Open(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -55,6 +57,7 @@ impl Request {
         let invalid = match self {
             Self::Location(folder) if !path(folder) => Some("--location"),
             Self::Reveal(file) if !path(file) => Some("--reveal"),
+            Self::Open(folder) if !path(folder) => Some("--open"),
             Self::Search(search) if search.text.contains('\0') => Some("--search"),
             Self::Search(search) if !search.location.as_deref().is_none_or(path) => {
                 Some("--location")
@@ -110,6 +113,7 @@ impl Arguments {
         let mut has_search = false;
         let mut location = None;
         let mut reveal = None;
+        let mut open = None;
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             let arg = arg.to_string_lossy();
@@ -130,6 +134,7 @@ impl Arguments {
                     has_search = true;
                 }
                 "--reveal" => reveal = Some(value(&mut args, &arg)?),
+                "--open" => open = Some(value(&mut args, &arg)?),
                 "--match-mode" => {
                     search.mode = Some(match value(&mut args, &arg)?.as_str() {
                         "start-of-words" => MatchMode::StartOfWords,
@@ -181,8 +186,10 @@ impl Arguments {
         if modifiers && !has_search {
             return Err(Error::SearchRequired);
         }
-        if reveal.is_some() && (has_search || location.is_some())
-            || result.sign_in && (has_search || reveal.is_some() || result.new_window)
+        let commander = reveal.is_some() || open.is_some();
+        if commander && (has_search || location.is_some())
+            || reveal.is_some() && open.is_some()
+            || result.sign_in && (has_search || commander || result.new_window)
         {
             return Err(Error::Conflict);
         }
@@ -191,6 +198,8 @@ impl Arguments {
             Some(Request::Search(search))
         } else if let Some(path) = reveal {
             Some(Request::Reveal(path))
+        } else if let Some(folder) = open {
+            Some(Request::Open(folder))
         } else {
             location.map(Request::Location)
         };
@@ -310,6 +319,10 @@ mod tests {
         );
         assert_eq!(
             parse(&["--search", "a", "--reveal", "b"]).err(),
+            Some(Error::Conflict)
+        );
+        assert_eq!(
+            parse(&["--reveal", "a", "--open", "b"]).err(),
             Some(Error::Conflict)
         );
         assert_eq!(

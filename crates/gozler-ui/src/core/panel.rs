@@ -466,8 +466,9 @@ impl PanelColumn {
 pub(crate) struct ReadAsk {
     pub(crate) generation: u64,
     pub(crate) path: String,
-    /// A folder that does not exist is replaced by the nearest folder above
-    /// it that exists, as for the shown folder and the saved one.
+    /// A folder that does not exist, or that Windows does not let this
+    /// window open, is replaced by the nearest folder above it that opens,
+    /// as for the shown folder and the saved one.
     pub(crate) nearest: bool,
     /// The panel's sort, which the reading thread sorts the listing by, so
     /// a large folder is never sorted on the window's thread. Size order
@@ -512,6 +513,9 @@ pub(crate) enum ReadFailure {
     Missing,
     /// The drive is not ready or is gone.
     NotReady,
+    /// Windows does not let this window open a folder on this PC's drives,
+    /// which a window that runs as administrator may open.
+    Denied,
     Other,
 }
 
