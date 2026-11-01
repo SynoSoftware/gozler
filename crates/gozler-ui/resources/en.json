@@ -932,6 +932,7 @@
     "folder": "Folder",
     "ext": "Ext",
     "missing": "{0} does not exist.",
+    "link_missing": "{0} is a link to {1}, which does not exist.",
     "cannot_open": "Windows could not open {0}: {1}",
     "denied_question": "You don't have permission to open {0}.",
     "denied_details": "Select Continue to open it as administrator. Gozler restarts and runs as administrator until you exit it.",

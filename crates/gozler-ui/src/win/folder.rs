@@ -5,6 +5,7 @@ use super::Hwnd;
 use super::wake::OpenWaker;
 use crate::core::panel::{FolderChange, ReadAsk, ReadEvent, Side};
 use crate::core::work::{INLINE_ITEMS, Retirement};
+use gozler_core::links::{ReparseTarget, parse_reparse_data};
 use gozler_winfs::{Access, Reparse, Signal, WinError, open_entry};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -256,6 +257,37 @@ pub(crate) fn is_folder(path: &[u16]) -> std::io::Result<bool> {
         .and_then(|entry| entry.attribute_tag())
         .map(|tag| tag.attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0)
         .map_err(|error| std::io::Error::from_raw_os_error(error.code as i32))
+}
+
+/// Whether the reparse tag `tag` is a junction's or a symbolic link's,
+/// which name another entry (`IsReparseTagNameSurrogate`), unlike a cloud
+/// file's, whose data its filter may have to fetch.
+pub(crate) fn is_link_tag(tag: u32) -> bool {
+    tag & 0x2000_0000 != 0
+}
+
+/// The entry `path` names when it is a junction or a symbolic link, opened
+/// as the link itself.
+fn open_link(path: &[u16]) -> Option<gozler_winfs::Entry> {
+    let entry = open_entry(&verbatim_wide(path), Access::Inspect, Reparse::Open).ok()?;
+    is_link_tag(entry.attribute_tag().ok()?.reparse_tag).then_some(entry)
+}
+
+/// Where `path` leads when it is a junction or a symbolic link, so a message
+/// can name the target that an open through the link did not find; `None`
+/// for any other entry, or when the link cannot be read.
+pub(crate) fn link_target(path: &[u16]) -> Option<String> {
+    let entry = open_link(path)?;
+    match parse_reparse_data(&entry.reparse_point().ok()??).ok()?? {
+        ReparseTarget::Absolute(target) => Some(target),
+        ReparseTarget::Relative(target) => {
+            let link = String::from_utf16_lossy(path);
+            let (folder, _) = link.trim_end_matches('\\').rsplit_once('\\')?;
+            // Resolves the `..` in a target such as `..\shared`.
+            let target = std::path::absolute(format!(r"{folder}\{target}")).ok()?;
+            Some(target.display().to_string())
+        }
+    }
 }
 
 fn open_wide(path: &[u16], access: Access, reparse: Reparse) -> std::io::Result<()> {

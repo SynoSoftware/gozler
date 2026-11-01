@@ -189,10 +189,19 @@ fn read_folder(
 ) -> Option<(String, Option<FileIdentity>, FolderWatch)> {
     let generation = ask.generation;
     let failed = |error: &WinError, path: &str| {
+        let failure = match failure_of(error, path) {
+            ReadFailure::Missing => {
+                match super::link_target(&path.encode_utf16().collect::<Vec<_>>()) {
+                    Some(target) => ReadFailure::BrokenLink { target },
+                    None => ReadFailure::Missing,
+                }
+            }
+            failure => failure,
+        };
         deliver(ReadEvent::Failed {
             generation,
             path: path.to_owned(),
-            failure: failure_of(error, path),
+            failure,
             reason: reason(error),
         });
         None

@@ -932,6 +932,7 @@
     "folder": "Carpeta",
     "ext": "Ext.",
     "missing": "{0} no existe.",
+    "link_missing": "{0} es un vínculo a {1}, que no existe.",
     "cannot_open": "Windows no pudo abrir {0}: {1}",
     "denied_question": "No tienes permiso para abrir {0}.",
     "denied_details": "Selecciona Continuar para abrirla como administrador. Gozler se reinicia y se ejecuta como administrador hasta que lo cierres.",
