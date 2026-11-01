@@ -421,7 +421,7 @@
     "version": "Sürüm {0}",
     "service": "Hizmet {0}",
     "service_unknown": "Hizmet bağlı değil",
-    "description": "Dosyaları anında bulun.\nTam hızla kopyalayın, taşıyın ve silin.\n\nWindows 10 ve 11 için ücretsiz.",
+    "description": "Dosyaları anında bulun. Yıldırım hızıyla kopyalayın, taşıyın ve silin.\n\nWindows 10 ve 11 için ücretsiz ve açık kaynaklıdır.",
     "copyright": "© 2026 Synapse N.V.",
     "publisher": "Synapse N.V. tarafından geliştirildi",
     "source": "Açık kaynak",
