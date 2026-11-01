@@ -23,7 +23,7 @@ pub(crate) struct Metrics {
     pub(crate) heading_width: Px,
     /// The widest of "Copying" and its kind's words, "From" and "To".
     pub(crate) label_width: Px,
-    /// The widest percentage, "100 %".
+    /// The widest percentage, "100%".
     pub(crate) percent_width: Px,
     /// Hide's width, which fits its icon and caption.
     pub(crate) hide_width: Px,

@@ -1828,7 +1828,7 @@ impl StatusOperation {
 }
 
 /// The middle group's line for `operation`, with the bar beside a running
-/// one: "Copying Projects to D:\Backup · 38 %", or "Copied 3,310 items to
+/// one: "Copying Projects to D:\Backup · 38%", or "Copied 3,310 items to
 /// D:\Backup". A refused operation, and one the full disk stopped, show no
 /// line, because their message box already said why.
 pub(crate) fn status_line(
