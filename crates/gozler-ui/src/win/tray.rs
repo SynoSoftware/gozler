@@ -102,6 +102,9 @@ impl Endpoint {
             )
         }?;
         let _ = Box::into_raw(callbacks);
+        if super::instance::is_elevated() {
+            super::instance::accept_from_lower(super::Hwnd(window), &[TRAY]);
+        }
         Ok(Self {
             window: window.0 as isize,
             events,

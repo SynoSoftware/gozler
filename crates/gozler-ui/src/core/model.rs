@@ -70,6 +70,8 @@ pub(crate) enum Instance {
 
 pub(crate) struct Model {
     instance: Instance,
+    /// This process runs as administrator, which the window's title says.
+    elevated: bool,
     pub(super) strings: Strings,
     /// The person's preferences; explicit startup searches have temporary values.
     pub(super) settings: Settings,
@@ -296,7 +298,12 @@ pub(crate) enum ScopeCheck {
 }
 
 impl Model {
-    pub(crate) fn new(strings: Strings, settings: Settings, instance: Instance) -> Model {
+    pub(crate) fn new(
+        strings: Strings,
+        settings: Settings,
+        instance: Instance,
+        elevated: bool,
+    ) -> Model {
         let window = &settings.window;
         let panels = Panels::new(&window.panels);
         let mut columns = vec![Column::Name];
@@ -316,6 +323,7 @@ impl Model {
         }
         let mut model = Model {
             instance,
+            elevated,
             strings,
             columns,
             seen: settings.clone(),
@@ -368,6 +376,10 @@ impl Model {
 
     pub(crate) fn instance(&self) -> Instance {
         self.instance
+    }
+
+    pub(crate) fn elevated(&self) -> bool {
+        self.elevated
     }
 
     pub(crate) fn inspect_age(&mut self) -> Accepted {
@@ -3606,7 +3618,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn model_for(instance: Instance) -> Model {
-        Model::new(english(), Settings::default(), instance)
+        Model::new(english(), Settings::default(), instance, false)
     }
 
     #[test]

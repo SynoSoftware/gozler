@@ -9,11 +9,11 @@ use crate::win::folder;
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
 use gozler_client::CancelToken;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::ffi::OsStringExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -45,6 +45,7 @@ pub(in crate::app) enum ShellPurpose {
     Commander(List),
     Reveal,
     Setup,
+    Administrator,
 }
 
 enum Invocation {
@@ -63,13 +64,25 @@ enum Invocation {
         entry: Selected,
     },
     Reveal(Selected),
+    /// A copy of this window that runs as administrator and shows `entry`
+    /// in Commander, after Windows refused this window its folder
+    /// (DESIGN.md: A panel). `data_dir` is the folder that `--data-dir`
+    /// gave this window.
+    Administrator {
+        entry: Selected,
+        data_dir: Option<PathBuf>,
+    },
 }
 
 impl Invocation {
     fn items(&self) -> usize {
         match self {
             Self::Entries { entries, .. } => entries.items(),
-            Self::Target(..) | Self::Setup(_) | Self::Commander { .. } | Self::Reveal(_) => 0,
+            Self::Target(..)
+            | Self::Setup(_)
+            | Self::Commander { .. }
+            | Self::Reveal(_)
+            | Self::Administrator { .. } => 0,
         }
     }
 
@@ -80,6 +93,7 @@ impl Invocation {
             Self::Entries { list, action, .. } => ShellPurpose::Entries(*list, *action),
             Self::Commander { list, .. } => ShellPurpose::Commander(*list),
             Self::Reveal(_) => ShellPurpose::Reveal,
+            Self::Administrator { .. } => ShellPurpose::Administrator,
         }
     }
 }
@@ -87,6 +101,8 @@ impl Invocation {
 pub(in crate::app) enum OpenTarget {
     Command(String),
     Path(Vec<u16>),
+    /// This program, started as administrator.
+    Administrator,
 }
 
 pub(in crate::app) struct OpenFailure {
@@ -100,6 +116,9 @@ pub(in crate::app) struct Opened {
     pub(in crate::app) missing: Option<Vec<u16>>,
     /// The entry whose folder opened, which the window shows in Commander.
     pub(in crate::app) commander: Option<Selected>,
+    /// The entry whose folder Windows refused this window, beside the
+    /// failure, which a copy that runs as administrator can show.
+    pub(in crate::app) denied: Option<Selected>,
 }
 
 pub(in crate::app) struct Work {
@@ -128,13 +147,19 @@ impl Work {
                             .map(|target| ShellPurpose::Target(surface, target))
                         }),
                 )
-                .chain([ShellPurpose::Setup, ShellPurpose::Reveal])
+                .chain([
+                    ShellPurpose::Setup,
+                    ShellPurpose::Reveal,
+                    ShellPurpose::Administrator,
+                ])
                 .map(|purpose| {
-                    let replacement = if purpose == ShellPurpose::Setup {
-                        Replacement::Finish
-                    } else {
-                        Replacement::Cancel
-                    };
+                    // Windows' permission prompt cannot be taken back.
+                    let replacement =
+                        if matches!(purpose, ShellPurpose::Setup | ShellPurpose::Administrator) {
+                            Replacement::Finish
+                        } else {
+                            Replacement::Cancel
+                        };
                     (
                         purpose,
                         Task::shell(waker.clone(), replacement, invoke)
@@ -177,6 +202,14 @@ impl Work {
 
     pub(in crate::app) fn reveal(&mut self, entry: Selected) {
         self.invoke(Invocation::Reveal(entry));
+    }
+
+    pub(in crate::app) fn start_as_administrator(
+        &mut self,
+        entry: Selected,
+        data_dir: Option<PathBuf>,
+    ) {
+        self.invoke(Invocation::Administrator { entry, data_dir });
     }
 
     fn invoke(&mut self, invocation: Invocation) {
@@ -237,7 +270,11 @@ impl Work {
             let owner = match purpose {
                 ShellPurpose::Target(owner, _) => *owner,
                 ShellPurpose::Setup => self.setup_surface,
-                ShellPurpose::Entries(..) | ShellPurpose::Commander(_) | ShellPurpose::Reveal => {
+                // Windows' permission prompt shows that it waits.
+                ShellPurpose::Entries(..)
+                | ShellPurpose::Commander(_)
+                | ShellPurpose::Reveal
+                | ShellPurpose::Administrator => {
                     return None;
                 }
             };
@@ -313,18 +350,41 @@ fn invoke(
                 }),
             ..Opened::default()
         },
+        Invocation::Administrator { entry, data_dir } => {
+            let started = std::env::current_exe().and_then(|program| {
+                let parameters = administrator_parameters(&entry, data_dir.as_deref());
+                session.start_program_as_administrator(&program, &parameters)
+            });
+            Opened {
+                failure: started
+                    .err()
+                    .filter(|error| !crate::win::shell::refused(error))
+                    .map(|error| OpenFailure {
+                        target: OpenTarget::Administrator,
+                        error,
+                    }),
+                ..Opened::default()
+            }
+        }
         Invocation::Commander { entry, .. } | Invocation::Reveal(entry) => {
             // Only a name that is gone is missing: a file in a folder that
             // Windows refuses, such as one in C:\Windows\Prefetch, gets
-            // the folder's reason below.
-            let gone = folder::names(&entry.path)
-                .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
-            if gone {
-                return Opened {
-                    missing: Some(entry.path),
-                    ..Opened::default()
-                };
-            }
+            // the folder's reason below. A folder that the disk shows to be
+            // a file, as `--open` may name, shows in its folder; a file
+            // stays one, because Reveal shows a folder in its parent.
+            let entry = match folder::is_folder(&entry.path) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Opened {
+                        missing: Some(entry.path),
+                        ..Opened::default()
+                    };
+                }
+                Ok(false) => Selected {
+                    is_folder: false,
+                    ..entry
+                },
+                Ok(true) | Err(_) => entry,
+            };
             let folder = if entry.is_folder {
                 entry.path.clone()
             } else {
@@ -336,6 +396,9 @@ fn invoke(
                     ..Opened::default()
                 },
                 Err(error) => Opened {
+                    denied: (error.kind() == io::ErrorKind::PermissionDenied
+                        && folder::on_this_pc(&folder))
+                    .then_some(entry),
                     failure: Some(OpenFailure {
                         target: OpenTarget::Path(folder),
                         error,
@@ -432,5 +495,66 @@ fn act_on_entries(
     match failure {
         Some(failure) => Err(failure),
         None => Ok(()),
+    }
+}
+
+/// The command line that has a copy of this window show `entry` in
+/// Commander: `--open` for a folder and `--reveal` for a file, with this
+/// window's `--data-dir`, so the copy replaces this window and no other.
+fn administrator_parameters(entry: &Selected, data_dir: Option<&Path>) -> OsString {
+    let mut parameters = OsString::from(if entry.is_folder {
+        "--open "
+    } else {
+        "--reveal "
+    });
+    push_quoted(&mut parameters, &OsString::from_wide(&entry.path));
+    if let Some(folder) = data_dir {
+        parameters.push(" --data-dir ");
+        push_quoted(&mut parameters, folder.as_os_str());
+    }
+    parameters
+}
+
+/// Adds `argument` in quotes, with the backslashes before the closing quote
+/// doubled, because Windows reads `\"` as an escaped quote: `"C:\"` passes
+/// `C:\`. A path holds no quote of its own.
+fn push_quoted(line: &mut OsString, argument: &OsStr) {
+    let units: Vec<u16> = argument.encode_wide().collect();
+    let trailing = units
+        .iter()
+        .rev()
+        .take_while(|&&unit| unit == u16::from(b'\\'))
+        .count();
+    line.push("\"");
+    line.push(argument);
+    line.push("\\".repeat(trailing));
+    line.push("\"");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The copy started as administrator reads its folder from this line:
+    /// an unquoted drive root would end in `\"` and lose its backslash,
+    /// and a missing `--data-dir` would replace the person's own window.
+    #[test]
+    fn administrator_parameters_keep_a_root_and_the_data_folder() {
+        let folder = Selected {
+            path: r"C:\".encode_utf16().collect(),
+            is_folder: true,
+        };
+        assert_eq!(
+            administrator_parameters(&folder, Some(Path::new(r"D:\Test data"))),
+            OsString::from(r#"--open "C:\\" --data-dir "D:\Test data""#)
+        );
+        let file = Selected {
+            path: r"C:\Windows\Prefetch\a b.pf".encode_utf16().collect(),
+            is_folder: false,
+        };
+        assert_eq!(
+            administrator_parameters(&file, None),
+            OsString::from(r#"--reveal "C:\Windows\Prefetch\a b.pf""#)
+        );
     }
 }

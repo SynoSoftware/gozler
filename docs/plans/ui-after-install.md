@@ -50,6 +50,24 @@ owner has run it, and file an issue for each item that fails.
   bytes an entry, and `gozler dc:today` exits 4 with a message that names
   Dates created.
 
+## Running as administrator
+
+- In Commander, open `C:\Windows\Prefetch`: a question offers Continue with
+  the administrator shield. Cancel leaves the panel where it was. Continue,
+  then Windows' permission prompt, replaces the window with one that Task
+  Manager shows Elevated "Yes", in Commander, in that folder; saying no to
+  the prompt leaves the first window as it was. The new window's title
+  reads "Gozler (Admin)", and its taskbar button shows the shield,
+  also after Explorer restarts. Show in Commander on a file found in that
+  folder does the same and puts the cursor on the file.
+- With the administrator window open, start Gozler from the Start menu: the
+  administrator window comes forward, and no second window opens. Its tray
+  icon answers clicks, also after Explorer restarts.
+- Exit the administrator window while a panel shows `C:\Windows\Prefetch`,
+  then start Gozler normally: the panel shows `C:\Windows`.
+- A folder on a share that you may not open shows the message box, without
+  Continue.
+
 ## The selection and its actions
 
 - Open, Open file location and Properties act on the selected entries. Open on

@@ -6,7 +6,9 @@
   },
   "window": {
     "title": "Gozler",
-    "title_search": "{0} – Gozler"
+    "title_search": "{0} – Gozler",
+    "title_administrator": "{0} (Admin)",
+    "administrator": "Running as administrator"
   },
   "menu": {
     "file": "&File",
@@ -439,7 +441,8 @@
     "clear": "Clear",
     "close": "Close",
     "ok": "OK",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "continue": "Continue"
   },
   "custom_date": {
     "title": "Custom date",
@@ -930,6 +933,9 @@
     "ext": "Ext",
     "missing": "{0} does not exist.",
     "cannot_open": "Windows could not open {0}: {1}",
+    "denied_question": "You don't have permission to open {0}.",
+    "denied_details": "Select Continue to open it as administrator. Gozler restarts and runs as administrator until you exit it.",
+    "administrator_failed": "Couldn't start Gozler as administrator. {0}",
     "drive_not_ready": "Drive {0} is not ready. {1}",
     "open_title": "Open",
     "indexing": "{0} is indexing — sizes may be missing.",

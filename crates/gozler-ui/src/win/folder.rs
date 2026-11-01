@@ -10,11 +10,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Storage::FileSystem::GetLogicalDrives;
+use windows::Win32::Storage::FileSystem::{
+    FILE_ATTRIBUTE_DIRECTORY, GetDriveTypeW, GetLogicalDrives,
+};
+use windows::Win32::System::WindowsProgramming::DRIVE_REMOTE;
 use windows::Win32::UI::WindowsAndMessaging::{
     DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEVICE_NOTIFY_WINDOW_HANDLE, HDEVNOTIFY,
     RegisterDeviceNotificationW, UnregisterDeviceNotification,
 };
+use windows::core::PCWSTR;
 
 mod mailbox;
 mod work;
@@ -245,16 +249,37 @@ pub(crate) fn lists(folder: &[u16]) -> std::io::Result<()> {
     open_wide(folder, Access::List, Reparse::Follow)
 }
 
-/// Opens the entry `path` names, a link itself rather than its target, so
-/// it fails with `NotFound` only when the name is gone.
-pub(crate) fn names(path: &[u16]) -> std::io::Result<()> {
-    open_wide(path, Access::Inspect, Reparse::Open)
+/// Whether the entry `path` names is a folder. Opens the link itself rather
+/// than its target, so it fails with `NotFound` only when the name is gone.
+pub(crate) fn is_folder(path: &[u16]) -> std::io::Result<bool> {
+    open_entry(&verbatim_wide(path), Access::Inspect, Reparse::Open)
+        .and_then(|entry| entry.attribute_tag())
+        .map(|tag| tag.attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0)
+        .map_err(|error| std::io::Error::from_raw_os_error(error.code as i32))
 }
 
 fn open_wide(path: &[u16], access: Access, reparse: Reparse) -> std::io::Result<()> {
     open_entry(&verbatim_wide(path), access, reparse)
         .map(drop)
         .map_err(|error| std::io::Error::from_raw_os_error(error.code as i32))
+}
+
+/// Whether `path` is on one of this PC's drives, where a window that runs
+/// as administrator may open what this one may not. A file server decides
+/// who opens a share, not this PC's administrators, and a drive letter
+/// mapped without administrator rights does not exist for a program that
+/// runs with them. Asks Windows about a drive letter, so it runs off the
+/// window's thread.
+pub(crate) fn on_this_pc(path: &[u16]) -> bool {
+    let [letter, colon, ..] = path else {
+        return false;
+    };
+    if *colon != u16::from(b':') {
+        return false;
+    }
+    let root = [*letter, u16::from(b':'), u16::from(b'\\'), 0];
+    // SAFETY: `root` is a drive's root, ending in NUL, and outlives the call.
+    unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) != DRIVE_REMOTE }
 }
 
 pub(super) fn reason(error: &WinError) -> String {

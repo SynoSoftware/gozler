@@ -44,6 +44,7 @@ const MOVED_CHECK: Duration = Duration::from_secs(2);
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
+const ERROR_ACCESS_DENIED: u32 = 5;
 const ERROR_INVALID_DRIVE: u32 = 15;
 const ERROR_NOT_READY: u32 = 21;
 const ERROR_DEV_NOT_EXIST: u32 = 55;
@@ -156,20 +157,26 @@ pub(crate) fn label(letter: char, worker: &OffThread, cancel: &CancelToken) -> O
     Some(PanelEvent::Label { letter, label })
 }
 
-fn failure_of(error: &WinError) -> ReadFailure {
+/// Why `path` could not be opened. Access to a folder elsewhere than on
+/// this PC's drives is `Other`, because running as administrator does not
+/// open it ([`super::on_this_pc`]).
+fn failure_of(error: &WinError, path: &str) -> ReadFailure {
     match error.code {
         ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND | ERROR_INVALID_DRIVE => ReadFailure::Missing,
         ERROR_NOT_READY
         | ERROR_DEV_NOT_EXIST
         | ERROR_NO_MEDIA_IN_DRIVE
         | ERROR_DEVICE_NOT_CONNECTED => ReadFailure::NotReady,
+        ERROR_ACCESS_DENIED if super::on_this_pc(&path.encode_utf16().collect::<Vec<_>>()) => {
+            ReadFailure::Denied
+        }
         _ => ReadFailure::Other,
     }
 }
 
 /// Opens the folder of `ask`, or the folder of the file it names with the
-/// file to focus, or the nearest folder above it that exists when `ask`
-/// says so, opens its watch and gives it to `armed`, then lists it, sorted
+/// file to focus, or the nearest folder above it that exists and opens
+/// when `ask` says so, opens its watch and gives it to `armed`, then lists it, sorted
 /// by the panel's sort. Returns the folder, its identity and its watch,
 /// which then follows it; `None` when the reading failed or stopped, which
 /// `armed` answers with `false`, or the folder cannot be watched.
@@ -185,7 +192,7 @@ fn read_folder(
         deliver(ReadEvent::Failed {
             generation,
             path: path.to_owned(),
-            failure: failure_of(error),
+            failure: failure_of(error, path),
             reason: reason(error),
         });
         None
@@ -199,6 +206,15 @@ fn read_folder(
             Ok(tag) if tag.attributes & FILE_ATTRIBUTE_DIRECTORY != 0 => {
                 match open_entry(&verbatim(&path), Access::List, Reparse::Follow) {
                     Ok(folder) => break folder,
+                    // Such as a folder saved by a window that ran as
+                    // administrator.
+                    Err(error)
+                        if ask.nearest
+                            && failure_of(&error, &path) == ReadFailure::Denied
+                            && !is_root(&path) =>
+                    {
+                        path = parent_of(&path);
+                    }
                     Err(error) => return failed(&error, &path),
                 }
             }
@@ -219,7 +235,12 @@ fn read_folder(
                 return failed(&error, &path);
             }
             Err(error)
-                if ask.nearest && failure_of(&error) == ReadFailure::Missing && !is_root(&path) =>
+                if ask.nearest
+                    && matches!(
+                        failure_of(&error, &path),
+                        ReadFailure::Missing | ReadFailure::Denied
+                    )
+                    && !is_root(&path) =>
             {
                 path = parent_of(&path);
             }

@@ -20,15 +20,16 @@ use crate::core::glyph::Glyph;
 use crate::core::ids::DialogId;
 use crate::core::layout::{self, Px, Rect, Size};
 use std::cell::RefCell;
-use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, S_OK, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
     DTN_DATETIMECHANGE, EMF_CENTERED, LVN_GETDISPINFOW, LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW,
     LVN_ITEMCHANGED, NM_CLICK, NM_DBLCLK, NM_RETURN, NMHDR, NMLVDISPINFOW, NMLVEMPTYMARKUP,
-    NMLVGETINFOTIPW, NMTREEVIEWW, NMTVITEMCHANGE, TASKDIALOG_BUTTON, TASKDIALOGCONFIG,
-    TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_INFORMATION_ICON, TD_WARNING_ICON,
-    TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW, TVE_EXPAND,
-    TVIS_STATEIMAGEMASK, TVN_ITEMCHANGEDW, TVN_ITEMEXPANDINGW, TaskDialogIndirect,
+    NMLVGETINFOTIPW, NMTREEVIEWW, NMTVITEMCHANGE, TASKDIALOG_BUTTON, TASKDIALOG_NOTIFICATIONS,
+    TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_INFORMATION_ICON, TD_WARNING_ICON,
+    TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW,
+    TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE, TDN_CREATED, TVE_EXPAND, TVIS_STATEIMAGEMASK,
+    TVN_ITEMCHANGEDW, TVN_ITEMEXPANDINGW, TaskDialogIndirect,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_SELCHANGE, CreateDialogParamW,
@@ -37,7 +38,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX,
     WM_COMMAND, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE, WM_TIMER,
 };
-use windows::core::{BOOL, HSTRING, PCWSTR};
+use windows::core::{BOOL, HRESULT, HSTRING, PCWSTR};
 
 /// `DWLP_USER`: the dialog's pointer-sized slot after its result and its
 /// procedure.
@@ -786,12 +787,14 @@ fn horizontal_units(dialog: Hwnd, units: i32) -> Px {
     Px(rect.right)
 }
 
+/// The confirm button of [`ask`].
+const CONFIRM: i32 = 100;
+
 /// Asks `question` in a Windows task dialog owned by `owner`, with two
 /// buttons, the default and the icon as its [`Guard`] says. Returns whether
 /// the person chose the confirm button; `Esc` and the close button choose
 /// Cancel.
 pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
-    const CONFIRM: i32 = 100;
     let body = match &question.body {
         QuestionBody::Text(text) => text.clone(),
         QuestionBody::Lines(lines) => aligned(owner, lines),
@@ -859,6 +862,11 @@ pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
             Some(_) => PCWSTR(footer.as_ptr()),
             None => PCWSTR::null(),
         },
+        pfCallback: if question.elevates {
+            Some(shield_on_confirm)
+        } else {
+            None
+        },
         ..Default::default()
     };
     let mut chosen = 0;
@@ -867,6 +875,29 @@ pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
     // when the dialog closes.
     let shown = unsafe { TaskDialogIndirect(&config, Some(&raw mut chosen), None, None) };
     shown.is_ok() && chosen == CONFIRM
+}
+
+/// Shows the administrator shield on [`ask`]'s confirm button, as Windows'
+/// own buttons that ask for permission show it.
+unsafe extern "system" fn shield_on_confirm(
+    dialog: HWND,
+    notification: TASKDIALOG_NOTIFICATIONS,
+    _: WPARAM,
+    _: LPARAM,
+    _: isize,
+) -> HRESULT {
+    if notification == TDN_CREATED {
+        // SAFETY: plain values, sent to the task dialog that notifies.
+        unsafe {
+            SendMessageW(
+                dialog,
+                TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE.0 as u32,
+                Some(WPARAM(CONFIRM as usize)),
+                Some(LPARAM(1)),
+            )
+        };
+    }
+    S_OK
 }
 
 /// `lines` of labels and values as one body for [`ask`], with spaces after

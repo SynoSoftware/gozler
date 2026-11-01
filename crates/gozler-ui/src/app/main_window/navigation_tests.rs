@@ -30,13 +30,13 @@ fn show_in_commander_gives_the_destination_panel_keyboard_focus() {
     let mut settings = Settings::default();
     settings.window.panels.left.folder = Some(fixture.join("child").to_string_lossy().into_owned());
     settings.window.panels.right.folder = settings.window.panels.left.folder.clone();
-    let mut model = Model::new(english(), settings, Instance::Another);
+    let mut model = Model::new(english(), settings, Instance::Another, false);
     model.set_typed_search(List::Search, "navigation-focus-fixture".into());
     let settings_file = std::env::temp_dir().join(format!(
         "gozler-navigation-focus-{}.json",
         std::process::id()
     ));
-    let (hwnd, window) = MainWindow::open(class, model, settings_file, 0, false, None);
+    let (hwnd, window) = MainWindow::open(class, model, settings_file, None, 0, false, None);
     struct Opened(Hwnd, Rc<MainWindow>, PathBuf);
     impl Drop for Opened {
         fn drop(&mut self) {

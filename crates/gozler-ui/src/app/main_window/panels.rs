@@ -1346,9 +1346,10 @@ impl Panels {
         }
     }
 
-    /// The message box for a folder that could not be opened, after which
-    /// the path box takes back a typed path for the person to correct
-    /// (DESIGN.md: A panel).
+    /// The message box for a folder that could not be opened, or the offer
+    /// to open a refused one as administrator, after which the path box
+    /// takes back a typed path for the person to correct (DESIGN.md: A
+    /// panel).
     pub(super) fn refuse(&self, window: &MainWindow, hwnd: Hwnd, refused: Refused) {
         let Refused {
             side,
@@ -1357,20 +1358,28 @@ impl Panels {
             reason,
             typed,
         } = refused;
-        let (title, text) = {
-            let model = window.model.borrow();
-            let strings = model.strings();
-            let text = match failure {
-                ReadFailure::Missing => strings.format("panel.missing", &[&path]),
-                ReadFailure::NotReady => strings.format(
-                    "panel.drive_not_ready",
-                    &[&panel::drive_root(&path), &reason],
-                ),
-                ReadFailure::Other => strings.format("panel.cannot_open", &[&path, &reason]),
-            };
-            (strings.text("panel.open_title").to_owned(), text)
+        let entry = Selected {
+            path: path.encode_utf16().collect(),
+            is_folder: true,
         };
-        win::dialog::error_box(Some(hwnd), &text, &title);
+        if failure != ReadFailure::Denied || !window.offer_administrator(hwnd, &path, entry) {
+            let (title, text) = {
+                let model = window.model.borrow();
+                let strings = model.strings();
+                let text = match failure {
+                    ReadFailure::Missing => strings.format("panel.missing", &[&path]),
+                    ReadFailure::NotReady => strings.format(
+                        "panel.drive_not_ready",
+                        &[&panel::drive_root(&path), &reason],
+                    ),
+                    ReadFailure::Denied | ReadFailure::Other => {
+                        strings.format("panel.cannot_open", &[&path, &reason])
+                    }
+                };
+                (strings.text("panel.open_title").to_owned(), text)
+            };
+            win::dialog::error_box(Some(hwnd), &text, &title);
+        }
         let c = self.panel(side);
         match typed {
             Some(text) => {

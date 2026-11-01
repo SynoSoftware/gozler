@@ -6,6 +6,7 @@ use super::Hwnd;
 use crate::core::clipboard::folder_of;
 use crate::core::selection::DragEntry;
 use std::cell::Cell;
+use std::ffi::OsStr;
 use std::io;
 use std::marker::PhantomData;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
@@ -802,6 +803,28 @@ impl Session {
             return Err(io_error(windows::Win32::Foundation::E_FAIL.into()));
         }
         Ok(ElevatedProcess(process))
+    }
+
+    /// Starts `program` with `parameters` as administrator, with its window
+    /// shown, once the person allows it in Windows' permission prompt.
+    pub(crate) fn start_program_as_administrator(
+        &self,
+        program: &Path,
+        parameters: &OsStr,
+    ) -> io::Result<()> {
+        self.ready()?;
+        let program: Vec<_> = program.as_os_str().encode_wide().collect();
+        let parameters: Vec<_> = parameters.encode_wide().collect();
+        execute(
+            HWND::default(),
+            w!("runas"),
+            &HSTRING::from_wide(&program),
+            &HSTRING::from_wide(&parameters),
+            None,
+            SEE_MASK_NOASYNC,
+            SW_SHOWNORMAL,
+        )
+        .map(|_| ())
     }
 
     /// A settings input file must remain until the accepted child exits,

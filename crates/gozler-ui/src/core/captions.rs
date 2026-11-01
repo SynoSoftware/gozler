@@ -916,14 +916,20 @@ pub(crate) struct Narrow {
 /// The window's title: the typed search and the product's name, as Windows
 /// titles a document window, or the name alone while the search is empty or
 /// Commander mode shows, because a title that named one panel's folder would be
-/// wrong for the other (DESIGN.md: Commander mode's window).
+/// wrong for the other (DESIGN.md: Commander mode's window). A window that
+/// runs as administrator says so after the name: "Gozler (Admin)".
 pub(crate) fn title(model: &Model) -> String {
     let strings = model.strings();
     let text = model.search_list().text().trim();
-    if text.is_empty() || model.mode() == Mode::Commander {
+    let title = if text.is_empty() || model.mode() == Mode::Commander {
         strings.text("window.title").to_owned()
     } else {
         strings.format("window.title_search", &[text])
+    };
+    if model.elevated() {
+        strings.format("window.title_administrator", &[&title])
+    } else {
+        title
     }
 }
 
@@ -982,6 +988,9 @@ pub(crate) struct Question {
     pub(crate) confirm: String,
     pub(crate) cancel: String,
     pub(crate) guard: Guard,
+    /// The confirm button asks Windows for administrator permission, so it
+    /// shows the shield.
+    pub(crate) elevates: bool,
 }
 
 /// How a question guards its confirm button against an `Enter` pressed
@@ -1021,6 +1030,7 @@ pub(crate) fn setup_question(model: &Model, numbers: &dyn Numbers) -> Option<Que
             confirm: strings.text("fixing.install").to_owned(),
             cancel,
             guard: Guard::None,
+            elevates: false,
         });
     }
     let [title, question, confirm] = if setup.older {
@@ -1052,6 +1062,7 @@ pub(crate) fn setup_question(model: &Model, numbers: &dyn Numbers) -> Option<Que
         } else {
             Guard::None
         },
+        elevates: false,
     })
 }
 
@@ -1072,6 +1083,7 @@ pub(crate) fn use_local_question(strings: &Strings, local: &LocalService) -> Que
         confirm: strings.text("fixing.switch").to_owned(),
         cancel: strings.text("button.cancel").to_owned(),
         guard: Guard::None,
+        elevates: false,
     }
 }
 
@@ -1086,6 +1098,22 @@ pub(crate) fn reset_all_question(strings: &Strings) -> Question {
         confirm: text::without_access_key(strings.text("settings.reset")),
         cancel: strings.text("button.cancel").to_owned(),
         guard: Guard::CancelFirst,
+        elevates: false,
+    }
+}
+
+/// The question after Windows refused `folder` to a window that can start
+/// again as administrator (DESIGN.md: A panel).
+pub(crate) fn administrator_question(strings: &Strings, folder: &str) -> Question {
+    Question {
+        title: strings.text("panel.open_title").to_owned(),
+        instruction: strings.format("panel.denied_question", &[folder]),
+        body: QuestionBody::Text(strings.text("panel.denied_details").to_owned()),
+        footer: None,
+        confirm: strings.text("button.continue").to_owned(),
+        cancel: strings.text("button.cancel").to_owned(),
+        guard: Guard::None,
+        elevates: true,
     }
 }
 

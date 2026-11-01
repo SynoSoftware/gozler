@@ -6,7 +6,9 @@
   },
   "window": {
     "title": "Gozler",
-    "title_search": "{0} – Gozler"
+    "title_search": "{0} – Gozler",
+    "title_administrator": "{0} (Admin)",
+    "administrator": "Ejecutándose como administrador"
   },
   "menu": {
     "file": "&Archivo",
@@ -439,7 +441,8 @@
     "clear": "Borrar",
     "close": "Cerrar",
     "ok": "Aceptar",
-    "cancel": "Cancelar"
+    "cancel": "Cancelar",
+    "continue": "Continuar"
   },
   "custom_date": {
     "title": "Fecha personalizada",
@@ -930,6 +933,9 @@
     "ext": "Ext.",
     "missing": "{0} no existe.",
     "cannot_open": "Windows no pudo abrir {0}: {1}",
+    "denied_question": "No tienes permiso para abrir {0}.",
+    "denied_details": "Selecciona Continuar para abrirla como administrador. Gozler se reinicia y se ejecuta como administrador hasta que lo cierres.",
+    "administrator_failed": "No se pudo iniciar Gozler como administrador. {0}",
     "drive_not_ready": "La unidad {0} no está lista. {1}",
     "open_title": "Abrir",
     "indexing": "{0} se está indexando: puede que falten tamaños.",

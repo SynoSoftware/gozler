@@ -112,10 +112,14 @@ pub(crate) fn run() {
         // Held before the question, because the window's process can end
         // as soon as it answers.
         let process = win::instance::Process::of(window);
-        // A start at sign-in never closes the running window either.
-        let Some(process) =
-            process.filter(|process| !arguments.sign_in && runs_another_program(process))
-        else {
+        // A start at sign-in never closes the running window either. A
+        // start as administrator replaces a window that runs without it,
+        // as the person asked for a window that may open every folder.
+        let Some(process) = process.filter(|process| {
+            !arguments.sign_in
+                && (runs_another_program(process)
+                    || win::instance::is_elevated() && !process.is_elevated())
+        }) else {
             hand_over(window, show_message, arguments.request.as_ref());
             return;
         };
@@ -151,7 +155,8 @@ pub(crate) fn run() {
         .language
         .resolve(&win::locale::display_languages());
     set_panic_report(|report| report.language = Some(language));
-    let model = Model::new(Strings::load(language), settings, instance);
+    let elevated = win::instance::is_elevated();
+    let model = Model::new(Strings::load(language), settings, instance, elevated);
 
     win::window::register_class::<MainWindow>(
         &window_class,
@@ -164,6 +169,10 @@ pub(crate) fn run() {
         &window_class,
         model,
         settings_file,
+        arguments
+            .data_dir
+            .as_ref()
+            .map(|_| std::path::absolute(&data_dir).unwrap_or_else(|_| data_dir.clone())),
         show_message,
         arguments.sign_in,
         arguments.request,
@@ -192,6 +201,7 @@ fn read_arguments() -> Result<Arguments, startup::Error> {
                 .as_mut()
                 .map(|folder| (folder, "--location")),
             Request::Reveal(path) => Some((path, "--reveal")),
+            Request::Open(folder) => Some((folder, "--open")),
             Request::Location(_) => None,
         };
         if let Some((path, option)) = path {
