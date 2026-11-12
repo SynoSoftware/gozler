@@ -16,8 +16,26 @@ use serde::{Deserialize, Serialize};
 /// never confuse a dead file with its slot's next tenant. On ReFS all 128 bits
 /// carry the ID, and [`Self::record_number`] and [`Self::sequence`] mean
 /// nothing.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+///
+/// As text it is the ID as 32 hex digits, also on NTFS, so equal IDs are
+/// equal text; serde reads no `u128` inside an internally tagged enum.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
 pub struct Frn(pub u128);
+
+impl From<Frn> for String {
+    fn from(frn: Frn) -> String {
+        format!("{:032x}", frn.0)
+    }
+}
+
+impl TryFrom<String> for Frn {
+    type Error = std::num::ParseIntError;
+
+    fn try_from(hex: String) -> Result<Self, Self::Error> {
+        u128::from_str_radix(&hex, 16).map(Frn)
+    }
+}
 
 impl Frn {
     /// The 48-bit MFT record number. Dense and reused by NTFS.

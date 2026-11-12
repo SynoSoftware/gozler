@@ -67,6 +67,7 @@ fn row(path: String) -> ResultItem {
         created_ft: None,
         is_dir: false,
         attributes: None,
+        identity: None,
     }
 }
 

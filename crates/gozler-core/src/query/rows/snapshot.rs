@@ -378,14 +378,16 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
             .zip(&reads)
             .map(|(volume, &reads)| reads.then(|| volume.read().index))
             .collect();
-        for ((reader, answer), index) in self.readers.iter_mut().zip(&snapshot.answers).zip(&held) {
+        let readers = self.readers.iter_mut().zip(&snapshot.answers);
+        for (((reader, answer), index), volume) in readers.zip(&held).zip(&self.volumes) {
             let Some(index) = index.as_deref() else {
                 continue;
             };
             if index.instance() != answer.instance {
                 return Err(ResultSnapshotGone);
             }
-            reader.begin_page(index, answer, self.viewer, &mut self.names);
+            let guid = volume.mounts().guid;
+            reader.begin_page(index, answer, guid, self.viewer, &mut self.names);
         }
         while self.next < page_end {
             let v = snapshot.volume_of(self.next);
@@ -410,7 +412,8 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
             };
             let found = match folder {
                 Some(folder) => {
-                    let entry = index.entry(row.0);
+                    let (idx, file_id) = row;
+                    let entry = index.entry(idx);
                     SnapshotRow::Row(RowView {
                         folder,
                         name: entry.name(),
@@ -419,6 +422,7 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
                         mtime: entry.mtime(),
                         created: entry.created(),
                         attributes: entry.attributes(),
+                        file_id,
                     })
                 }
                 None => SnapshotRow::Gone,
@@ -435,18 +439,19 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
 
 impl PlaceReader {
     /// Starts a page under `index`'s read lock, which holds the instance of
-    /// the search.
+    /// the search, of the volume whose GUID path is `guid`.
     fn begin_page(
         &mut self,
         index: &VolumeIndex,
         answer: &VolumeRows,
+        guid: &str,
         viewer: Viewer<'_>,
         names: &mut ResultNames,
     ) {
         let (_, folders) = self.view.get_or_insert_with(|| {
             (
                 viewer.seen_by(index),
-                FolderCopy::new(index, &answer.mount_prefix, names),
+                FolderCopy::new(index, &answer.mount_prefix, Some(guid), names),
             )
         });
         folders.forget_missing_paths();

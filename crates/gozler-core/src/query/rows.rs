@@ -200,6 +200,7 @@ pub struct RowView<'a> {
     pub mtime: Option<i64>,
     pub created: Option<i64>,
     pub attributes: Attributes,
+    pub file_id: Frn,
 }
 
 /// The rows of every volume of one reply, merged in the result order and
@@ -349,7 +350,8 @@ impl Reply {
         }
     }
 
-    /// [`Self::fill_placed`] without each row's place.
+    /// [`Self::fill_placed`] without each row's place, for tests, whose
+    /// volumes' GUID paths are empty.
     #[cfg(test)]
     pub(super) fn fill(
         &mut self,
@@ -357,23 +359,28 @@ impl Reply {
         page_rows: usize,
         mut push: impl FnMut(RowView<'_>, &ResultNames) -> bool,
     ) -> bool {
-        self.fill_placed(indexes, page_rows, |_, _, row, names| push(row, names))
+        let guids = vec![""; indexes.len()];
+        self.fill_placed(indexes, &guids, page_rows, |_, _, row, names| {
+            push(row, names)
+        })
     }
 
     /// Reads the next rows from `indexes`, one for each answer given to
     /// [`Self::new`], in their order: the index held under its read lock
     /// where [`Self::reads_volume`] says the page reads it, and `None`
-    /// elsewhere. Hands each row to `push` with the folders it names, until
-    /// `push` refuses one, the page has no row left, or it read `page_rows`
-    /// rows, sent or skipped for the offset, so that one hold of the locks
-    /// does a page's work at most. Returns whether rows are left: a row
-    /// `push` refused is read again for the next page.
+    /// elsewhere. `guids` holds each volume's GUID path, which its root in
+    /// the reply's folders names. Hands each row to `push` with the folders
+    /// it names, until `push` refuses one, the page has no row left, or it
+    /// read `page_rows` rows, sent or skipped for the offset, so that one
+    /// hold of the locks does a page's work at most. Returns whether rows are
+    /// left: a row `push` refused is read again for the next page.
     ///
     /// `push` also gets each row's volume, the `v`th answer, and its place
     /// in that volume's rows.
     fn fill_placed(
         &mut self,
         indexes: &[Option<&VolumeIndex>],
+        guids: &[&str],
         page_rows: usize,
         mut push: impl FnMut(usize, usize, RowView<'_>, &ResultNames) -> bool,
     ) -> bool {
@@ -382,9 +389,9 @@ impl Reply {
             self.volumes.len(),
             "one index for each volume's answer"
         );
-        for (volume, index) in self.volumes.iter_mut().zip(indexes) {
+        for ((volume, index), guid) in self.volumes.iter_mut().zip(indexes).zip(guids) {
             if let Some(index) = index
-                && volume.begin_page(index, &mut self.names, &mut self.total)
+                && volume.begin_page(index, guid, &mut self.names, &mut self.total)
             {
                 self.index_changed = true;
             }
@@ -411,7 +418,7 @@ impl Reply {
                 volume.next += 1;
                 continue;
             }
-            let (idx, _) = volume.answer.rows.get(volume.next);
+            let (idx, file_id) = volume.answer.rows.get(volume.next);
             let entry = index.entry(idx);
             let row = RowView {
                 folder,
@@ -421,6 +428,7 @@ impl Reply {
                 mtime: entry.mtime(),
                 created: entry.created(),
                 attributes: entry.attributes(),
+                file_id,
             };
             if !push(v, volume.next, row, &self.names) {
                 volume.head = Some(folder);
@@ -526,15 +534,17 @@ fn merge_paths(dir: SortDir, volumes: &[VolumeReader]) -> Merge {
 }
 
 impl VolumeReader {
-    /// Starts a page under `index`'s read lock. A volume whose index changed
-    /// and one whose scope folder is gone leave out every row left, which
-    /// `total` stops counting, and the reply does not wait for their matches
-    /// past the limit. A gone scope holds none of them, so `total` stops
-    /// counting them too; for a changed index the reply says its rows are
-    /// incomplete. Returns whether the index changed.
+    /// Starts a page under `index`'s read lock, of the volume whose GUID path
+    /// is `guid`. A volume whose index changed and one whose scope folder is
+    /// gone leave out every row left, which `total` stops counting, and the
+    /// reply does not wait for their matches past the limit. A gone scope
+    /// holds none of them, so `total` stops counting them too; for a changed
+    /// index the reply says its rows are incomplete. Returns whether the
+    /// index changed.
     fn begin_page(
         &mut self,
         index: &VolumeIndex,
+        guid: &str,
         names: &mut ResultNames,
         total: &mut u64,
     ) -> bool {
@@ -559,7 +569,9 @@ impl VolumeReader {
             return changed;
         }
         self.folders
-            .get_or_insert_with(|| FolderCopy::new(index, &self.answer.mount_prefix, names))
+            .get_or_insert_with(|| {
+                FolderCopy::new(index, &self.answer.mount_prefix, Some(guid), names)
+            })
             .forget_missing_paths();
         false
     }
@@ -970,7 +982,8 @@ impl<V: IndexedVolume> ResultRows<V> {
             .map(|(v, volume)| self.reply.reads_volume(v).then(|| volume.read().index))
             .collect();
         let indexes: Vec<Option<&VolumeIndex>> = held.iter().map(Option::as_deref).collect();
-        self.reply.fill_placed(&indexes, page_rows, push)
+        let guids: Vec<&str> = self.volumes.iter().map(|v| v.mounts().guid).collect();
+        self.reply.fill_placed(&indexes, &guids, page_rows, push)
     }
 
     /// The matches, less every row left out so far: the total each page

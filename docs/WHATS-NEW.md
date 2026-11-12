@@ -1,5 +1,13 @@
 # What's new
 
+## Gozler 0.5.10
+
+### Know files again after a rename
+
+#### Use Gozler from scripts and AI agents
+
+- **Identify each file.** `--file-id` adds each result's volume and file ID to `--json` output. A file keeps both when it's renamed or moved on its drive, so a script can tell a renamed file from a new one. See the [JSON guide](https://github.com/SynoSoftware/gozler/blob/main/docs/JSON.md#know-a-file-again-after-a-rename).
+
 ## Gozler 0.5.9
 
 ### Search more precisely, plus updater fixes

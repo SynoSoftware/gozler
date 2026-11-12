@@ -13,8 +13,8 @@ use super::ResultWriter;
 use crate::attributes::Attributes;
 use crate::escompat::{Command, parse_argv};
 use crate::output::unix_ms_to_filetime;
-use crate::proto::{QueryResults, ResultItem};
-use crate::types::EsColumn;
+use crate::proto::{FileIdentity, QueryResults, ResultItem};
+use crate::types::{EsColumn, Frn};
 
 /// 2026-10-17T12:34:56 UTC.
 const MODIFIED_UNIX_MS: i64 = 1_792_240_496_000;
@@ -33,6 +33,7 @@ fn results() -> QueryResults {
         mtime_ft,
         is_dir,
         attributes: Some(Attributes::from_letters(letters).expect("attribute letters")),
+        identity: None,
     };
     QueryResults {
         total: 4,
@@ -389,6 +390,29 @@ fn json_more_reports_matches_left_out_after_the_last_page() {
     let json: serde_json::Value =
         serde_json::from_str(&print(&["--json"], vec![empty])).expect("the writer emits JSON");
     assert_eq!(json["more"], true);
+}
+
+/// A script, such as TinyTorrent's Library, knows a file again by these two
+/// fields: the volume as `--status` names it in `guid`, and the file ID as 32
+/// hex digits. A renamed field, a number in place of the text, or an ID cut
+/// to 64 bits or without its leading zeros would make every file new to it.
+#[test]
+fn json_names_a_file_by_its_volume_and_file_id() {
+    let volume = r"\\?\Volume{6a1f0e2c-5b3d-4e8f-9a7b-1c2d3e4f5a6b}\";
+    let mut page = results();
+    page.items.truncate(1);
+    page.items[0].identity = Some(Box::new(FileIdentity {
+        volume: volume.into(),
+        file_id: Frn(0x0000_0000_0000_1a2b_0000_0000_0000_3c4d),
+    }));
+    let json: serde_json::Value =
+        serde_json::from_str(&print(&["--json", "--file-id"], vec![page]))
+            .expect("the writer emits JSON");
+    assert_eq!(json["items"][0]["volume"], volume);
+    assert_eq!(
+        json["items"][0]["file_id"],
+        "0000000000001a2b0000000000003c4d"
+    );
 }
 
 #[test]

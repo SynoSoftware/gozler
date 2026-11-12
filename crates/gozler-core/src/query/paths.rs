@@ -408,6 +408,10 @@ struct NameRef {
 pub struct ResultNames {
     folders: Vec<TableFolder>,
     bytes: Vec<u8>,
+    /// The GUID path of each root's volume, for the roots of a table whose
+    /// results carry their [`FileIdentity`](crate::proto::FileIdentity), in
+    /// the order of the roots.
+    volumes: Vec<(FolderId, String)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -437,6 +441,20 @@ impl ResultNames {
     pub fn folder_name(&self, folder: FolderId) -> &[u8] {
         let name = self.folders[folder.index()].name;
         &self.bytes[name.start..name.end]
+    }
+
+    /// The GUID path of the volume that holds `folder`, when the table names
+    /// the volume of its root.
+    pub fn volume(&self, folder: FolderId) -> Option<&str> {
+        let mut root = folder;
+        while let Some(parent) = self.parent(root) {
+            root = parent;
+        }
+        let at = self
+            .volumes
+            .binary_search_by_key(&root, |&(id, _)| id)
+            .ok()?;
+        Some(&self.volumes[at].1)
     }
 
     /// Writes the full path of `folder` into `out` (cleared first).
@@ -478,6 +496,13 @@ impl ResultNames {
                 .expect("fewer folders than entries, and an EntryIdx is a u32"),
         )
     }
+
+    /// Adds the root of the volume whose GUID path is `volume`.
+    pub(crate) fn push_root(&mut self, name: &[u8], volume: &str) -> FolderId {
+        let root = self.push_folder(None, name);
+        self.volumes.push((root, volume.to_owned()));
+        root
+    }
 }
 
 /// The name of the root folder of the volume mounted at `mount_prefix`: the
@@ -516,9 +541,19 @@ pub(crate) struct FolderCopy {
 impl FolderCopy {
     /// A copy of the folders of `index`, the volume mounted at `mount_prefix`
     /// (`C:\`; empty for a path within the volume), into `names`, which it
-    /// adds the volume's root to.
-    pub(crate) fn new(index: &VolumeIndex, mount_prefix: &str, names: &mut ResultNames) -> Self {
-        let root = names.push_folder(None, root_name(mount_prefix));
+    /// adds the volume's root to. The root names `volume`, the volume's GUID
+    /// path, when given: a reply's pages send it, and a table only ranked by
+    /// a sort needs none.
+    pub(crate) fn new(
+        index: &VolumeIndex,
+        mount_prefix: &str,
+        volume: Option<&str>,
+        names: &mut ResultNames,
+    ) -> Self {
+        let root = match volume {
+            Some(volume) => names.push_root(root_name(mount_prefix), volume),
+            None => names.push_folder(None, root_name(mount_prefix)),
+        };
         let mut copied = FxHashMap::default();
         let root_frn = index.entry(index.root()).frn();
         copied.insert(index.root(), (root_frn, root, 1));
@@ -656,7 +691,7 @@ mod tests {
         for order in [entries.clone(), entries.iter().rev().copied().collect()] {
             let mut dirs = DirPaths::new(&index, NameForm::Raw, r"C:\");
             let mut names = ResultNames::default();
-            let mut copy = FolderCopy::new(&index, r"C:\", &mut names);
+            let mut copy = FolderCopy::new(&index, r"C:\", None, &mut names);
             let mut bits = ComponentBits::new(&index, NameForm::Raw, r"C:\", |_, _| 0);
             for idx in order {
                 assert_eq!(

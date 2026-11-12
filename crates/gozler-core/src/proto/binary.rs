@@ -20,7 +20,7 @@
 //! total:      u64 LE    match count less the rows left out so far; the last page's holds
 //! generation: u64 LE
 //! page_flags: u8        bit0 more, bit1 volumes_incomplete, bit2 metadata_pending,
-//!                       bit3 has_sums
+//!                       bit3 has_sums, bit4 identities
 //! folder_count: u32 LE  folders this page adds to the reply's folders
 //! folder_count folders, each:
 //!   parent:   u32 LE    the reply's id of its parent folder; u32::MAX for a
@@ -28,6 +28,8 @@
 //!   name_len: u32 LE
 //!   name:     name_len bytes   WTF-8; a root's name is its mount prefix
 //!                              without the last separator
+//!   volume_len: u32 LE  iff a root and identities
+//!   volume:   volume_len bytes  the volume's GUID path, UTF-8
 //! count:      u32 LE    items in this page
 //! count items, each:
 //!   folder:   u32 LE    the reply's id of the item's folder
@@ -42,6 +44,7 @@
 //!   mtime:    i64 LE    iff has_mtime
 //!   created:  i64 LE    iff has_created
 //!   attributes: u32 LE  iff has_attributes: `FILE_ATTRIBUTE_*` bits
+//!   file_id:  u128 LE   iff identities, and not a gone row
 //! sums, iff has_sums, after the items:
 //!   files:                u64 LE
 //!   file_bytes:           u64 LE  the files whose size is known
@@ -66,13 +69,14 @@ use smallvec::SmallVec;
 
 use super::frame::{begin_frame, end_frame};
 use super::types::{
-    MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Rows, SnapshotRowsRequest,
+    FileIdentity, MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Rows, SnapshotRowsRequest,
 };
 use crate::attributes::Attributes;
 use crate::query::{
     FolderId, IndexedVolume, MatchSums, ResultNames, ResultRows, ResultSnapshotGone, RowView,
     SnapshotRow, SnapshotRows,
 };
+use crate::types::Frn;
 use crate::wtf8;
 
 /// Response frame tag: the body is a JSON [`super::Response`].
@@ -84,6 +88,7 @@ const FLAG_MORE: u8 = 1;
 const FLAG_VOLUMES_INCOMPLETE: u8 = 1 << 1;
 const FLAG_METADATA_PENDING: u8 = 1 << 2;
 const FLAG_SUMS: u8 = 1 << 3;
+const FLAG_IDENTITIES: u8 = 1 << 4;
 
 /// The sums' bytes after the items.
 const SUMS_LEN: usize = 5 * 8 + 1;
@@ -98,6 +103,11 @@ const IFLAG_HAS_CREATED: u8 = 1 << 5;
 
 /// A folder's parent field for a volume's root.
 const NO_PARENT: u32 = u32::MAX;
+
+/// The longest volume text the decoder takes. Each item gets its own copy,
+/// so a frame of many items under one huge volume text would ask for
+/// terabytes; a GUID path, `\\?\Volume{GUID}\`, is far shorter.
+const MAX_VOLUME_LEN: usize = 64;
 
 /// A truncated or malformed binary results page.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -135,6 +145,8 @@ pub struct PageItem<'a> {
     pub mtime: Option<i64>,
     pub created: Option<i64>,
     pub attributes: Option<Attributes>,
+    /// Sent when the page carries identities.
+    pub file_id: Frn,
 }
 
 /// One results page, built as a complete frame: the daemon
@@ -156,6 +168,8 @@ pub struct ResultsPage {
     count: u32,
     /// Written after the items by [`finish`](Self::finish).
     sums: Option<MatchSums>,
+    /// Each root sent names its volume, and each item its file ID.
+    identities: bool,
 }
 
 impl ResultsPage {
@@ -191,6 +205,7 @@ impl ResultsPage {
             folder_count: 0,
             count: 0,
             sums: None,
+            identities: false,
         }
     }
 
@@ -201,6 +216,19 @@ impl ResultsPage {
             self.frame[self.flags_at] |= FLAG_SUMS;
         }
         self.sums = sums;
+        self
+    }
+
+    /// Makes the page carry each item's [`FileIdentity`] when `identities`:
+    /// its file ID, and its volume's GUID path with each root the page sends,
+    /// which the reply's [`ResultNames`] must name. Every page of a reply
+    /// says the same, because a later page's items name the roots of earlier
+    /// pages. Called before the first [`push`](Self::push).
+    pub fn with_identities(mut self, identities: bool) -> Self {
+        if identities {
+            self.frame[self.flags_at] |= FLAG_IDENTITIES;
+        }
+        self.identities = identities;
         self
     }
 
@@ -241,6 +269,12 @@ impl ResultsPage {
                 sent.ids[parent.index()].expect("a folder's parent is sent before it")
             });
             push_named(&mut self.frame, parent, names.folder_name(folder));
+            if self.identities && parent == NO_PARENT {
+                let volume = names
+                    .volume(folder)
+                    .expect("the roots of a reply that sends identities name their volume");
+                push_bytes(&mut self.frame, volume.as_bytes());
+            }
             sent.ids[folder.index()] = Some(sent.next);
             sent.next += 1;
             self.folder_count += 1;
@@ -276,6 +310,9 @@ impl ResultsPage {
         }
         if let Some(a) = item.attributes {
             self.items.extend_from_slice(&a.bits().to_le_bytes());
+        }
+        if self.identities {
+            self.items.extend_from_slice(&item.file_id.0.to_le_bytes());
         }
 
         let trailer = if self.sums.is_some() { SUMS_LEN } else { 0 };
@@ -342,9 +379,9 @@ impl ResultsPage {
 }
 
 /// Reads the next page of `rows` and encodes it as one results page frame,
-/// each row with the size, date and attributes that `wanted` asks for. `sent`
-/// holds the folders the reply's earlier pages sent. Returns the frame and
-/// whether rows are left.
+/// each row with the values that `wanted` asks for. `sent` holds the folders
+/// the reply's earlier pages sent. Returns the frame and whether rows are
+/// left.
 pub fn encode_page<V: IndexedVolume>(
     rows: &mut ResultRows<V>,
     wanted: &Rows,
@@ -355,7 +392,8 @@ pub fn encode_page<V: IndexedVolume>(
         rows.metadata_pending(),
         rows.rows_left(),
     )
-    .with_sums(rows.sums());
+    .with_sums(rows.sums())
+    .with_identities(wanted.want_identity);
     let more = rows.page(PAGE_ROWS as usize, |row, names| {
         let item = page_item(
             row,
@@ -390,7 +428,9 @@ pub fn encode_snapshot_page<V: IndexedVolume>(
     sums: Option<MatchSums>,
     sent: &mut SentFolders,
 ) -> Result<(Vec<u8>, bool), ResultSnapshotGone> {
-    let mut page = ResultsPage::new(0, rows.metadata_pending(), rows.rows_left()).with_sums(sums);
+    let mut page = ResultsPage::new(0, rows.metadata_pending(), rows.rows_left())
+        .with_sums(sums)
+        .with_identities(wanted.want_identity);
     let more = rows.page(PAGE_ROWS as usize, |row, names| match row {
         SnapshotRow::Row(row) => {
             let item = page_item(
@@ -428,6 +468,7 @@ fn page_item(
         mtime: mtime.then_some(row.mtime).flatten(),
         created: created.then_some(row.created).flatten(),
         attributes: attributes.then_some(row.attributes),
+        file_id: row.file_id,
     }
 }
 
@@ -435,8 +476,13 @@ fn page_item(
 /// length-prefixed name.
 fn push_named(out: &mut Vec<u8>, id: u32, name: &[u8]) {
     out.extend_from_slice(&id.to_le_bytes());
-    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
-    out.extend_from_slice(name);
+    push_bytes(out, name);
+}
+
+/// Appends `bytes` after their length.
+fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(bytes);
 }
 
 struct Reader<'a> {
@@ -465,6 +511,9 @@ impl<'a> Reader<'a> {
     fn i64(&mut self) -> Result<i64, BinError> {
         Ok(i64::from_le_bytes(self.arr()?))
     }
+    fn u128(&mut self) -> Result<u128, BinError> {
+        Ok(u128::from_le_bytes(self.arr()?))
+    }
     fn bytes(&mut self, n: usize) -> Result<&'a [u8], BinError> {
         let end = self.pos.checked_add(n).ok_or(BinError("overflow"))?;
         let slice = self.buf.get(self.pos..end).ok_or(BinError("truncated"))?;
@@ -474,6 +523,13 @@ impl<'a> Reader<'a> {
     fn name(&mut self) -> Result<&'a [u8], BinError> {
         let len = self.u32()? as usize;
         self.bytes(len)
+    }
+    fn volume(&mut self) -> Result<&'a str, BinError> {
+        let volume = self.name()?;
+        if volume.len() > MAX_VOLUME_LEN {
+            return Err(BinError("a volume is too long"));
+        }
+        core::str::from_utf8(volume).map_err(|_| BinError("a volume is not UTF-8"))
     }
 }
 
@@ -490,6 +546,7 @@ pub fn decode_results_payload(
     let total = r.u64()?;
     let generation = r.u64()?;
     let flags = r.u8()?;
+    let identities = flags & FLAG_IDENTITIES != 0;
     let folder_count = r.u32()?;
     for _ in 0..folder_count {
         let parent = match r.u32()? {
@@ -505,7 +562,11 @@ pub fn decode_results_payload(
         if names.folder_count() >= NO_PARENT as usize {
             return Err(BinError("too many folders"));
         }
-        names.push_folder(parent, name);
+        if parent.is_none() && identities {
+            names.push_root(name, r.volume()?);
+        } else {
+            names.push_folder(parent, name);
+        }
     }
     let count = r.u32()? as usize;
     let mut items = Vec::with_capacity(count.min(PAGE_ROWS as usize));
@@ -538,6 +599,18 @@ pub fn decode_results_payload(
                 Attributes::try_from(r.u32()?).map_err(|_| BinError("unindexed attribute bits"))
             })
             .transpose()?;
+        let identity = identities
+            .then(|| -> Result<Box<FileIdentity>, BinError> {
+                let file_id = Frn(r.u128()?);
+                let volume = names
+                    .volume(folder)
+                    .ok_or(BinError("an item's volume was not sent"))?;
+                Ok(Box::new(FileIdentity {
+                    volume: volume.to_owned(),
+                    file_id,
+                }))
+            })
+            .transpose()?;
         names.full_path_into(folder, name, &mut path);
         let lossy = core::str::from_utf8(&path).is_err();
         items.push(ResultItem {
@@ -548,6 +621,7 @@ pub fn decode_results_payload(
             created_ft: created,
             is_dir: iflags & IFLAG_IS_DIR != 0,
             attributes,
+            identity,
         });
     }
     let sums = (flags & FLAG_SUMS != 0)
@@ -583,6 +657,9 @@ mod tests {
         Attributes::from_letters("ha").expect("H and A are attribute letters")
     }
 
+    const C_VOLUME: &str = r"\\?\Volume{c}\";
+    const D_VOLUME: &str = r"\\?\Volume{d}\";
+
     /// `C:\Windows\System32` and `D:\` as the names a daemon sends from.
     struct Tree {
         names: ResultNames,
@@ -593,10 +670,10 @@ mod tests {
 
     fn tree() -> Tree {
         let mut names = ResultNames::default();
-        let c = names.push_folder(None, b"C:");
+        let c = names.push_root(b"C:", C_VOLUME);
         let windows = names.push_folder(Some(c), b"Windows");
         let system32 = names.push_folder(Some(windows), b"System32");
-        let d = names.push_folder(None, b"D:");
+        let d = names.push_root(b"D:", D_VOLUME);
         Tree {
             names,
             c,
@@ -614,6 +691,7 @@ mod tests {
             mtime: None,
             created: None,
             attributes: None,
+            file_id: Frn::default(),
         }
     }
 
@@ -655,18 +733,21 @@ mod tests {
     /// [`ResultsPage`] fills in the more flag, the counts and the frame
     /// length after the items; a slip there makes every client misread the
     /// page. Every item field and page flag must come back as pushed, with
-    /// its full path.
+    /// its full path and its identity: the volume its root names, and all
+    /// 128 bits of a ReFS file ID.
     #[test]
     fn mixed_items_round_trip() {
         let t = tree();
         let mut sent = SentFolders::default();
-        let mut page = ResultsPage::new(42, true, 3);
+        let mut page = ResultsPage::new(42, true, 3).with_identities(true);
+        let refs_id = Frn(0x0123_4567_89ab_cdef_0011_2233_4455_6677);
         assert!(page.push(
             PageItem {
                 size: Some(1234),
                 mtime: Some(133_500_000_000_000_000),
                 created: Some(133_400_000_000_000_000),
                 attributes: Some(hidden_archive()),
+                file_id: refs_id,
                 ..item(t.system32, b"kernel32.dll")
             },
             &t.names,
@@ -675,6 +756,7 @@ mod tests {
         assert!(page.push(
             PageItem {
                 is_dir: true,
+                file_id: Frn::ntfs(42, 5),
                 ..item(t.d, b"folder")
             },
             &t.names,
@@ -684,11 +766,18 @@ mod tests {
             PageItem {
                 size: Some(0),
                 mtime: Some(-1),
+                file_id: Frn::ntfs(7, 1),
                 ..item(t.c, "ünïcode 文件.txt".as_bytes())
             },
             &t.names,
             &mut sent,
         ));
+        let identity = |volume: &str, file_id| {
+            Some(Box::new(FileIdentity {
+                volume: volume.into(),
+                file_id,
+            }))
+        };
         assert_eq!(
             decode(&[page.finish(PageEnd {
                 total: 987_654,
@@ -706,6 +795,7 @@ mod tests {
                         created_ft: Some(133_400_000_000_000_000),
                         is_dir: false,
                         attributes: Some(hidden_archive()),
+                        identity: identity(C_VOLUME, refs_id),
                     },
                     ResultItem {
                         path: r"D:\folder".into(),
@@ -715,6 +805,7 @@ mod tests {
                         created_ft: None,
                         is_dir: true,
                         attributes: None,
+                        identity: identity(D_VOLUME, Frn::ntfs(42, 5)),
                     },
                     ResultItem {
                         path: "C:\\ünïcode 文件.txt".into(),
@@ -724,6 +815,7 @@ mod tests {
                         created_ft: None,
                         is_dir: false,
                         attributes: None,
+                        identity: identity(C_VOLUME, Frn::ntfs(7, 1)),
                     },
                 ],
                 more: true,
@@ -819,6 +911,24 @@ mod tests {
         }
     }
 
+    /// Each item gets its own copy of its root's volume text, so a page
+    /// whose volume text passes the cap is refused: a 16 MiB frame of one
+    /// huge volume text and many items would otherwise ask for terabytes and
+    /// end the client.
+    #[test]
+    fn a_volume_text_past_the_cap_is_an_error() {
+        let mut names = ResultNames::default();
+        let root = names.push_root(b"C:", &"v".repeat(MAX_VOLUME_LEN + 1));
+        let mut sent = SentFolders::default();
+        let mut page = ResultsPage::new(0, false, 1).with_identities(true);
+        assert!(page.push(item(root, b"a"), &names, &mut sent));
+        let frame = page.finish(last_page(1));
+        assert_eq!(
+            decode_results_payload(&frame[5..], &mut ResultNames::default()),
+            Err(BinError("a volume is too long"))
+        );
+    }
+
     #[test]
     fn lossy_path_round_trips_with_exact_units() {
         // A name with an unpaired high surrogate: the encoder ships the raw
@@ -844,6 +954,7 @@ mod tests {
                 created_ft: None,
                 is_dir: false,
                 attributes: None,
+                identity: None,
             }]
         );
     }
@@ -859,12 +970,13 @@ mod tests {
         ) {
             let t = tree();
             let mut sent = SentFolders::default();
-            let mut page = ResultsPage::new(2, false, names.len());
+            let mut page = ResultsPage::new(2, false, names.len()).with_identities(true);
             for name in &names {
                 let full = PageItem {
                     size: Some(3),
                     mtime: Some(4),
                     attributes: Some(hidden_archive()),
+                    file_id: Frn(5),
                     ..item(t.system32, name)
                 };
                 prop_assert!(page.push(full, &t.names, &mut sent));

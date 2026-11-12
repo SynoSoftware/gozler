@@ -82,6 +82,8 @@ unknown or not requested; absence is different from zero.
 | `mtime`, `created` | Local dates as `YYYY-MM-DDTHH:MM:SS`, without a UTC offset |
 | `mtime_ft`, `created_ft` | Integer Windows FILETIME ticks: 100 ns since 1601-01-01 UTC |
 | `attributes` | Windows attribute bits, requested with `-attributes` |
+| `volume` | The volume's GUID path, requested with `--file-id` |
+| `file_id` | The file ID on that volume as 32 hexadecimal digits, requested with `--file-id` |
 | `path_u16` | Exact UTF-16 code units when `path` had to replace an unpaired surrogate |
 
 Creation dates depend on the **Dates created** indexing setting. Folder
@@ -93,6 +95,22 @@ Ignore fields your consumer does not need, including additional fields added
 in later releases. Pass returned paths to file APIs as literal paths rather
 than interpolating them into shell commands. Use `path_u16` when present if
 the operation needs the exact Windows name.
+
+## Know a file again after a rename
+
+```text
+gozler --json -n all -a-d -attributes --file-id ext:mkv
+```
+
+A file keeps its `volume` and `file_id` when it is renamed or moved on its
+volume, so the two together identify it. Every hard link of a file has the
+same `file_id`. A copy is a new file with a new ID. Compare `file_id` as
+text: it has 32 digits on NTFS and ReFS alike.
+
+`volume` is the text that `gozler --json --status` reports as a volume's
+`guid`. A file whose `volume` is not in that report is on a drive that is not
+indexed now, such as a drive that is not connected, so its absence from the
+results does not mean that it was deleted.
 
 ## Check completeness and service status
 

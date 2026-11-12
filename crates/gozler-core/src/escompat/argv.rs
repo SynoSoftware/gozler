@@ -130,6 +130,8 @@ pub struct EsPlan {
     /// Native `--json`: print the results to stdout as JSON, whatever the
     /// format; an export file keeps its format.
     pub json: bool,
+    /// Native `--file-id`: the JSON names each result's volume and file ID.
+    pub file_id: bool,
     /// The daemon report to print instead of searching; the last one wins.
     pub report: Option<Report>,
     /// Native `--insecure-no-server-check`: skip the pipe-server owner-SID
@@ -162,6 +164,7 @@ impl Default for EsPlan {
             no_result_error: false,
             timeout: None,
             json: false,
+            file_id: false,
             report: None,
             insecure_no_server_check: false,
         }
@@ -408,6 +411,8 @@ pub(super) enum SwitchAction {
     Regex,
     /// `--json`: print results as JSON.
     Json,
+    /// `--file-id`: name each result's volume and file ID in the JSON.
+    FileId,
     Report(Report),
     /// `--insecure-no-server-check`: skip the pipe server's trust check.
     InsecureNoServerCheck,
@@ -445,6 +450,7 @@ impl SwitchAction {
             | SwitchAction::WholeWord
             | SwitchAction::NoResultError
             | SwitchAction::Json
+            | SwitchAction::FileId
             | SwitchAction::Report(_)
             | SwitchAction::InsecureNoServerCheck
             | SwitchAction::Help(_)
@@ -598,6 +604,14 @@ pub(super) const SWITCHES: &[Switch] = &[
         },
         group: Group::Output,
         help: "Print the results, or the `--status` report, as JSON",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "file-id",
+            action: SwitchAction::FileId,
+        },
+        group: Group::Output,
+        help: "With `--json`, add each result's volume and file ID",
     },
     Switch {
         spelling: Spelling::Es {
@@ -1152,6 +1166,7 @@ fn apply_switch(
             .regexes
             .push(take_param(rest, token, action)?.to_owned()),
         SwitchAction::Json => plan.json = true,
+        SwitchAction::FileId => plan.file_id = true,
         SwitchAction::Report(report) => plan.report = Some(report),
         SwitchAction::InsecureNoServerCheck => plan.insecure_no_server_check = true,
         SwitchAction::Help(_) | SwitchAction::Version | SwitchAction::Attributes(_) => {
@@ -1318,6 +1333,7 @@ mod tests {
                 no_result_error: false,
                 timeout: None,
                 json: false,
+                file_id: false,
                 report: None,
                 insecure_no_server_check: false,
             }

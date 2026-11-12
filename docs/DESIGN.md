@@ -88,6 +88,14 @@ script: unsupported options, syntax and the differences below need checking.
   `--json` writes it as a JSON string. It does not request status or search.
   `--version` stays the client version and works without the service;
   `--status` keeps its existing text and JSON contracts.
+- **`--file-id` names each result's file** in `--json` output: `volume`, the
+  GUID path that `--status` reports as the volume's `guid`, and `file_id`,
+  the file ID as 32 hex digits, also for a 64-bit NTFS ID, so equal IDs are
+  equal text and no JSON parser rounds a 128-bit ReFS ID. A file keeps both
+  when it is renamed or moved on its volume, so a script knows it again;
+  every hard link of a file has the same ID. The other formats print
+  neither, because es names no such column, and an identity is two values
+  where a column holds one.
 
 ## Exit codes
 
@@ -217,7 +225,7 @@ Several volumes merge one page at a time, by the same comparison, reading each r
 - **The version gate.** The client sends `Request::Hello` with `PROTO_VERSION` as both its lowest and highest version. **Owner ruling:** the daemon serves only its own version (`OLDEST_PROTO_VERSION` is `PROTO_VERSION`), of gozler or of goz, and refuses any other with `Unsupported`, because `gozler` and `gozlerd` install together from one build, and an old layout kept for an old client would bind every later change. The client prints `gozler: the running gozlerd is older than this client; install the matching gozlerd`, then the link to the gozler setup, and exits 7. Without the gate, a daemon of another build would misread the request or the client the pages.
 - **Each change to a request or a reply raises `PROTO_VERSION` by one**, such as a new kind of term in the parsed query or a new page layout.
 - **No result carries its full path.** gozlerd keeps each match as a row, its entry and its file ID, and a page reads each row's name and folder from the index into a `ResultNames` table, which holds each folder once with its parent, so a reply's memory grows with the folders and not with the folder depth. A results page (`proto::binary`) sends the folders its items need that no earlier page of the reply sent, then each item as its folder and its name; the client keeps the reply's folders and joins each item's full path. On `C:\` with 2.15 million entries this is 73 MB on the pipe instead of 251 MB of full paths. A tree 200 folders deep, such as a copy that copied into itself, costs gozlerd about 100 bytes a row instead of 2 KB or more ([deep folder rows](research/deep-folder-rows.md)).
-- **Item fields travel only when the request asks for them** (`Rows::want_size`, `want_mtime`, `want_created`, `want_attributes`), and each item's flags say which it carries. gozler asks for the date created for JSON or a `-dc` column, because most indexes hold none.
+- **Item fields travel only when the request asks for them** (`Rows::want_size`, `want_mtime`, `want_created`, `want_attributes`, `want_identity`), and each item's flags say which it carries. gozler asks for the date created for JSON or a `-dc` column, because most indexes hold none. For `want_identity` the page's flags say so: each root the page sends carries its volume's GUID path, and each item its file ID, so the volume travels once per reply, not once per row.
 - **A page's sums follow its items.** `Rows::want_sums` asks for the matches' files and folders and their sizes (`MatchSums`), which the daemon computes in the scan that counts `total`. They travel after the last item, flagged in the page flags.
 - **Totals cross the pipe without rows.** `-get-result-count`, `-get-total-size` and `-get-folder-size` ask for `Returns::Totals`, and the daemon sums the sizes it already holds for each hit. Summing on the client would stream every match, and `-get-folder-size C:\` is the whole volume. The sum uses checked arithmetic; an overflow, which only a corrupt size in the index can cause, is `ProtoError::Overflow` and exit 1.
 
@@ -2609,7 +2617,7 @@ Each of these waits for a concrete need:
 - Content search: `rg` does that.
 - Paging: es's `-viewport-offset` and `-viewport-count` are unknown options (exit 6). The pipe protocol keeps its `offset` field for other applications.
 - EFU file lists, playlists, bookmarks, macros, and the size and date format menus.
-- In the window: search and run history; results that update while files change, because the protocol has no change notification (`F5` searches again); the other hard links of a file, because results carry no file ID; and right-to-left languages, because no such catalogue is planned (see "How normal changes land").
+- In the window: search and run history; results that update while files change, because the protocol has no change notification (`F5` searches again); the other hard links of a file, because no search finds the entries of one file ID; and right-to-left languages, because no such catalogue is planned (see "How normal changes land").
 - In Commander mode: Edit (`F4`), a later plan, which the key bar shows disabled; a command line under the panels, as Norton Commander had, because Windows Terminal does that; counting a folder's size by walking it on a drive that gozlerd does not index, because the person never waits for a count; searching inside files' contents, because gozlerd indexes names; archives as folders and FTP; drag and drop between the panels, a later plan, so Commander mode accepts no drop, though its panels drag out (see "Dragging"); thumbnails and other views than the report list, and choosing the panels' columns; a splitter between the panels; and, beyond the owner's list, rename in place (`F6` with a new name renames), the clipboard commands, selecting by pattern and inverting the selection (`Num +`, `Num -`, `Num *`), swapping the panels (`Ctrl+U`) and the sort keys (`Ctrl+F3` to `Ctrl+F6`).
 - In the Viewer: searching, selecting part of a file in Hex, images, printing, choosing the encoding, and Reload.
 - A speed limit for a file operation.

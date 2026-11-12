@@ -456,6 +456,7 @@ fn make_snapshot(
         want_mtime: rows.want_mtime,
         want_created: rows.want_created,
         want_attributes: rows.want_attributes,
+        want_identity: rows.want_identity,
     };
     let sums = rows.want_sums.then(|| snapshot.sums()).flatten();
     stream_snapshot(&snapshot, volumes, &read, sums, viewer, emit);
@@ -800,14 +801,15 @@ mod tests {
     use gozler_core::include::{DriveChoice, FolderChoice, IndexSettings};
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
-        CallerSees, DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS, PROTO_VERSION,
-        ProtoError, Request, Response, Returns, Rows, SearchRequest, decode_response_frame,
-        encode_request,
+        CallerSees, DaemonStatus, FileIdentity, FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS,
+        PROTO_VERSION, ProtoError, Request, Response, Returns, Rows, SearchRequest,
+        decode_response_frame, encode_request,
     };
     use gozler_core::query::{ParseOptions, ResultNames, parse_query_with};
     use gozler_core::types::{Frn, SortKey, SortSpec, VolumePhase};
     use gozler_core::usn::record::{
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
+        USN_REASON_RENAME_NEW_NAME,
     };
     use std::sync::Arc;
 
@@ -1064,6 +1066,7 @@ mod tests {
             want_mtime: false,
             want_created: false,
             want_attributes: false,
+            want_identity: false,
         });
         for request in [
             search(query("System32")),
@@ -1136,6 +1139,63 @@ mod tests {
         ));
     }
 
+    /// A file renamed and moved on its volume keeps its identity in the
+    /// answer: its file ID on the volume, whole, and the GUID path that
+    /// `--status` names the volume by. A script such as TinyTorrent's Library
+    /// knows the file again by them; an answer that named the index's slot,
+    /// dropped the sequence number or named another volume would make the
+    /// renamed file a new one.
+    #[test]
+    fn a_renamed_file_keeps_its_identity() {
+        let movie = Frn::ntfs(200, 7);
+        let mut index = windows_index();
+        index.insert_enum(&dir_record(102, NTFS_ROOT_FRN.0, "Movies"));
+        let mut file = dir_record(movie.0, 101, "film.mkv");
+        file.attributes = 0;
+        index.insert_enum(&file);
+        let vol = volume(r"C:\", index, VolumePhase::Live);
+        let vols = set(&[Arc::clone(&vol)]);
+        let found = || {
+            let mut request = search(query("film"));
+            let Request::Search(SearchRequest {
+                returns: Returns::Rows(rows),
+                ..
+            }) = &mut request
+            else {
+                unreachable!("search asks for rows")
+            };
+            rows.want_identity = true;
+            let pages = results(&reply_bytes(&vols, &request));
+            let [item] = &pages[0].items[..] else {
+                panic!("one match: {:?}", pages[0].items)
+            };
+            (item.path.clone(), item.identity.clone())
+        };
+        let Response::Status(status) = answer(&vols, Request::Status { links_held: None }) else {
+            panic!("a status reply")
+        };
+        let identity = Some(Box::new(FileIdentity {
+            volume: status.volumes[0].guid.clone(),
+            file_id: movie,
+        }));
+        assert_eq!(
+            found(),
+            (
+                r"C:\Windows\System32\film.mkv".to_string(),
+                identity.clone()
+            )
+        );
+
+        let mut rename = dir_record(movie.0, 102, "Film (2001).mkv");
+        rename.attributes = 0;
+        rename.reason = USN_REASON_RENAME_NEW_NAME;
+        vol.index_mut().apply_batch(&[rename]);
+        assert_eq!(
+            found(),
+            (r"C:\Movies\Film (2001).mkv".to_string(), identity)
+        );
+    }
+
     /// A search as a test writes it: query text, which [`search`] parses as
     /// gozler does, and the rows it asks for.
     struct TextQuery {
@@ -1165,6 +1225,7 @@ mod tests {
                 want_mtime: q.want_mtime,
                 want_created: false,
                 want_attributes: false,
+                want_identity: false,
                 want_sums: false,
             }),
         })
@@ -1375,6 +1436,7 @@ mod tests {
                     want_mtime: false,
                     want_created: false,
                     want_attributes: false,
+                    want_identity: false,
                     want_sums: false,
                 },
                 replaces: None,
@@ -1409,6 +1471,7 @@ mod tests {
                 want_mtime: false,
                 want_created: false,
                 want_attributes: false,
+                want_identity: false,
             })
         };
         let frames = decode_frames(&reply_bytes_in(&vols, &snapshots, &read(id)));
@@ -1427,6 +1490,7 @@ mod tests {
                 want_mtime: false,
                 want_created: false,
                 want_attributes: false,
+                want_identity: false,
                 want_sums: false,
             },
         });

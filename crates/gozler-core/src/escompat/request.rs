@@ -24,6 +24,7 @@ pub fn build_search(
     working_dir: &str,
     query_start: &QueryStart,
 ) -> Result<SearchRequest, QueryError> {
+    let json = matches!(plan.result_format(), ResultFormat::Json);
     let returns = match plan.count {
         Some(_) => Returns::Totals,
         None => Returns::Rows(Rows {
@@ -34,9 +35,9 @@ pub fn build_search(
             // JSON includes creation dates; table metadata follows its columns.
             want_size: true,
             want_mtime: true,
-            want_created: plan.columns.contains(&EsColumn::DateCreated)
-                || matches!(plan.result_format(), ResultFormat::Json),
+            want_created: plan.columns.contains(&EsColumn::DateCreated) || json,
             want_attributes: plan.columns.contains(&EsColumn::Attributes),
+            want_identity: plan.file_id && json,
             want_sums: false,
         }),
     };

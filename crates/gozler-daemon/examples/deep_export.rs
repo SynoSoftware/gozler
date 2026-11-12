@@ -261,6 +261,7 @@ fn main() {
         want_mtime: false,
         want_created: false,
         want_attributes: false,
+        want_identity: false,
         want_sums: false,
     };
 

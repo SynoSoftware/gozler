@@ -174,6 +174,7 @@ impl ChunkAsk {
             // second request.
             want_created: true,
             want_attributes: true,
+            want_identity: false,
             // The status bar shows them beside the total. The service sums
             // every match for them, so only the first chunk asks, and the
             // later chunks keep its sums.
@@ -192,6 +193,7 @@ impl ChunkAsk {
                 want_mtime: rows.want_mtime,
                 want_created: rows.want_created,
                 want_attributes: rows.want_attributes,
+                want_identity: rows.want_identity,
             }),
             FromSnapshot::Sort(id) => Request::SortResultSnapshot(SortSnapshotRequest { id, rows }),
         }
@@ -250,6 +252,7 @@ impl ExportAsk {
             want_mtime: true,
             want_created: self.want_created,
             want_attributes: self.want_attributes,
+            want_identity: false,
             want_sums: false,
         }))
     }

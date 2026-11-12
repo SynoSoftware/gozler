@@ -816,6 +816,7 @@ pub(crate) mod tests {
                 created_ft: None,
                 is_dir,
                 attributes: None,
+                identity: None,
             };
             cell(
                 &strings,

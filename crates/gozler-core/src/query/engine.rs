@@ -1452,7 +1452,7 @@ pub(crate) fn key_found(
     seen_by: &SeenBy,
 ) -> Matches {
     let mut folder_names = ResultNames::default();
-    let folders = FolderCopy::new(index, mount_prefix, &mut folder_names);
+    let folders = FolderCopy::new(index, mount_prefix, None, &mut folder_names);
     let origin = Origin {
         instance: index.instance(),
         reuse_mark: index.reuse_mark(),
@@ -1933,7 +1933,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             }),
             query_paths,
             path: Vec::new(),
-            folders: FolderCopy::new(index, mount_prefix, &mut folder_names),
+            folders: FolderCopy::new(index, mount_prefix, None, &mut folder_names),
             folder_names,
             scope_memo: FxHashMap::default(),
             scratch,

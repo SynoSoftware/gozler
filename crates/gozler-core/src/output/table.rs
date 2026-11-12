@@ -281,6 +281,7 @@ mod tests {
             created_ft: None,
             is_dir,
             attributes: None,
+            identity: None,
         }
     }
 

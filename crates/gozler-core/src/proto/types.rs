@@ -12,7 +12,7 @@ use crate::include::IndexSettings;
 use crate::links::Links;
 use crate::query::{MatchSums, ParsedQuery, RowsSpec, SearchTotals};
 use crate::scope::VolumeMounts;
-use crate::types::{IndexProgress, SortSpec, VolumePhase};
+use crate::types::{Frn, IndexProgress, SortSpec, VolumePhase};
 
 /// Protocol version spoken by this build.
 ///
@@ -20,7 +20,7 @@ use crate::types::{IndexProgress, SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 19;
+pub const PROTO_VERSION: u16 = 20;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -122,6 +122,8 @@ pub struct SnapshotRowsRequest {
     pub want_created: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub want_attributes: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_identity: bool,
 }
 
 /// Which result snapshot a [`Request::SortResultSnapshot`] sorts, and the
@@ -183,6 +185,9 @@ pub struct Rows {
     /// Populate [`ResultItem::attributes`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub want_attributes: bool,
+    /// Populate [`ResultItem::identity`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub want_identity: bool,
     /// Fill [`QueryResults::sums`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub want_sums: bool,
@@ -338,6 +343,19 @@ pub struct ResultItem {
     /// The attributes, as `FILE_ATTRIBUTE_*` bits; `None` = not requested.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub attributes: Option<Attributes>,
+    /// `None` = not requested, or a gone row. Boxed, so the items of a
+    /// search that does not ask for it stay small.
+    #[serde(flatten)]
+    pub identity: Option<Box<FileIdentity>>,
+}
+
+/// Which file a result is: the same file on the same volume however it is
+/// renamed or moved there. Every hard link of a file has its identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileIdentity {
+    /// The volume's GUID path, the text of [`VolumeStatus::guid`].
+    pub volume: String,
+    pub file_id: Frn,
 }
 
 impl ResultItem {
@@ -352,6 +370,7 @@ impl ResultItem {
             created_ft: None,
             is_dir: false,
             attributes: None,
+            identity: None,
         }
     }
 
@@ -577,6 +596,7 @@ mod tests {
             want_mtime: false,
             want_created: false,
             want_attributes: false,
+            want_identity: false,
         }));
     }
 
@@ -590,6 +610,7 @@ mod tests {
                 created_ft: None,
                 is_dir: false,
                 attributes: None,
+                identity: None,
             },
             ResultItem {
                 path: r"C:\src".into(),
@@ -599,6 +620,7 @@ mod tests {
                 created_ft: None,
                 is_dir: true,
                 attributes: None,
+                identity: None,
             },
         ]
     }
@@ -741,6 +763,7 @@ mod tests {
             created_ft: None,
             is_dir: false,
             attributes: None,
+            identity: None,
         };
         let json = serde_json::to_string(&item).expect("serialize");
         assert!(!json.contains("path_u16"), "json: {json}");
@@ -773,6 +796,7 @@ mod tests {
             created_ft: None,
             is_dir: false,
             attributes: None,
+            identity: None,
         };
         assert!(item.path.contains('\u{FFFD}'));
         let json = serde_json::to_string(&item).expect("serialize");

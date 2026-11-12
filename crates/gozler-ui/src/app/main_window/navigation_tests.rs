@@ -74,6 +74,7 @@ fn show_in_commander_gives_the_destination_panel_keyboard_focus() {
                 created_ft: None,
                 is_dir: false,
                 attributes: None,
+                identity: None,
             }]
             .into(),
             total: 1,
