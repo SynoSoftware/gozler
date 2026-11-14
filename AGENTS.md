@@ -32,6 +32,16 @@ If it is not, reason through what each person affected needs, and choose the
 most sensible solution. Ask the owner only when a meaningful ambiguity remains
 that you cannot responsibly resolve yourself.
 
+## Everything and es.exe
+
+**Owner ruling: Everything is a reference, not a target.** gozler keeps
+es.exe's command line for existing scripts (see "The command line" under
+"Contracts"), but adds nothing only because Everything, es.exe or upstream
+goz has it. When Everything has a feature that helps a gozler user, or does
+something better than gozler, weigh it on that merit. gozler already does
+several things better, and copying another product for compatibility alone
+would bind gozler to that product's decisions.
+
 ## The window
 
 **Owner ruling: established behavior first.** Search behaves as Everything
