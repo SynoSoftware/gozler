@@ -28,7 +28,7 @@ use super::through::{LinkPaths, Target as LinkTarget, Through};
 use super::wildcard::{CodePointBuf, OneName, Wildcard};
 use crate::attributes::PackedAttributes;
 use crate::fold::fold;
-use crate::index::store::NameId;
+use crate::index::store::{NameId, NamePair};
 use crate::index::{EntryView, SeenBy, VolumeIndex};
 use crate::links::Links;
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
@@ -1981,37 +1981,48 @@ fn for_each_name_containing(
     if pairs.is_empty() {
         return;
     }
-    // Merge-walk: both the `memmem` hits and `pairs[id].folded.off` are
-    // ascending, so a forward cursor maps each hit to its name id in
-    // amortized O(1) with no per-hit binary search (which cache-thrashes at
-    // scale). The first hit seeds the cursor with one binary search so a
-    // rare term whose matches start deep in the arena doesn't pay a
-    // full-length forward scan.
+    let hay = index.folded_bytes();
+    let finder = memmem::Finder::new(needle);
+    // Both the hits and `pairs[id].folded.off` ascend, so each hit is looked
+    // up from the name of the last one ([`name_at`]).
     let mut cursor = 0usize;
-    let mut seeded = false;
-    // A name is a contiguous NUL-separated region, so repeated hits in one
-    // name are adjacent: a single "same as last" check dedups them.
-    let mut last_id = NameId::MAX;
-    for pos in memmem::Finder::new(needle).find_iter(index.folded_bytes()) {
-        let pos = pos as u32;
-        if !seeded {
-            cursor = pairs
-                .partition_point(|p| p.folded.off <= pos)
-                .saturating_sub(1);
-            seeded = true;
-        } else {
-            while cursor + 1 < pairs.len() && pairs[cursor + 1].folded.off <= pos {
-                cursor += 1;
-            }
-        }
-        let id = cursor as NameId;
-        if id == last_id {
-            continue; // the needle appears twice in one name
-        }
-        last_id = id;
-        if !found(id) {
+    let mut at = 0usize;
+    while let Some(found_at) = hay.get(at..).and_then(|rest| finder.find(rest)) {
+        let pos = at + found_at;
+        cursor = name_at(pairs, cursor, pos as u32);
+        if !found(cursor as NameId) {
             return;
         }
+        // A name is a NUL-terminated region, so the search resumes at the
+        // next name: a short needle like `e` occurs about three times in
+        // each name it is in, and finding the rest only to drop them was
+        // most of the pass. `max` moves past an empty needle, which matches
+        // at every position.
+        let name = pairs[cursor].folded;
+        at = (name.off as usize + usize::from(name.len) + 1).max(pos + 1);
+    }
+}
+
+/// The name whose folded bytes hold arena offset `pos`: the last of `pairs`
+/// from `from` on that starts at or before it, where `pairs[from]` does.
+///
+/// It tries the next name and the one after, which hold the next hit of a
+/// common needle, then gallops: strides that double, then a binary search
+/// between the last two. So a rare needle skips the names between two hits
+/// in a few probes, where a step through each name read the offsets of
+/// every name beside the arena.
+fn name_at(pairs: &[NamePair], from: usize, pos: u32) -> usize {
+    let starts_by = |i: usize| pairs[i].folded.off <= pos;
+    let mut lo = from;
+    let mut stride = 1;
+    loop {
+        let probe = lo + stride;
+        if probe >= pairs.len() || !starts_by(probe) {
+            let end = probe.min(pairs.len());
+            return lo + pairs[lo + 1..end].partition_point(|p| p.folded.off <= pos);
+        }
+        lo = probe;
+        stride *= 2;
     }
 }
 
@@ -2625,6 +2636,36 @@ mod tests {
         set_size(&mut idx, frn(103), 200);
         set_size(&mut idx, frn(104), 2 * 1024 * 1024);
         idx
+    }
+
+    /// The pass over the names finds each name that holds the needle once,
+    /// however often it holds it, in id order, and still finds the name
+    /// right after a match: what testing every name finds. Resuming one
+    /// byte too far, or galloping past a name, hides it.
+    #[test]
+    fn the_name_pass_finds_each_matching_name_once() {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        let names = ["eee.txt", "x", "be", "ee", "zzz", "eabc", "the end", "e"];
+        for (i, name) in names.iter().enumerate() {
+            idx.insert_enum(&enum_rec(frn(100 + i as u64), NTFS_ROOT_FRN, name, false));
+        }
+        let pairs = idx.name_pairs();
+        let folded = |id: usize| {
+            let name = pairs[id].folded;
+            &idx.folded_bytes()[name.off as usize..][..usize::from(name.len)]
+        };
+        for needle in [&b"e"[..], b"ee", b"zz", b"the end", b"q"] {
+            let mut found = Vec::new();
+            for_each_name_containing(&idx, needle, |id| {
+                found.push(id);
+                true
+            });
+            let every: Vec<NameId> = (0..pairs.len())
+                .filter(|&id| memmem::find(folded(id), needle).is_some())
+                .map(|id| id as NameId)
+                .collect();
+            assert_eq!(found, every, "{}", String::from_utf8_lossy(needle));
+        }
     }
 
     /// A clause of several name terms or `ext:` values scans the names for
