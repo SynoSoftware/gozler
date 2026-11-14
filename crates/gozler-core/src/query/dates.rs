@@ -165,10 +165,19 @@ fn period(value: &str, start: &QueryStart, field: DateField) -> Result<Period, Q
                 ("hours", 3_600),
                 ("days", 86_400),
                 ("weeks", 604_800),
+                ("h", 3_600),
+                ("d", 86_400),
+                ("w", 604_800),
             ] {
                 let Some(count) = duration.strip_suffix(unit) else {
                     continue;
                 };
+                // A letter alone also ends words such as `lastmonth`, so it
+                // is a unit only after a number.
+                let number = !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit());
+                if unit.len() == 1 && !number {
+                    continue;
+                }
                 let count = count
                     .parse::<u32>()
                     .ok()
@@ -189,10 +198,10 @@ fn period(value: &str, start: &QueryStart, field: DateField) -> Result<Period, Q
             }
             match calendar_period(&lower, today(), start.week_start).map_err(out_of_range)? {
                 Some(period) => period,
-                None => {
-                    let date = iso_date(value).ok_or_else(|| malformed(Malformed::Date))?;
-                    (date, date.tomorrow().map_err(out_of_range)?)
-                }
+                None => match iso_date(value) {
+                    Some(date) => (date, date.tomorrow().map_err(out_of_range)?),
+                    None => year_or_month(value).ok_or_else(|| malformed(Malformed::Date))?,
+                },
             }
         }
     };
@@ -258,9 +267,62 @@ fn iso_date(value: &str) -> Option<Date> {
     Date::new(year, month, day).ok()
 }
 
+/// The first day of the year `YYYY` or the month `YYYY-MM` writes, and the
+/// first day after it.
+fn year_or_month(value: &str) -> Option<(Date, Date)> {
+    let digits =
+        |text: &str, len: usize| text.len() == len && text.bytes().all(|b| b.is_ascii_digit());
+    let (year, month) = match value.split_once('-') {
+        Some((year, month)) if digits(month, 2) => (year, Some(month)),
+        Some(_) => return None,
+        None => (value, None),
+    };
+    if !digits(year, 4) {
+        return None;
+    }
+    let year = year.parse().ok()?;
+    let (first, length) = match month {
+        Some(month) => (
+            Date::new(year, month.parse().ok()?, 1).ok()?,
+            Span::new().months(1),
+        ),
+        None => (Date::new(year, 1, 1).ok()?, Span::new().years(1)),
+    };
+    Some((first, first.checked_add(length).ok()?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `7d`, `3h` and `2w` are `7days`, `3hours` and `2weeks`; `2026` is that
+    /// year and `2026-03` that month, from local midnight; a word that only
+    /// ends in such a letter, such as `lastmonth`, keeps its meaning.
+    #[test]
+    fn short_units_a_year_and_a_month() {
+        let start = start("2026-10-31T12:00:00Z", TimeZone::UTC);
+        for (short, long) in [("7d", "7days"), ("3h", "3hours"), ("last2w", "2weeks")] {
+            assert_eq!(range(short, &start), range(long, &start), "{short}");
+        }
+        assert_eq!(
+            range("2026", &start),
+            between("2026-01-01T00:00:00Z", "2027-01-01T00:00:00Z")
+        );
+        assert_eq!(
+            range("2026-03", &start),
+            between("2026-03-01T00:00:00Z", "2026-04-01T00:00:00Z")
+        );
+        assert_eq!(
+            range("lastmonth", &start),
+            between("2026-09-01T00:00:00Z", "2026-10-01T00:00:00Z")
+        );
+        for value in ["0d", "d", "2026-3", "2026-13", "26"] {
+            assert!(
+                date_range(value, &start, DateField::Modified).is_err(),
+                "{value}"
+            );
+        }
+    }
 
     /// US Eastern time as a POSIX rule, so the tests do not depend on the
     /// time zone database or the machine's zone: daylight saving from the

@@ -426,7 +426,8 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["dm", "datemodified", "date-modified"],
         function: Function::Date(DateField::Modified),
         example: "today",
-        help: "Date modified: `today`, `yesterday`, `YYYY-MM-DD`, `Nminutes`, `Nhours`, `Ndays`, `lastNdays`, `Nweeks`, \
+        help: "Date modified: `today`, `yesterday`, `YYYY-MM-DD`, `YYYY-MM`, `YYYY`, `Nminutes`, \
+               `Nhours` or `Nh`, `Ndays` or `Nd`, `lastNdays`, `Nweeks` or `Nw`, \
                or `thisweek`, `lastmonth`, `thisyear` and other calendar periods; also `<`, `<=`, `>`, \
                `>=` and ranges such as `2026-01-01..2026-03-31`; `unknown` finds items whose \
                date gozler does not know",
