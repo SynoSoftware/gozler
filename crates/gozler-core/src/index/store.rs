@@ -303,6 +303,12 @@ impl NameStore {
         self.head[id as usize]
     }
 
+    /// How many live entries bear name `id`.
+    #[inline]
+    pub(crate) fn refcount(&self, id: NameId) -> u32 {
+        self.refcount[id as usize]
+    }
+
     #[inline]
     pub(crate) fn set_chain_head(&mut self, id: NameId, e: EntryIdx) {
         self.head[id as usize] = e;

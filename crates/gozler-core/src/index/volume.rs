@@ -1857,6 +1857,13 @@ impl VolumeIndex {
         self.names.pairs()
     }
 
+    /// How many live entries bear name `id`: the length of its
+    /// [`Self::name_chain`], without walking it.
+    #[inline]
+    pub(crate) fn name_refcount(&self, id: NameId) -> u32 {
+        self.names.refcount(id)
+    }
+
     /// Iterates the live entries bearing name `id` (exact: no staleness
     /// filtering required).
     #[inline]

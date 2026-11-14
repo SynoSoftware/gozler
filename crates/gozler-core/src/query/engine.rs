@@ -1692,13 +1692,63 @@ pub(super) fn run_totals(
 }
 
 /// A folder-scoped query walks the scope's subtree instead of scanning the
-/// whole volume, up to this many visited entries. Past it (a near-volume
-/// scope), the walk aborts and the ordinary scan+ancestry-filter path runs:
-/// pointer-chasing millions of entries is slower than the SIMD arena scan.
-/// The cutoff makes a Downloads-sized scope independent of disk size: the
-/// scan path makes every candidate on the volume pay an ancestry check,
-/// while the walk touches only the folder.
+/// whole volume, which makes a Downloads-sized scope independent of disk
+/// size: the scan makes every candidate on the volume pay an ancestry check,
+/// while the walk touches only the folder. The walk goes on unconditionally
+/// up to this many visited entries, and past it only while it has visited no
+/// more entries than the scan would test ([`scan_cost`]): a rare term in a
+/// big folder scans the names instead, while a broad term, or a filter with
+/// no name to scan for, walks the folder. An entry walked and an entry
+/// scanned are weighed alike; upstream goz measured the walk the cheaper on a
+/// real volume even for a folder holding two thirds of it.
 const SUBTREE_WALK_MAX: usize = 200_000;
+
+/// How many entries the scan of `query` tests, for the scope walk to weigh
+/// itself against ([`SUBTREE_WALK_MAX`]): the entries bearing a name that
+/// contains a prefilter literal, whose ids go to `names` so the scan does not
+/// search the names again; none for a query that walks the path components
+/// first, whose cost shows only by walking, so the scope walk stops at its
+/// floor; or else every entry.
+fn scan_cost(index: &VolumeIndex, query: &CompiledQuery, names: &mut Option<Vec<NameId>>) -> usize {
+    if !query.match_case {
+        if let Some(needle) = query.prefilter.as_deref() {
+            let mut ids = Vec::new();
+            let mut entries = 0usize;
+            for_each_name_containing(index, needle, |id| {
+                entries += index.name_refcount(id) as usize;
+                ids.push(id);
+                true
+            });
+            *names = Some(ids);
+            return entries;
+        }
+        if query.component_literal.is_some() || path_candidate(query).is_some() {
+            return 0;
+        }
+    }
+    index.len()
+}
+
+/// The path term whose last component holds the longest literal, and that
+/// literal, which [`Scan::visit_path_candidates`] starts from.
+fn path_candidate(query: &CompiledQuery) -> Option<(&CompiledTerm, Vec<u8>)> {
+    query
+        .clauses
+        .iter()
+        .filter_map(|clause| {
+            let [term] = clause.terms.as_slice() else {
+                return None;
+            };
+            let Check::Text(Target::Path, matcher) = &term.check else {
+                return None;
+            };
+            (!term.negated)
+                .then(|| matcher.last_component_literal())
+                .flatten()
+                .map(|needle| (term, needle))
+        })
+        .max_by_key(|(_, needle)| needle.len())
+}
 
 /// Finds every match of `query` over `index` that `seen_by` sees, as
 /// unordered records whose keys are not set yet. Once `stop` is set, it
@@ -1711,6 +1761,29 @@ fn scan<'q, 'i>(
     scope: Option<EntryIdx>,
     seen_by: &'i SeenBy,
     stop: &'i AtomicBool,
+) -> Scan<'q, 'i> {
+    scan_with(
+        index,
+        mount_prefix,
+        query,
+        scope,
+        seen_by,
+        stop,
+        SUBTREE_WALK_MAX,
+    )
+}
+
+/// [`scan`], with a scope walked unconditionally up to `walk_floor` entries
+/// instead of [`SUBTREE_WALK_MAX`], so a test can make a small tree choose
+/// between walking and scanning.
+fn scan_with<'q, 'i>(
+    index: &'i VolumeIndex,
+    mount_prefix: &str,
+    query: &'q CompiledQuery,
+    scope: Option<EntryIdx>,
+    seen_by: &'i SeenBy,
+    stop: &'i AtomicBool,
+    walk_floor: usize,
 ) -> Scan<'q, 'i> {
     let mut scan = Scan::new(index, mount_prefix, query, seen_by, stop);
     // A start that the root's name fails matches nothing on this volume.
@@ -1733,10 +1806,22 @@ fn scan<'q, 'i>(
     // tracks the folder, not the volume. Membership is by construction, so
     // the candidates are tested without the scope (its ancestry walk is the
     // expensive part this path exists to avoid); every other predicate is
-    // identical to the scan paths below. Oversized scopes abort to those paths.
+    // identical to the scan paths below. A scope that grows costlier to walk
+    // than the scan aborts to the scan (see [`SUBTREE_WALK_MAX`]).
+    let mut prefilter_names: Option<Vec<NameId>> = None;
     if let Some(root) = scope {
-        let mut walk = index.subtree_entries(root);
-        for idx in walk.by_ref().take(SUBTREE_WALK_MAX) {
+        let mut cap = walk_floor;
+        let mut priced = false;
+        let mut walked_all = true;
+        for (visited, idx) in index.subtree_entries(root).enumerate() {
+            if visited >= cap && !priced {
+                priced = true;
+                cap = cap.max(scan_cost(index, query, &mut prefilter_names));
+            }
+            if visited >= cap {
+                walked_all = false;
+                break;
+            }
             if scan.stopped() {
                 return scan;
             }
@@ -1744,7 +1829,7 @@ fn scan<'q, 'i>(
                 scan.visit(idx, None);
             }
         }
-        if walk.next().is_none() {
+        if walked_all {
             return scan;
         }
         scan.records.clear();
@@ -1755,14 +1840,25 @@ fn scan<'q, 'i>(
     if !query.match_case
         && let Some(needle) = query.prefilter.as_deref()
     {
-        for_each_name_containing(index, needle, |id| {
+        let mut on_name = |id: NameId| {
             for idx in index.name_chain(id) {
                 if !index.is_synthetic(idx) {
                     scan.visit(idx, scope);
                 }
             }
             !scan.stopped()
-        });
+        };
+        // A scope walk that priced this scan already found the names.
+        match prefilter_names {
+            Some(ids) => {
+                for id in ids {
+                    if !on_name(id) {
+                        break;
+                    }
+                }
+            }
+            None => for_each_name_containing(index, needle, on_name),
+        }
         return scan;
     }
 
@@ -1781,22 +1877,7 @@ fn scan<'q, 'i>(
     }
 
     if !query.match_case
-        && let Some((term, needle)) = query
-            .clauses
-            .iter()
-            .filter_map(|clause| {
-                let [term] = clause.terms.as_slice() else {
-                    return None;
-                };
-                let Check::Text(Target::Path, matcher) = &term.check else {
-                    return None;
-                };
-                (!term.negated)
-                    .then(|| matcher.last_component_literal())
-                    .flatten()
-                    .map(|needle| (term, needle))
-            })
-            .max_by_key(|(_, needle)| needle.len())
+        && let Some((term, needle)) = path_candidate(query)
         && memmem::find(&root, &needle).is_none()
     {
         if scan.visit_path_candidates(term, &needle, scope) {
@@ -3764,6 +3845,33 @@ mod tests {
                 let scope = scoped.then(|| resolve_scope(&idx, b"repo", false).expect("repo exists"));
                 let totals = run_totals(&idx, r"C:\", &query, scope, &SeenBy::Everything, &AtomicBool::new(false)).expect("no size is known");
                 prop_assert_eq!(totals.count, page.total);
+            }
+
+            /// A scoped search finds the same entries however far its walk
+            /// goes before it prices the scan: walked to the end, or given
+            /// up for the names the pricing found, or for the scan that a
+            /// path term or a filter falls back to. A walk that kept its
+            /// records, or names reused from the pricing that missed some,
+            /// would change the answer only for big folders.
+            #[test]
+            fn a_scope_finds_the_same_walked_or_scanned(query in arb_query()) {
+                let idx = docs_index();
+                let query = match CompiledQuery::new(&query) {
+                    Err(QueryError::TooManyRegexes(_)) => return Ok(()),
+                    compiled => compiled.expect("under the term cap, with valid regexes"),
+                };
+                let scope = resolve_scope(&idx, b"repo", false).expect("repo exists");
+                let never = AtomicBool::new(false);
+                let found = |floor| {
+                    let scan = scan_with(&idx, r"C:\", &query, Some(scope), &SeenBy::Everything, &never, floor);
+                    let mut found: Vec<EntryIdx> = scan.records.iter().map(|r| r.idx()).collect();
+                    found.sort_unstable();
+                    found
+                };
+                let walked = found(usize::MAX);
+                for floor in [0, 1, 2, 5] {
+                    prop_assert_eq!(&found(floor), &walked, "floor {}", floor);
+                }
             }
 
             /// A search request arrives as JSON from the pipe, so any bytes
