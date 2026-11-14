@@ -209,19 +209,19 @@ pub struct CompiledQuery {
     /// path component that contains it. Drives the component walk of
     /// [`scan`] when no `prefilter` drives the arena scan.
     component_literal: Option<(u8, Vec<u8>)>,
-    /// The longest literal that every matching name contains, from a clause
-    /// of one positive name term, whole-word, word-start or name-start name
-    /// term, name wildcard (`.dll` of `*.dll`) or single `ext:` value
-    /// (`.ext`). Drives the folded-arena
-    /// prefilter scan; `None` when no clause offers one (then the query
-    /// iterates every entry).
+    /// Literals one of which every matching name contains, from the clause
+    /// whose every term is a positive name term, name wildcard (`.dll` of
+    /// `*.dll`) or `ext:` (`.ext` for each value): one for `report`, two for
+    /// `report|notes` or `ext:pdf;jpg`. Drives the folded-arena prefilter
+    /// scan; empty when no clause offers them (then the query iterates every
+    /// entry). [`CompiledClause::name_literals`] says which clause offers the
+    /// fewest.
     ///
-    /// No other clause supplies it: a clause of several terms or a negated
-    /// term lets through names without the literal, the text of a path term
-    /// can lie in any folder of the path, the literal of `*\docs\*` is
-    /// `\docs\`, which no name contains, and a regular expression is not a
-    /// literal.
-    prefilter: Option<Vec<u8>>,
+    /// No other clause supplies them: a negated term lets through names
+    /// without the literal, the text of a path term can lie in any folder of
+    /// the path, the literal of `*\docs\*` is `\docs\`, which no name
+    /// contains, and a regular expression is not a literal.
+    prefilter: Vec<Vec<u8>>,
     /// The scope the query was compiled for ([`Self::with_links`]) and the
     /// folder a search of it reads, or `None` to read every volume.
     scope: Option<(String, Option<String>)>,
@@ -365,15 +365,18 @@ impl CompiledQuery {
             }
         }
 
-        // Every match contains the prefilter, so scanning for it yields a
-        // superset of the matches that the clauses then verify. The first of
-        // equally long literals wins.
-        let mut prefilter: Option<Vec<u8>> = None;
-        for literal in clauses.iter().filter_map(CompiledClause::name_literal) {
-            if literal.len() > prefilter.as_ref().map_or(0, Vec::len) {
-                prefilter = Some(literal);
-            }
-        }
+        // Every match contains a literal of the prefilter, so scanning for
+        // them yields a superset of the matches that the clauses then verify.
+        // Fewer literals scan the names fewer times, and a longer shortest
+        // literal finds fewer names; the first of equal clauses wins.
+        let prefilter = clauses
+            .iter()
+            .filter_map(CompiledClause::name_literals)
+            .min_by_key(|literals| {
+                let shortest = literals.iter().map(Vec::len).min();
+                (literals.len(), std::cmp::Reverse(shortest))
+            })
+            .unwrap_or_default();
 
         // A clause whose every term one component decides reads its bits
         // instead of the full path. A clause that mixes in another path test
@@ -596,6 +599,10 @@ impl CompiledQuery {
 /// the terms past it test the full path.
 const MAX_COMPONENT_TERMS: usize = u64::BITS as usize;
 
+/// The most literals a prefilter scans the names for. Each is one pass over
+/// the folded names, so past a few, testing every name costs less.
+const MAX_PREFILTER_LITERALS: usize = 8;
+
 /// What a clause reads of an entry, in the order the scan has it: the
 /// entry's own columns, then its [`ComponentBits`], then its full path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -652,35 +659,43 @@ impl CompiledClause {
         })
     }
 
-    /// The literal every name that passes this clause contains, when the
-    /// clause is one positive name term, whole-word, word-start or name-start
-    /// name term, name wildcard or single extension.
-    fn name_literal(&self) -> Option<Vec<u8>> {
-        let [term] = self.terms.as_slice() else {
-            return None;
-        };
-        if term.negated {
+    /// Literals one of which every name that passes this clause contains,
+    /// at most [`MAX_PREFILTER_LITERALS`], when each of its terms is a
+    /// positive name term or name wildcard, which gives one, or an `ext:`
+    /// term, which gives `.ext` for each value. A literal that holds another
+    /// is left out, because every name that contains it contains the other.
+    fn name_literals(&self) -> Option<Vec<Vec<u8>>> {
+        let mut literals = Vec::new();
+        for term in &self.terms {
+            if term.negated {
+                return None;
+            }
+            match &term.check {
+                Check::Text(Target::Name, matcher) => literals.push(matcher.name_literal()?),
+                // An empty value stands for names with no extension, which
+                // hold no literal.
+                Check::Extension(exts)
+                    if !exts.is_empty() && exts.iter().all(|e| !e.is_empty()) =>
+                {
+                    literals.extend(exts.iter().map(|ext| [b".", ext.as_slice()].concat()));
+                }
+                _ => return None,
+            }
+        }
+        if literals.iter().any(Vec::is_empty) {
             return None;
         }
-        match &term.check {
-            Check::Text(Target::Name, matcher) => match matcher {
-                Matcher::Contains(finder)
-                | Matcher::WholeWord(finder)
-                | Matcher::WordStart(finder) => Some(finder.needle().to_vec()),
-                Matcher::Start(start) => Some(start.clone()),
-                Matcher::Wildcard(wildcard) => wildcard.longest_literal(),
-                Matcher::Ordered { terms, .. } => terms
-                    .iter()
-                    .max_by_key(|finder| finder.needle().len())
-                    .map(|finder| finder.needle().to_vec()),
-                Matcher::Regex(_) => None,
-            },
-            Check::Extension(exts) => match exts.as_slice() {
-                [ext] if !ext.is_empty() => Some([b".", ext.as_slice()].concat()),
-                _ => None,
-            },
-            _ => None,
+        literals.sort_unstable_by_key(Vec::len);
+        let mut kept: Vec<Vec<u8>> = Vec::new();
+        for literal in literals {
+            if !kept
+                .iter()
+                .any(|short| memmem::find(&literal, short).is_some())
+            {
+                kept.push(literal);
+            }
         }
+        (!kept.is_empty() && kept.len() <= MAX_PREFILTER_LITERALS).then_some(kept)
     }
 
     /// What the clause reads, then the cost of its dearest term: the order
@@ -960,6 +975,22 @@ fn holds_from(range: SizeRange, floor: u64) -> Option<bool> {
 }
 
 impl Matcher {
+    /// The literal every name this matcher passes contains, as a name term.
+    fn name_literal(&self) -> Option<Vec<u8>> {
+        match self {
+            Matcher::Contains(finder) | Matcher::WholeWord(finder) | Matcher::WordStart(finder) => {
+                Some(finder.needle().to_vec())
+            }
+            Matcher::Start(start) => Some(start.clone()),
+            Matcher::Wildcard(wildcard) => wildcard.longest_literal(),
+            Matcher::Ordered { terms, .. } => terms
+                .iter()
+                .max_by_key(|finder| finder.needle().len())
+                .map(|finder| finder.needle().to_vec()),
+            Matcher::Regex(_) => None,
+        }
+    }
+
     pub(super) fn matches(&self, text: &[u8], code_points: &mut CodePointBuf) -> bool {
         match self {
             Matcher::Contains(finder) => finder.find(text).is_some(),
@@ -1711,10 +1742,10 @@ const SUBTREE_WALK_MAX: usize = 200_000;
 /// floor; or else every entry.
 fn scan_cost(index: &VolumeIndex, query: &CompiledQuery, names: &mut Option<Vec<NameId>>) -> usize {
     if !query.match_case {
-        if let Some(needle) = query.prefilter.as_deref() {
+        if !query.prefilter.is_empty() {
             let mut ids = Vec::new();
             let mut entries = 0usize;
-            for_each_name_containing(index, needle, |id| {
+            for_each_name_containing_any(index, &query.prefilter, |id| {
                 entries += index.name_refcount(id) as usize;
                 ids.push(id);
                 true
@@ -1835,11 +1866,9 @@ fn scan_with<'q, 'i>(
         scan.records.clear();
     }
 
-    // Fast path: case-insensitive query with a usable literal → scan the
-    // folded arena for the prefilter literal and verify the rest per hit.
-    if !query.match_case
-        && let Some(needle) = query.prefilter.as_deref()
-    {
+    // Fast path: case-insensitive query with usable literals → scan the
+    // folded arena for each prefilter literal and verify the rest per hit.
+    if !query.match_case && !query.prefilter.is_empty() {
         let mut on_name = |id: NameId| {
             for idx in index.name_chain(id) {
                 if !index.is_synthetic(idx) {
@@ -1857,7 +1886,7 @@ fn scan_with<'q, 'i>(
                     }
                 }
             }
-            None => for_each_name_containing(index, needle, on_name),
+            None => for_each_name_containing_any(index, &query.prefilter, on_name),
         }
         return scan;
     }
@@ -1905,6 +1934,35 @@ fn scan_with<'q, 'i>(
         scan.visit(idx, scope);
     }
     scan
+}
+
+/// Calls `found` once with each name of the folded arena that contains one
+/// of `needles`, until it returns `false`: by [`for_each_name_containing`]
+/// for each needle, with a bit for each name so a name that holds two is
+/// found once.
+fn for_each_name_containing_any(
+    index: &VolumeIndex,
+    needles: &[Vec<u8>],
+    mut found: impl FnMut(NameId) -> bool,
+) {
+    if let [needle] = needles {
+        return for_each_name_containing(index, needle, found);
+    }
+    let mut seen = vec![0u64; index.name_pairs().len().div_ceil(64)];
+    let mut going = true;
+    for needle in needles {
+        for_each_name_containing(index, needle, |id| {
+            let (word, bit) = (id as usize / 64, 1u64 << (id % 64));
+            if seen[word] & bit == 0 {
+                seen[word] |= bit;
+                going = found(id);
+            }
+            going
+        });
+        if !going {
+            return;
+        }
+    }
 }
 
 /// Calls `found` with each name of the folded arena that contains `needle`,
@@ -2567,6 +2625,48 @@ mod tests {
         set_size(&mut idx, frn(103), 200);
         set_size(&mut idx, frn(104), 2 * 1024 * 1024);
         idx
+    }
+
+    /// A clause of several name terms or `ext:` values scans the names for
+    /// one literal of each, and finds what testing every entry finds. A
+    /// literal left out wrongly, such as one dropped as holding another it
+    /// does not hold, would hide matches without any error.
+    #[test]
+    fn a_union_prefilter_finds_what_testing_every_entry_finds() {
+        let mut idx = sample_index();
+        for (i, name) in ["report2.txt", "kernel32.dll", "x.jpg", "readme"]
+            .iter()
+            .enumerate()
+        {
+            idx.insert_enum(&enum_rec(frn(500 + i as u64), frn(100), name, false));
+        }
+        for (text, literals) in [
+            ("report|notes", 2),
+            ("*.pdf|*.jpg", 2),
+            ("ext:pdf;jpg", 2),
+            ("report|report2", 1),
+            ("ext:pdf;jpg|kernel", 3),
+            ("report|notes size:>1", 2),
+            ("!report", 0),
+            ("report|file:", 0),
+        ] {
+            let query = compiled(text);
+            assert_eq!(query.prefilter.len(), literals, "{text}");
+            let never = AtomicBool::new(false);
+            let seen = SeenBy::Everything;
+            let mut every = Scan::new(&idx, r"C:\", &query, &seen, &never);
+            for entry in idx.live_entries().filter(|&e| !idx.is_synthetic(e)) {
+                every.visit(entry, None);
+            }
+            let sorted = |scan: Scan<'_, '_>| {
+                let mut entries: Vec<_> = scan.records.iter().map(|r| r.idx()).collect();
+                entries.sort_unstable();
+                entries
+            };
+            let found = sorted(scan(&idx, r"C:\", &query, None, &seen, &never));
+            assert_eq!(found, sorted(every), "{text}");
+            assert!(!found.is_empty() || literals == 0, "{text}");
+        }
     }
 
     /// A case-sensitive scope follows the exact names down the child chains:
