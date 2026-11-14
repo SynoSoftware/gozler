@@ -11,8 +11,11 @@
 //! and 140 give a twentieth of them. The empty search matches every entry.
 //! The heap is counted by this program's allocator, above the built index.
 //!
+//! With `sums`, the search also counts every match's files, folders and
+//! sizes, as the window's first chunk asks.
+//!
 //! Usage: `cargo run --release -p gozler-daemon --example deep_export --
-//! <branches> <name|path|merge> [limit]`
+//! <branches> <name|path|merge> [limit|all] [sums]`
 
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::proto::{Rows, SentFolders, encode_page};
@@ -207,14 +210,18 @@ fn peak_since(base: usize) -> usize {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: deep_export <branches> <name|path|merge> [limit]";
+    let usage = "usage: deep_export <branches> <name|path|merge> [limit|all] [sums]";
     let branches: u64 = args.get(1).and_then(|b| b.parse().ok()).expect(usage);
     let key = match args.get(2).map(String::as_str) {
         Some("name" | "merge") => SortKey::Name,
         Some("path") => SortKey::Path,
         _ => panic!("{usage}"),
     };
-    let limit: Option<u32> = args.get(3).map(|l| l.parse().expect(usage));
+    let limit: Option<u32> = args
+        .get(3)
+        .filter(|l| *l != "all")
+        .map(|l| l.parse().expect(usage));
+    let want_sums = args.get(4).is_some_and(|s| s == "sums");
     let sort = SortSpec {
         key,
         dir: SortDir::Asc,
@@ -262,7 +269,7 @@ fn main() {
         want_created: false,
         want_attributes: false,
         want_identity: false,
-        want_sums: false,
+        want_sums,
     };
 
     // The scan under the volume's index read lock, the sort without it, and
@@ -302,7 +309,7 @@ fn main() {
     let peak = lock_peak.max(peak_since(base));
 
     println!(
-        "{total} matches, sort {key:?}, limit {limit:?}\n\
+        "{total} matches, sort {key:?}, limit {limit:?}, sums {want_sums}\n\
          scan under the lock {scan_s:.3} s, order without it {order_s:.3} s, \
          rows under the lock again {read_s:.3} s; peak {:.1} MB\n\
          pages: {send_s:.2} s, longest page under the lock {page_lock_s:.3} s, \
