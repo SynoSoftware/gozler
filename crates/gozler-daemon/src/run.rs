@@ -23,6 +23,23 @@ pub(crate) fn start_engine() -> Result<Supervisor> {
     .context("starting the volume supervisor")
 }
 
+/// Returns to Windows the memory freed more than mimalloc's purge delay ago,
+/// for the whole process. The server calls it just past that delay after
+/// each request, and the supervisor on every scan for what the tails free.
+///
+/// mimalloc keeps freed memory for its default delay of 1 s before it
+/// returns it, and only an allocation or a collect after that returns it, so
+/// an idle gozlerd would keep the buffers of its last search. Purging at once
+/// instead (`purge_delay` 0) measured 16 to 28 % more CPU for broad searches
+/// repeated over 2 million entries (`query_2M_broad_none`), because each
+/// search commits again what the last one gave back; with the delay, the
+/// searches a person types in quick succession reuse it.
+pub(crate) fn return_freed_memory() {
+    // SAFETY: mi_collect takes no pointers and is documented safe to call
+    // from any thread at any time.
+    unsafe { libmimalloc_sys::mi_collect(false) };
+}
+
 /// Best-effort post-bootstrap memory settling, which the supervisor runs once
 /// no volume is `Bootstrapping`. Never fatal: logs and continues.
 ///

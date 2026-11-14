@@ -72,7 +72,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync"
 # measured again.
 mimalloc = "0.1"
 # mi_collect: return freed bootstrap memory to the OS before pinning the
-# working set (the pin floors the current RSS, so purge first).
+# working set (the pin floors the current RSS, so purge first), and return
+# freed memory on each supervisor scan (`run::return_freed_memory`).
 libmimalloc-sys = { version = "0.1", features = ["extended"] }
 windows-service = "0.8"
 # ui: the window's Win32 calls, with the COM interfaces that windows-sys lacks

@@ -72,6 +72,9 @@ const CONNECT_RETRY_PAUSE: Duration = Duration::from_millis(10);
 /// At most one log line per this period for failed connects, and one for
 /// clients dropped at [`MAX_CONNECTIONS`] (see [`Throttle`]).
 const WARN_EVERY: Duration = Duration::from_secs(60);
+/// How long after a request ends gozlerd returns its freed memory: just past
+/// mimalloc's default purge delay of 1 s (see `run::return_freed_memory`).
+const RETURN_MEMORY_AFTER: Duration = Duration::from_millis(1_100);
 /// How often to try the pipe name again while another process holds it.
 const CLAIM_RETRY_EVERY: Duration = Duration::from_secs(2);
 
@@ -387,6 +390,12 @@ async fn handle_connection(
             // its next emit.
             drop(rx);
             let unidentified = encoder.await.context("request task panicked")?;
+            // The request's buffers are free now; mimalloc returns them once
+            // its purge delay has passed and something collects.
+            tokio::spawn(async {
+                tokio::time::sleep(RETURN_MEMORY_AFTER).await;
+                crate::run::return_freed_memory();
+            });
             if let Some(error) = unidentified
                 && !unidentified_logged
             {

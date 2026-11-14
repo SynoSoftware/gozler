@@ -1036,6 +1036,7 @@ fn scan_loop(fleet: &mut Fleet, stop: &StopFlag) {
         // scan interval after its start, the grace `poll_revival` assumes.
         fleet.discover();
         fleet.settle_once_indexed();
+        crate::run::return_freed_memory();
         next_scan = Instant::now() + SCAN_INTERVAL;
     }
 }

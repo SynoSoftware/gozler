@@ -116,23 +116,9 @@ enum ListChange {
     },
 }
 
-/// Purge freed memory immediately, because delayed purging needs later
-/// allocator activity that an idle daemon may never supply. Explicit
-/// allocator settings keep their values.
-#[cfg(windows)]
-fn tune_allocator() {
-    // Bundled mimalloc's mi_option_purge_delay; the sys crate omits its constant.
-    const PURGE_DELAY: i32 = 15;
-    // SAFETY: the option is valid and startup precedes the daemon's worker threads.
-    unsafe {
-        libmimalloc_sys::mi_option_set_default(PURGE_DELAY, 0);
-    }
-}
-
 #[cfg(windows)]
 fn main() -> std::process::ExitCode {
     gozler_core::escompat::set_linked(gozler_winfs::program_linked());
-    tune_allocator();
     let cli = Cli::parse();
     let result = match cli.command {
         Command::Scan { query } => run_scan(query),
@@ -387,42 +373,4 @@ fn run_demo_query(scans: &[bootstrap::BootstrappedVolume], query: &str) -> anyho
         }
     }
     Ok(())
-}
-
-#[cfg(all(test, windows))]
-mod tests {
-    #[test]
-    fn allocator_purges_by_default_and_preserves_an_explicit_delay() {
-        const EXPECTED: &str = "GOZLER_TEST_PURGE_DELAY";
-        if let Ok(expected) = std::env::var(EXPECTED) {
-            super::tune_allocator();
-            // SAFETY: mi_option_purge_delay is a valid option and reading it takes no pointers.
-            let actual = unsafe { libmimalloc_sys::mi_option_get(15) };
-            assert_eq!(actual, expected.parse::<i32>().unwrap());
-            return;
-        }
-
-        // Allocator options are process-global and read the environment at startup.
-        for (delay, expected) in [(None, "0"), (Some("1000"), "1000")] {
-            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-            command.args([
-                "--exact",
-                "tests::allocator_purges_by_default_and_preserves_an_explicit_delay",
-                "--nocapture",
-            ]);
-            command.env(EXPECTED, expected);
-            command.env_remove("MIMALLOC_PURGE_DELAY");
-            command.env_remove("MIMALLOC_RESET_DELAY");
-            if let Some(delay) = delay {
-                command.env("MIMALLOC_PURGE_DELAY", delay);
-            }
-            let output = command.output().unwrap();
-            assert!(
-                output.status.success(),
-                "delay {delay:?}: {}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-        }
-    }
 }
