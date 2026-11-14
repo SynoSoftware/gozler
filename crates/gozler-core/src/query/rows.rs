@@ -50,6 +50,7 @@ use core::cmp::Ordering;
 use core::ops::Deref;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 mod snapshot;
 
@@ -908,7 +909,9 @@ impl<V: IndexedVolume> ResultRows<V> {
     /// without one, for the rows `spec` asks for, as `viewer` sees them, and
     /// drops the volumes it does not search. A volume whose index changed
     /// between its two holds gives no rows, and the answer says it is
-    /// incomplete.
+    /// incomplete. Once `stop` is set, the search stops testing entries and
+    /// its answer is short; the caller sets it when no one waits for that
+    /// answer any more.
     ///
     /// # Errors
     ///
@@ -919,6 +922,7 @@ impl<V: IndexedVolume> ResultRows<V> {
         scope: Option<&str>,
         spec: RowsSpec,
         viewer: Viewer<'_>,
+        stop: &AtomicBool,
     ) -> Result<Self, NotIndexed> {
         // The offset applies after the volumes merge, so each volume keeps
         // the rows up to the limit's end.
@@ -937,6 +941,7 @@ impl<V: IndexedVolume> ResultRows<V> {
                     per_volume_limit,
                     spec.sums,
                     seen_by,
+                    stop,
                 )
             },
         );
@@ -1034,7 +1039,8 @@ impl<V: IndexedVolume> ResultRows<V> {
 /// The totals of every match of `query` over `volumes` below `scope`, an
 /// absolute folder, or everywhere without one, that `viewer` sees. Each
 /// volume sums its matches under one hold from the sizes its index holds, so
-/// no row is made: `-get-folder-size C:\` covers the whole volume.
+/// no row is made: `-get-folder-size C:\` covers the whole volume. `stop`
+/// is as in [`ResultRows::search`].
 ///
 /// # Errors
 ///
@@ -1045,13 +1051,14 @@ pub fn search_totals<V: IndexedVolume>(
     query: &CompiledQuery,
     scope: Option<&str>,
     viewer: Viewer<'_>,
+    stop: &AtomicBool,
 ) -> Result<SearchTotals, TotalsError> {
     let (per_volume, coverage) = run_held(
         targets(volumes, query.search_scope(scope).as_deref())?,
         query.match_case(),
         viewer,
         |index, mount_prefix, scope, seen_by| {
-            run_totals(index, mount_prefix, query, scope, seen_by)
+            run_totals(index, mount_prefix, query, scope, seen_by, stop)
         },
     );
     let mut totals = Totals::default();
@@ -1205,8 +1212,15 @@ pub fn run_query(
         limit,
         sums: false,
     };
-    let mut reply = ResultRows::search(vec![volume], query, scope, spec, Viewer::Everything)
-        .expect("the scope is on the volume");
+    let mut reply = ResultRows::search(
+        vec![volume],
+        query,
+        scope,
+        spec,
+        Viewer::Everything,
+        &AtomicBool::new(false),
+    )
+    .expect("the scope is on the volume");
     let mut rows = Vec::new();
     reply.page(usize::MAX, |row, names| {
         let mut path = Vec::new();
@@ -1331,7 +1345,7 @@ mod tests {
                 limit: None,
                 sums: false,
             };
-            let (snapshot, kept) = ResultRows::search(volumes.clone(), &query, None, first, Viewer::Everything)
+            let (snapshot, kept) = ResultRows::search(volumes.clone(), &query, None, first, Viewer::Everything, &AtomicBool::new(false))
                 .expect("no scope")
                 .into_snapshot()
                 .expect("at most four volumes");
@@ -1370,7 +1384,7 @@ mod tests {
                     .collect();
 
                 let spec = RowsSpec { sort, offset: 0, limit: None, sums: false };
-                let mut reply = ResultRows::search(volumes.clone(), &query, None, spec, Viewer::Everything).expect("no scope");
+                let mut reply = ResultRows::search(volumes.clone(), &query, None, spec, Viewer::Everything, &AtomicBool::new(false)).expect("no scope");
                 let mut merged = Vec::new();
                 while reply.page(usize::MAX, |row, names| {
                     let mut path = Vec::new();
@@ -1478,8 +1492,15 @@ mod tests {
             limit: None,
             sums: false,
         };
-        let mut rows =
-            ResultRows::search(volumes, &query, None, spec, Viewer::Everything).expect("no scope");
+        let mut rows = ResultRows::search(
+            volumes,
+            &query,
+            None,
+            spec,
+            Viewer::Everything,
+            &AtomicBool::new(false),
+        )
+        .expect("no scope");
         taken.borrow_mut().clear();
         let mut names = Vec::new();
         let more = rows.page(usize::MAX, |row, _| {
@@ -1520,8 +1541,15 @@ mod tests {
             limit: None,
             sums: true,
         };
-        let rows = ResultRows::search(vec![plain], &query, None, spec, Viewer::Everything)
-            .expect("no scope");
+        let rows = ResultRows::search(
+            vec![plain],
+            &query,
+            None,
+            spec,
+            Viewer::Everything,
+            &AtomicBool::new(false),
+        )
+        .expect("no scope");
         let sums = rows.sums().expect("the search asked for sums");
         assert_eq!(
             (sums.files, sums.file_bytes, sums.files_without_size),
@@ -1591,8 +1619,15 @@ mod tests {
             sums: false,
         };
         let search = || {
-            ResultRows::search(volumes.clone(), &query, None, spec, Viewer::Everything)
-                .expect("no scope")
+            ResultRows::search(
+                volumes.clone(),
+                &query,
+                None,
+                spec,
+                Viewer::Everything,
+                &AtomicBool::new(false),
+            )
+            .expect("no scope")
         };
         let mut reply = Vec::new();
         let mut rows = search();
@@ -1663,8 +1698,15 @@ mod tests {
             limit: None,
             sums: false,
         };
-        let rows = ResultRows::search(vec![volume.clone()], &query, None, spec, Viewer::Everything)
-            .expect("no scope");
+        let rows = ResultRows::search(
+            vec![volume.clone()],
+            &query,
+            None,
+            spec,
+            Viewer::Everything,
+            &AtomicBool::new(false),
+        )
+        .expect("no scope");
         let (snapshot, kept) = rows.into_snapshot().expect("one volume");
         // b.txt, the second file the helper makes after the folders.
         let b = Frn::ntfs(FOLDERS.len() as u64 + 1 + 100, 1);
@@ -1783,7 +1825,8 @@ mod tests {
             sums: true,
         };
         let mut rows =
-            ResultRows::search(volumes, query, scope, spec, viewer).expect("on a volume");
+            ResultRows::search(volumes, query, scope, spec, viewer, &AtomicBool::new(false))
+                .expect("on a volume");
         let sums = rows.sums().expect("the search asked for sums");
         let mut found = Vec::new();
         while rows.page(usize::MAX, |row, names| {
@@ -1884,7 +1927,13 @@ mod tests {
 
         let txt = compiled("txt", false);
         let totals = |viewer| {
-            let found = search_totals(vec![plain(&index, &mounts)], &txt, None, viewer);
+            let found = search_totals(
+                vec![plain(&index, &mounts)],
+                &txt,
+                None,
+                viewer,
+                &AtomicBool::new(false),
+            );
             let totals = found.expect("no scope, no overflow").totals;
             (totals.count, totals.size)
         };
@@ -1959,8 +2008,15 @@ mod tests {
         };
         let txt = compiled("txt", false);
         let viewer = Viewer::Filtered(&may_list);
-        let mut rows =
-            ResultRows::search(vec![volume.clone()], &txt, None, spec, viewer).expect("no scope");
+        let mut rows = ResultRows::search(
+            vec![volume.clone()],
+            &txt,
+            None,
+            spec,
+            viewer,
+            &AtomicBool::new(false),
+        )
+        .expect("no scope");
         assert_eq!(rows.total(), 2, "a.txt and b.txt");
         {
             let mut index = volume.index.write().expect("no test panics holding it");

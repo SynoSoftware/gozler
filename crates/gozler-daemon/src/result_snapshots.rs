@@ -132,6 +132,7 @@ mod tests {
     use gozler_core::scope::VolumeMounts;
     use gozler_core::types::{Frn, SortKey, SortSpec};
     use gozler_core::usn::record::{ParsedUsnRecord, USN_REASON_FILE_CREATE};
+    use std::sync::atomic::AtomicBool;
 
     /// A volume of `files` files at its root.
     struct Files {
@@ -181,8 +182,15 @@ mod tests {
             limit: None,
             sums: false,
         };
-        let found = ResultRows::search(vec![volume], &query, None, spec, Viewer::Everything)
-            .expect("no scope");
+        let found = ResultRows::search(
+            vec![volume],
+            &query,
+            None,
+            spec,
+            Viewer::Everything,
+            &AtomicBool::new(false),
+        )
+        .expect("no scope");
         let snapshot = found.into_snapshot().expect("one volume").0;
         assert_eq!(snapshot.total(), rows as u64);
         Arc::new(snapshot)

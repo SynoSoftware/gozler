@@ -26,6 +26,7 @@ use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
 use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::hint::black_box;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 // Deep, long-named tree (WinSxS / node_modules-like) so path reconstruction pays
 // a realistic ~6-hop parent walk per file, not the 2-3 hops a flat tree gives.
@@ -391,7 +392,15 @@ fn search_rows(idx: &VolumeIndex, query: &CompiledQuery, viewer: Viewer<'_>) -> 
         limit: None,
         sums: false,
     };
-    let rows = ResultRows::search(vec![volume], query, None, spec, viewer).expect("no scope");
+    let rows = ResultRows::search(
+        vec![volume],
+        query,
+        None,
+        spec,
+        viewer,
+        &AtomicBool::new(false),
+    )
+    .expect("no scope");
     read_pages(rows)
 }
 
@@ -446,8 +455,15 @@ fn sort_by_search(volume: &Arc<BenchVolume>, query: &CompiledQuery, sort: SortSp
         limit: Some(CHUNK_ROWS),
         sums: true,
     };
-    let rows = ResultRows::search(vec![volume.clone()], query, None, spec, Viewer::Everything)
-        .expect("no scope");
+    let rows = ResultRows::search(
+        vec![volume.clone()],
+        query,
+        None,
+        spec,
+        Viewer::Everything,
+        &AtomicBool::new(false),
+    )
+    .expect("no scope");
     read_pages(rows)
 }
 
@@ -496,6 +512,7 @@ fn bench_sort_change(c: &mut Criterion<measure::Measure>) {
         None,
         by_name,
         Viewer::Everything,
+        &AtomicBool::new(false),
     )
     .expect("no scope")
     .into_snapshot()

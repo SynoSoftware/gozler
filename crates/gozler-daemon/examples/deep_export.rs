@@ -28,7 +28,7 @@ use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_RE
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::RefCell;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
 /// The system allocator, counting the bytes it holds and their peak.
@@ -281,6 +281,7 @@ fn main() {
         None,
         wanted.spec(),
         Viewer::Everything,
+        &AtomicBool::new(false),
     )
     .expect("the search has no scope");
     let search_s = searching.elapsed().as_secs_f64();

@@ -38,6 +38,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::ops::Range;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// How many matches are files and how many are folders, and the space each
 /// kind takes. The files' sum adds the sizes that are known and counts the
@@ -1400,7 +1401,8 @@ impl<'a> Compared<'a> {
 /// after it merges the volumes, so an offset here would page each volume on
 /// its own. With `sums`, the rows also carry every match's [`MatchSums`],
 /// from the same scan. Only the entries `seen_by` sees match, and their keys
-/// hold what it may read.
+/// hold what it may read. Once `stop` is set, the scan ends and no match is
+/// kept.
 ///
 /// The common case, a case-insensitive query with a name literal, scans the
 /// index's contiguous folded-name arena with a single prebuilt `memmem`
@@ -1419,14 +1421,19 @@ pub(crate) fn find_matches(
     limit: Option<u32>,
     sums: bool,
     seen_by: &SeenBy,
+    stop: &AtomicBool,
 ) -> Matches {
     let Scan {
-        records,
+        mut records,
         folders,
         folder_names,
         scope,
         ..
-    } = scan(index, mount_prefix, query, scope, seen_by);
+    } = scan(index, mount_prefix, query, scope, seen_by, stop);
+    if stop.load(Ordering::Relaxed) {
+        // No one reads a stopped search, so its matches are not ordered.
+        records.clear();
+    }
     let origin = Origin {
         instance: index.instance(),
         reuse_mark: index.reuse_mark(),
@@ -1666,8 +1673,9 @@ pub(super) fn run_totals(
     query: &CompiledQuery,
     scope: Option<EntryIdx>,
     seen_by: &SeenBy,
+    stop: &AtomicBool,
 ) -> Result<Totals, SizeOverflow> {
-    let records = scan(index, mount_prefix, query, scope, seen_by).records;
+    let records = scan(index, mount_prefix, query, scope, seen_by, stop).records;
     let mut totals = Totals {
         count: records.len() as u64,
         size: 0,
@@ -1693,15 +1701,18 @@ pub(super) fn run_totals(
 const SUBTREE_WALK_MAX: usize = 200_000;
 
 /// Finds every match of `query` over `index` that `seen_by` sees, as
-/// unordered records whose keys are not set yet.
+/// unordered records whose keys are not set yet. Once `stop` is set, it
+/// tests no more entries and returns the matches found so far; the caller
+/// then sends them to no one.
 fn scan<'q, 'i>(
     index: &'i VolumeIndex,
     mount_prefix: &str,
     query: &'q CompiledQuery,
     scope: Option<EntryIdx>,
     seen_by: &'i SeenBy,
+    stop: &'i AtomicBool,
 ) -> Scan<'q, 'i> {
-    let mut scan = Scan::new(index, mount_prefix, query, seen_by);
+    let mut scan = Scan::new(index, mount_prefix, query, seen_by, stop);
     // A start that the root's name fails matches nothing on this volume.
     let root = root_name(mount_prefix);
     let root = if query.match_case {
@@ -1726,6 +1737,9 @@ fn scan<'q, 'i>(
     if let Some(root) = scope {
         let mut walk = index.subtree_entries(root);
         for idx in walk.by_ref().take(SUBTREE_WALK_MAX) {
+            if scan.stopped() {
+                return scan;
+            }
             if !index.is_synthetic(idx) {
                 scan.visit(idx, None);
             }
@@ -1747,7 +1761,7 @@ fn scan<'q, 'i>(
                     scan.visit(idx, scope);
                 }
             }
-            true
+            !scan.stopped()
         });
         return scan;
     }
@@ -1801,6 +1815,9 @@ fn scan<'q, 'i>(
         scan.records.reserve_exact(index.len());
     }
     for idx in index.live_entries() {
+        if scan.stopped() {
+            break;
+        }
         if index.is_synthetic(idx) {
             continue;
         }
@@ -1891,6 +1908,8 @@ struct Scan<'q, 'i> {
     /// The folder the matches are in, set by [`scan`]; `None` for the whole
     /// volume.
     scope: Option<EntryIdx>,
+    /// Set when the request is stopped, because its client left.
+    stop: &'i AtomicBool,
 }
 
 impl<'q, 'i> Scan<'q, 'i> {
@@ -1899,6 +1918,7 @@ impl<'q, 'i> Scan<'q, 'i> {
         mount_prefix: &str,
         query: &'q CompiledQuery,
         seen_by: &'i SeenBy,
+        stop: &'i AtomicBool,
     ) -> Self {
         let mut folder_names = ResultNames::default();
         let form = if query.match_case {
@@ -1939,11 +1959,22 @@ impl<'q, 'i> Scan<'q, 'i> {
             scratch,
             records: Vec::new(),
             scope: None,
+            stop,
         }
     }
 
-    /// Keeps entry `idx` as a candidate if it passes every clause.
+    /// Whether the request was stopped: a relaxed load, cheap enough for
+    /// every candidate.
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Keeps entry `idx` as a candidate if it passes every clause, unless
+    /// the request was stopped.
     fn visit(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) {
+        if self.stopped() {
+            return;
+        }
         if let Some(record) = self.evaluate(idx, scope) {
             self.records.push(record);
         }
@@ -2611,9 +2642,18 @@ mod tests {
         idx.set_folder_descriptor(frn(101), b"hidden");
         let seen_by = SeenBy::Filtered(idx.listable(&|descriptor| descriptor == b"open"));
         let report = compiled("child:report");
-        assert!(scan(&idx, "", &report, None, &seen_by).records.is_empty());
+        assert!(
+            scan(&idx, "", &report, None, &seen_by, &AtomicBool::new(false))
+                .records
+                .is_empty()
+        );
         let notes = compiled("child:*.txt");
-        assert_eq!(scan(&idx, "", &notes, None, &seen_by).records.len(), 1);
+        assert_eq!(
+            scan(&idx, "", &notes, None, &seen_by, &AtomicBool::new(false))
+                .records
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -2704,7 +2744,15 @@ mod tests {
         );
 
         let docs = resolve_scope(&idx, b"docs", false).unwrap();
-        let totals = run_totals(&idx, "", &parsed, Some(docs), &SeenBy::Everything).unwrap();
+        let totals = run_totals(
+            &idx,
+            "",
+            &parsed,
+            Some(docs),
+            &SeenBy::Everything,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert_eq!((totals.count, totals.size), (3, 4096 + 200));
     }
 
@@ -3487,8 +3535,9 @@ mod tests {
             .unwrap();
             let query = CompiledQuery::with_links(&parsed, &links, None).unwrap();
             let seen = SeenBy::Everything;
-            let actual = scan(&index, r"C:\", &query, None, &seen);
-            let mut full = Scan::new(&index, r"C:\", &query, &seen);
+            let never = AtomicBool::new(false);
+            let actual = scan(&index, r"C:\", &query, None, &seen, &never);
+            let mut full = Scan::new(&index, r"C:\", &query, &seen, &never);
             for entry in index
                 .live_entries()
                 .filter(|&entry| !index.is_synthetic(entry))
@@ -3713,7 +3762,7 @@ mod tests {
                 };
                 let page = run_query(&idx, r"C:\", &query, scoped.then_some(r"C:\repo"), SortSpec::default(), None);
                 let scope = scoped.then(|| resolve_scope(&idx, b"repo", false).expect("repo exists"));
-                let totals = run_totals(&idx, r"C:\", &query, scope, &SeenBy::Everything).expect("no size is known");
+                let totals = run_totals(&idx, r"C:\", &query, scope, &SeenBy::Everything, &AtomicBool::new(false)).expect("no size is known");
                 prop_assert_eq!(totals.count, page.total);
             }
 
@@ -3740,7 +3789,7 @@ mod tests {
                 if let Ok(Request::Search(search)) = decode_request(&json)
                     && let Ok(query) = CompiledQuery::new(&search.query)
                 {
-                    let _ = run_totals(&docs_index(), r"C:\", &query, None, &SeenBy::Everything);
+                    let _ = run_totals(&docs_index(), r"C:\", &query, None, &SeenBy::Everything, &AtomicBool::new(false));
                 }
             }
         }
@@ -4029,6 +4078,7 @@ mod tests {
                 None,
                 true,
                 &SeenBy::Everything,
+                &AtomicBool::new(false),
             )
             .origin
             .sums
@@ -4068,6 +4118,7 @@ mod tests {
                 None,
                 false,
                 &SeenBy::Everything,
+                &AtomicBool::new(false),
             )
             .order()
         };
@@ -4104,6 +4155,7 @@ mod tests {
             Some(3),
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order();
         idx.apply_batch(&[delete(frn(103))]);
@@ -4132,6 +4184,7 @@ mod tests {
             None,
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order();
         let notes = idx.head_of(frn(103));
@@ -4164,6 +4217,7 @@ mod tests {
             None,
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order();
         let mut last = frn(103);
@@ -4213,6 +4267,7 @@ mod tests {
             None,
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order()
         .read_rows(&idx, &SeenBy::Everything)
@@ -4249,6 +4304,7 @@ mod tests {
             None,
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order()
         .read_rows(&idx, &SeenBy::Everything)
@@ -4278,6 +4334,7 @@ mod tests {
             None,
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order()
         .read_rows(&idx, &SeenBy::Everything)
@@ -4312,6 +4369,7 @@ mod tests {
             None,
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order()
         .read_rows(&idx, &SeenBy::Everything)
@@ -4361,6 +4419,7 @@ mod tests {
             None,
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order()
         .read_rows(&idx, &SeenBy::Everything)
@@ -4391,6 +4450,7 @@ mod tests {
             None,
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order()
         .read_rows(&idx, &SeenBy::Everything)
@@ -4427,6 +4487,7 @@ mod tests {
                             limit,
                             false,
                             &SeenBy::Everything,
+                            &AtomicBool::new(false),
                         )
                         .order()
                         .read_rows(idx, &SeenBy::Everything)
@@ -4479,6 +4540,7 @@ mod tests {
                         Some(3),
                         false,
                         &SeenBy::Everything,
+                        &AtomicBool::new(false),
                     )
                     .order()
                     .read_rows(idx, &SeenBy::Everything)
@@ -4512,6 +4574,7 @@ mod tests {
             None,
             false,
             &SeenBy::Everything,
+            &AtomicBool::new(false),
         )
         .order()
         .read_rows(&idx, &SeenBy::Everything)
@@ -4596,7 +4659,7 @@ mod tests {
 
             let parsed = compiled("");
             for sort in all_sorts() {
-                let ordered = find_matches(&idx, r"C:\", &parsed, None, sort, None, false, &SeenBy::Everything).order();
+                let ordered = find_matches(&idx, r"C:\", &parsed, None, sort, None, false, &SeenBy::Everything, &AtomicBool::new(false)).order();
                 let everything = SeenBy::Everything;
                 let ranked = |record| Ranked { index: &idx, seen_by: &everything, sort, record };
                 for &a in &ordered.records {

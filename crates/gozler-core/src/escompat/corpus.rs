@@ -26,6 +26,7 @@ use crate::scope::VolumeMounts;
 use crate::types::Frn;
 use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 
 /// One entry of the fixture, by full path.
 enum Entry {
@@ -972,9 +973,15 @@ fn answer(volumes: &[Volume], search: &SearchRequest) -> Result<Vec<Response>, S
     let volumes: Vec<&Volume> = volumes.iter().collect();
     match &search.returns {
         Returns::Rows(wanted) => {
-            let mut rows =
-                ResultRows::search(volumes, &query, scope, wanted.spec(), Viewer::Everything)
-                    .map_err(|e| e.to_string())?;
+            let mut rows = ResultRows::search(
+                volumes,
+                &query,
+                scope,
+                wanted.spec(),
+                Viewer::Everything,
+                &AtomicBool::new(false),
+            )
+            .map_err(|e| e.to_string())?;
             let mut sent = SentFolders::default();
             let mut names = ResultNames::default();
             let mut pages = Vec::new();
@@ -988,8 +995,14 @@ fn answer(volumes: &[Volume], search: &SearchRequest) -> Result<Vec<Response>, S
         }
         Returns::ResultSnapshot { .. } => unreachable!("gozler never asks for a result snapshot"),
         Returns::Totals => {
-            let totals = search_totals(volumes, &query, scope, Viewer::Everything)
-                .map_err(|e| e.to_string())?;
+            let totals = search_totals(
+                volumes,
+                &query,
+                scope,
+                Viewer::Everything,
+                &AtomicBool::new(false),
+            )
+            .map_err(|e| e.to_string())?;
             Ok(vec![Response::Totals(totals.into())])
         }
     }
@@ -1129,7 +1142,8 @@ fn a_total_too_large_for_64_bits_is_refused() {
             vec![&volume],
             &query,
             search.scope.as_deref(),
-            Viewer::Everything
+            Viewer::Everything,
+            &AtomicBool::new(false)
         ),
         Err(TotalsError::Overflow(_))
     ));

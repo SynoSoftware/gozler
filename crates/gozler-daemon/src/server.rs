@@ -15,6 +15,7 @@
 
 use std::ops::Deref;
 use std::os::windows::io::AsHandle;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -338,13 +339,18 @@ async fn handle_connection(
                 Ok(None) => break,
                 Err(e) => return Err(anyhow::anyhow!("frame error: {e}")),
             };
-            // The blocking task reads the client's token through its own
-            // handle to the pipe, because this task keeps the pipe, and no
-            // further frame is read until that task ends.
+            // Taken before the reply reads the pipe again, because the pipe
+            // gives the token of the last message read, and on the blocking
+            // pool, because it reads the registry. Asked for each frame, so
+            // a change to the stored list applies at the next search.
             let pipe = server
                 .as_handle()
                 .try_clone_to_owned()
                 .context("duplicating the pipe handle")?;
+            let access =
+                tokio::task::spawn_blocking(move || access::of_pipe_client(pipe.as_handle()))
+                    .await
+                    .context("access task panicked")?;
             // Query execution plus result serialization is the heaviest CPU
             // work in the process and holds a read lock, so every request runs
             // on the blocking pool rather than stalling an async worker (and
@@ -356,13 +362,10 @@ async fn handle_connection(
             let include = include.clone();
             let snapshots = snapshots.clone();
             let user = user.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopped = stop.clone();
             let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(QUERY_PAGE_BACKLOG);
             let encoder = tokio::task::spawn_blocking(move || {
-                // Asked for each frame, because the pipe gives the token of
-                // the last message read, and a change to the stored list
-                // applies at the next search. It reads the registry, so it
-                // runs here, off the async workers.
-                let access = access::of_pipe_client(pipe.as_handle());
                 // A failed send means the receiver is gone (client vanished or
                 // write error): stop encoding.
                 serve(
@@ -372,6 +375,7 @@ async fn handle_connection(
                     &user,
                     &access,
                     &frame,
+                    &stopped,
                     &mut |reply| tx.blocking_send(reply).is_ok(),
                 );
                 match access {
@@ -379,15 +383,39 @@ async fn handle_connection(
                     _ => None,
                 }
             });
+            // While the search runs, the pipe is read too, so a client that
+            // closes it stops the search instead of leaving it to scan for no
+            // one. One read is enough: a client that sends its next request
+            // is still there, and the decoder keeps those bytes for it.
+            let mut watching = true;
+            let mut client_left = false;
             let mut write_err: Option<std::io::Error> = None;
-            while let Some(reply) = rx.recv().await {
-                if let Err(e) = write_reply(server, &reply).await {
-                    write_err = Some(e);
-                    break;
+            loop {
+                tokio::select! {
+                    reply = rx.recv() => match reply {
+                        Some(reply) => {
+                            if let Err(e) = write_reply(server, &reply).await {
+                                write_err = Some(e);
+                                break;
+                            }
+                        }
+                        None => break,
+                    },
+                    read = server.read(&mut read_buf), if watching => match read {
+                        Ok(0) | Err(_) => {
+                            client_left = true;
+                            break;
+                        }
+                        Ok(n) => {
+                            decoder.feed(&read_buf[..n]);
+                            watching = false;
+                        }
+                    },
                 }
             }
-            // Closing the channel unblocks a still-encoding task; it aborts at
-            // its next emit.
+            // Stops a search still scanning, and closing the channel stops a
+            // still-encoding task at its next emit.
+            stop.store(true, Ordering::Relaxed);
             drop(rx);
             let unidentified = encoder.await.context("request task panicked")?;
             // The request's buffers are free now; mimalloc returns them once
@@ -405,6 +433,9 @@ async fn handle_connection(
             if let Some(e) = write_err {
                 return Err(e.into());
             }
+            if client_left {
+                return Ok(());
+            }
         }
     }
 }
@@ -420,7 +451,8 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
 /// Answers one request frame from a client running as `user`, with what
 /// `access` lets it see, handing each framed reply to `emit` as soon as it is
 /// encoded. `emit` returning `false` means the client is gone; encoding
-/// stops.
+/// stops. `stop` set means the same, and stops a search before its first
+/// reply.
 ///
 /// `Hello`, `Status` and `SettingsSaved` answer every client, because they
 /// show no name; `Status` also tells the client what it sees. A request
@@ -428,6 +460,7 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
 /// sent it, and the Include count answers only a user who sees every file:
 /// its folder and name rules over the whole index would let any other user
 /// count hidden entries until the counts spell their names.
+#[allow(clippy::too_many_arguments)]
 fn serve(
     volumes: &VolumeSet,
     include: &Include,
@@ -435,6 +468,7 @@ fn serve(
     user: &[u8],
     access: &Access,
     frame: &[u8],
+    stop: &AtomicBool,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
     let request = match gozler_core::proto::decode_request(frame) {
@@ -501,19 +535,22 @@ fn serve(
     let targets = volumes.to_vec();
     match search.returns {
         Returns::Rows(wanted) => {
-            match ResultRows::search(targets, &query, scope, wanted.spec(), viewer) {
+            match ResultRows::search(targets, &query, scope, wanted.spec(), viewer, stop) {
                 Ok(rows) => stream_rows(rows, &wanted, emit),
                 Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
             }
         }
-        Returns::Totals => reply(emit, totals(targets, &query, scope, viewer)),
+        Returns::Totals => reply(emit, totals(targets, &query, scope, viewer, stop)),
         Returns::ResultSnapshot { rows, replaces } => {
             let every_row = RowsSpec {
                 offset: 0,
                 limit: None,
                 ..rows.spec()
             };
-            match ResultRows::search(targets, &query, scope, every_row, viewer) {
+            match ResultRows::search(targets, &query, scope, every_row, viewer, stop) {
+                // A stopped search is short and no one reads it, so it must
+                // not take the place of the user's last result snapshot.
+                Ok(_) if stop.load(Ordering::Relaxed) => {}
                 Ok(found) => {
                     let made = Made {
                         user,
@@ -726,8 +763,9 @@ fn totals(
     query: &CompiledQuery,
     scope: Option<&str>,
     viewer: Viewer<'_>,
+    stop: &AtomicBool,
 ) -> Response {
-    match search_totals(volumes, query, scope, viewer) {
+    match search_totals(volumes, query, scope, viewer, stop) {
         Ok(totals) => Response::Totals(totals.into()),
         Err(TotalsError::NotIndexed(not_indexed)) => refusal(not_indexed.to_string()),
         Err(TotalsError::Overflow(overflow)) => Response::Error {
@@ -949,6 +987,7 @@ mod tests {
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
         USN_REASON_RENAME_NEW_NAME,
     };
+    use std::sync::atomic::AtomicBool;
 
     /// A taken pipe name must read as taken through the context
     /// `create_instance` adds, or `claim_first_instance` returns the error and
@@ -1193,6 +1232,7 @@ mod tests {
             b"",
             access,
             &request_frame(request),
+            &AtomicBool::new(false),
             &mut |reply| {
                 out.extend_from_slice(&reply);
                 true
@@ -1471,6 +1511,7 @@ mod tests {
             b"",
             &Access::Sees(Visibility::Everything),
             br#"{"t":"Search","query":"#,
+            &AtomicBool::new(false),
             &mut |reply| {
                 replies.extend_from_slice(&reply);
                 true
@@ -1687,6 +1728,74 @@ mod tests {
         );
     }
 
+    /// A result snapshot search whose client left keeps nothing, so it does
+    /// not replace the result snapshot the window still reads. Without it, a
+    /// fast scroll that abandons requests takes the user's snapshot slots
+    /// with short answers that no one reads (#137).
+    #[test]
+    fn a_stopped_search_keeps_no_result_snapshot() {
+        use gozler_core::proto::SnapshotRowsRequest;
+        let vols = set(&[live_volume(r"C:\")]);
+        let snapshots = ResultSnapshots::new();
+        let make = |replaces| {
+            request_frame(&Request::Search(SearchRequest {
+                query: parse_query_with("", ParseOptions::default()).expect("parses"),
+                scope: None,
+                returns: Returns::ResultSnapshot {
+                    rows: Rows {
+                        sort: SortSpec::default_for(SortKey::Name),
+                        offset: 0,
+                        limit: Some(1),
+                        want_size: false,
+                        want_mtime: false,
+                        want_created: false,
+                        want_attributes: false,
+                        want_identity: false,
+                        want_sums: false,
+                    },
+                    replaces,
+                },
+            }))
+        };
+        let serve_with = |frame: &[u8], stop: bool| {
+            let mut out = Vec::new();
+            serve(
+                &vols,
+                &defaults(),
+                &snapshots,
+                b"",
+                &Access::Sees(Visibility::Everything),
+                frame,
+                &AtomicBool::new(stop),
+                &mut |reply| {
+                    out.extend_from_slice(&reply);
+                    true
+                },
+            );
+            decode_frames(&out)
+        };
+        let frames = serve_with(&make(None), false);
+        let Response::ResultSnapshot { id, .. } = frames[0] else {
+            panic!("a result snapshot: {:?}", frames[0])
+        };
+        assert!(serve_with(&make(Some(id)), true).is_empty());
+        let read = request_frame(&Request::ResultSnapshotRows(SnapshotRowsRequest {
+            id,
+            offset: 0,
+            limit: None,
+            want_size: false,
+            want_mtime: false,
+            want_created: false,
+            want_attributes: false,
+            want_identity: false,
+        }));
+        let frames = serve_with(&read, false);
+        assert!(
+            matches!(frames[..], [Response::Results(_), ..]),
+            "{frames:?}"
+        );
+    }
+
     /// A scope on no indexed volume answers `BadQuery`, which gozler exits by
     /// as invalid input, for rows and totals alike, because an empty answer
     /// would read as "no such file".
@@ -1748,6 +1857,7 @@ mod tests {
             b"",
             &Access::Sees(Visibility::Everything),
             &request_frame(&search(query("hit"))),
+            &AtomicBool::new(false),
             &mut |reply| {
                 if out.is_empty() {
                     let mut index = vol.index_mut();
@@ -1844,6 +1954,7 @@ mod tests {
             b"",
             &Access::Sees(Visibility::Everything),
             &request_frame(&search(query("hit"))),
+            &AtomicBool::new(false),
             &mut |_page| {
                 emitted += 1;
                 false // consumer gone after the first page
