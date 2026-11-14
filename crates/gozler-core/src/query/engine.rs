@@ -211,16 +211,16 @@ pub struct CompiledQuery {
     component_literal: Option<(u8, Vec<u8>)>,
     /// Literals one of which every matching name contains, from the clause
     /// whose every term is a positive name term, name wildcard (`.dll` of
-    /// `*.dll`) or `ext:` (`.ext` for each value): one for `report`, two for
-    /// `report|notes` or `ext:pdf;jpg`. Drives the folded-arena prefilter
-    /// scan; empty when no clause offers them (then the query iterates every
-    /// entry). [`CompiledClause::name_literals`] says which clause offers the
-    /// fewest.
+    /// `*.dll`), `ext:` (`.ext` for each value) or name `regex:` (what its
+    /// matches start with): one for `report`, two for `report|notes` or
+    /// `ext:pdf;jpg`. Drives the folded-arena prefilter scan; empty when no
+    /// clause offers them (then the query iterates every entry).
+    /// [`CompiledClause::name_literals`] says which clause offers the fewest.
     ///
     /// No other clause supplies them: a negated term lets through names
     /// without the literal, the text of a path term can lie in any folder of
-    /// the path, the literal of `*\docs\*` is `\docs\`, which no name
-    /// contains, and a regular expression is not a literal.
+    /// the path, and the literal of `*\docs\*` is `\docs\`, which no name
+    /// contains.
     prefilter: Vec<Vec<u8>>,
     /// The scope the query was compiled for ([`Self::with_links`]) and the
     /// folder a search of it reads, or `None` to read every volume.
@@ -670,9 +670,11 @@ impl CompiledClause {
 
     /// Literals one of which every name that passes this clause contains,
     /// at most [`MAX_PREFILTER_LITERALS`], when each of its terms is a
-    /// positive name term or name wildcard, which gives one, or an `ext:`
-    /// term, which gives `.ext` for each value. A literal that holds another
-    /// is left out, because every name that contains it contains the other.
+    /// positive name term or name wildcard, which gives one, an `ext:` term,
+    /// which gives `.ext` for each value, or a name `regex:`, which gives
+    /// what its matches start with ([`regex_literals`]). A literal that
+    /// holds another is left out, because every name that contains it
+    /// contains the other.
     fn name_literals(&self) -> Option<Vec<Vec<u8>>> {
         let mut literals = Vec::new();
         for term in &self.terms {
@@ -680,6 +682,9 @@ impl CompiledClause {
                 return None;
             }
             match &term.check {
+                Check::Text(Target::Name, Matcher::Regex(regex)) => {
+                    literals.extend(regex_literals(regex)?);
+                }
                 Check::Text(Target::Name, matcher) => literals.push(matcher.name_literal()?),
                 // An empty value stands for names with no extension, which
                 // hold no literal.
@@ -1013,6 +1018,34 @@ fn holds_from(range: SizeRange, floor: u64) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// The literals one of which every match of `regex` starts with, folded as
+/// names are, from [`regex_syntax`]'s prefix extractor; `None` when it finds
+/// no finite set, such as for `.*x`. The pattern is read case-insensitively,
+/// and each case's spelling folds to the one the folded name holds. A
+/// literal the extractor cut inside a character keeps only its whole
+/// characters, so its folded form is still a prefix of the match.
+fn regex_literals(regex: &Regex) -> Option<Vec<Vec<u8>>> {
+    use regex_syntax::hir::literal::{ExtractKind, Extractor};
+    let hir = regex_syntax::ParserBuilder::new()
+        .case_insensitive(true)
+        .build()
+        .parse(regex.as_str())
+        .ok()?;
+    let prefixes = Extractor::new().kind(ExtractKind::Prefix).extract(&hir);
+    let mut literals = Vec::new();
+    for literal in prefixes.literals()? {
+        let bytes = literal.as_bytes();
+        let whole = match std::str::from_utf8(bytes) {
+            Ok(text) => text,
+            Err(e) => std::str::from_utf8(&bytes[..e.valid_up_to()]).expect("valid up to here"),
+        };
+        literals.push(fold_accents(whole.as_bytes()));
+    }
+    literals.sort_unstable();
+    literals.dedup();
+    Some(literals)
 }
 
 /// `pattern` as a case-insensitive regular expression tests the folded text:
@@ -2818,6 +2851,49 @@ mod tests {
             paths_under(&idx, r"C:\", "resume", Some(r"C:\cafe")),
             [r"C:\Cafe\resume.txt"]
         );
+    }
+
+    proptest! {
+        /// A name `regex:` scans the names for what its matches start with,
+        /// and finds what testing every entry finds: over letters with case
+        /// and accent spellings, alternations, classes, optional and
+        /// repeated parts and anchors. A literal folded or cut wrongly would
+        /// hide matches without any error.
+        #[test]
+        fn a_regex_prefilter_finds_what_testing_every_entry_finds(
+            names in prop::collection::vec("[aAbKkéÉßs.]{1,6}", 1..12),
+            pattern in prop::collection::vec(
+                prop::sample::select(vec![
+                    "a", "b", "k", "K", "é", "É", "e", "ß", "ss", "s", r"\.", ".", "^", "$",
+                    "(a|b)", "(é|k)", "[ab]", "[éK]", "a?", "b*", "k+", "(?:ss|ß)",
+                ]),
+                1..5,
+            ),
+        ) {
+            let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+            for (i, name) in names.iter().enumerate() {
+                idx.insert_enum(&enum_rec(frn(100 + i as u64), NTFS_ROOT_FRN, name, false));
+            }
+            let Ok(parsed) = parse_query(&format!("regex:{}", pattern.concat())) else {
+                return Ok(());
+            };
+            let Ok(query) = CompiledQuery::new(&parsed) else {
+                return Ok(());
+            };
+            let never = AtomicBool::new(false);
+            let seen = SeenBy::Everything;
+            let mut every = Scan::new(&idx, r"C:\", &query, &seen, &never);
+            for entry in idx.live_entries().filter(|&e| !idx.is_synthetic(e)) {
+                every.visit(entry, None);
+            }
+            let sorted = |scan: Scan<'_, '_>| {
+                let mut entries: Vec<_> = scan.records.iter().map(|r| r.idx()).collect();
+                entries.sort_unstable();
+                entries
+            };
+            let found = sorted(scan(&idx, r"C:\", &query, None, &seen, &never));
+            prop_assert_eq!(found, sorted(every));
+        }
     }
 
     /// A case-sensitive scope follows the exact names down the child chains:
