@@ -142,9 +142,18 @@ fn with_headroom(len: usize) -> usize {
     len + len / 64 + 64
 }
 
-/// Shrinks a Vec to [`with_headroom`] of its length.
-fn shrink_vec<T>(v: &mut Vec<T>) {
-    v.shrink_to(with_headroom(v.len()));
+/// Shrinks a Vec to [`with_headroom`] of its length, by moving it into a
+/// fresh allocation. `Vec::shrink_to` reallocates in place, and mimalloc
+/// keeps the whole block when the new size is at least half the old one
+/// (`mi_realloc`), so a column with an eighth of slack would keep all of it
+/// while its capacity, which `--status` reports, said less.
+pub(crate) fn shrink_vec<T>(v: &mut Vec<T>) {
+    let target = with_headroom(v.len());
+    if v.capacity() > target {
+        let mut fresh = Vec::with_capacity(target);
+        fresh.append(v);
+        *v = fresh;
+    }
 }
 
 /// Makes room for `additional` more elements, growing by an eighth instead of

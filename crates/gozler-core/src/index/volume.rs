@@ -27,7 +27,7 @@
 use super::descriptors::{DescriptorTable, Listable, SeenBy};
 use super::store::{
     CompactedNames, ComponentBytes, EntryFlags, EntryTable, FrnMap, IdWidth, MTIME_UNKNOWN, NameId,
-    NamePair, NameRanks, NameStore, SIZE_UNKNOWN, hash_bytes, moved,
+    NamePair, NameRanks, NameStore, SIZE_UNKNOWN, hash_bytes, moved, shrink_vec,
 };
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::include::VolumeRules;
@@ -1775,9 +1775,8 @@ impl VolumeIndex {
         self.dir_children.shrink_to_fit();
         if let FrnMap::Dense(v) = &mut self.by_frn {
             // The dense map grows only when the journal brings a record number
-            // past its end, which the MFT does rarely, and then by an eighth,
-            // so an exact fit costs one reallocation per eighth of growth.
-            v.shrink_to_fit();
+            // past its end, which the MFT does rarely, and then by an eighth.
+            shrink_vec(v);
         }
     }
 
