@@ -386,6 +386,7 @@
     "group_depth": "Gruplar en fazla {0} düzey iç içe olabilir. Bazı grupları kaldırın.",
     "grouping": "< ve > işaretlerini çift olarak kullanın ve arasına bir arama ifadesi koyun.",
     "length": "{0} bir karakter sayısı değil. >100 veya 10..100 gibi bir sayı, karşılaştırma veya aralık kullanın.",
+    "count": "{0} bir sayı değil. 0 veya >100 gibi bir sayı, karşılaştırma veya aralık kullanın.",
     "unknown_function": "{0} bir arama işlevi değil. İşlevleri görmek için F1'e basın veya bu metni aramak için tırnak içine alın.",
     "relative_path": "{0} göreli bir yol. C:\\Users\\Public gibi tam yolu yazın.",
     "no_query_start": "Geçerli tarih ve saat okunamadı. Yeniden arayın.",

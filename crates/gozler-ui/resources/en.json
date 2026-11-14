@@ -386,6 +386,7 @@
     "group_depth": "Groups can nest up to {0} levels. Remove some groups.",
     "grouping": "Use < and > in pairs, with a search expression between them.",
     "length": "{0} isn't a character count. Use a number, comparison or range, such as >100 or 10..100.",
+    "count": "{0} isn't a count. Use a number, comparison or range, such as 0 or >100.",
     "unknown_function": "{0} isn't a search function. Press F1 to see them, or put the text in quotation marks to search for it.",
     "relative_path": "{0} is a relative path. Type the full path, such as C:\\Users\\Public.",
     "no_query_start": "Couldn't read the current date and time. Search again.",

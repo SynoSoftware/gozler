@@ -70,6 +70,7 @@ pub(super) fn query_error(strings: &Strings, error: &QueryError) -> String {
         QueryError::Malformed(reason) => match reason {
             Malformed::Grouping => strings.text("query.grouping").to_owned(),
             Malformed::Length(value) => strings.format("query.length", &[value]),
+            Malformed::Count(value) => strings.format("query.count", &[value]),
             Malformed::MisplacedNot => strings.text("query.misplaced_not").to_owned(),
             Malformed::NotWithoutTerm => strings.text("query.not_without_term").to_owned(),
             Malformed::OrWithoutTerms => strings.text("query.or_without_terms").to_owned(),

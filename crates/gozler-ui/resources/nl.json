@@ -386,6 +386,7 @@
     "group_depth": "Groepen kunnen tot {0} niveaus worden genest. Verwijder enkele groepen.",
     "grouping": "Gebruik < en > als paar, met een zoekuitdrukking ertussen.",
     "length": "{0} is geen aantal tekens. Gebruik een getal, vergelijking of bereik, zoals >100 of 10..100.",
+    "count": "{0} is geen aantal. Gebruik een getal, vergelijking of bereik, zoals 0 of >100.",
     "unknown_function": "{0} is geen zoekfunctie. Druk op F1 om ze te bekijken, of zet de tekst tussen aanhalingstekens om ernaar te zoeken.",
     "relative_path": "{0} is een relatief pad. Typ het volledige pad, zoals C:\\Users\\Public.",
     "no_query_start": "Kan de huidige datum en tijd niet lezen. Zoek opnieuw.",

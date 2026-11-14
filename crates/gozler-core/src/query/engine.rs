@@ -264,6 +264,14 @@ pub(super) enum Check {
         matcher: Matcher,
         form: NameForm,
     },
+    /// How many folders hold the entry, the root included.
+    Depth(SizeRange),
+    /// How many entries of `kind`, or of every kind, a folder holds directly;
+    /// unknown for a folder the request may not list.
+    ChildCount {
+        kind: Option<Kind>,
+        range: SizeRange,
+    },
     /// Folded whatever the query's case, as es compares extensions.
     Extension(Vec<Vec<u8>>),
     /// The folder's full path, without a trailing separator, which the full
@@ -854,6 +862,11 @@ impl Check {
                     NameForm::Folded
                 },
             },
+            Test::Depth(range) => Check::Depth(*range),
+            Test::ChildCount { kind, range } => Check::ChildCount {
+                kind: *kind,
+                range: *range,
+            },
             Test::DateModified(range) => Check::DateModified(*range),
             Test::DateCreated(range) => Check::DateCreated(*range),
             Test::Kind(kind) => Check::Kind(*kind),
@@ -872,8 +885,8 @@ impl Check {
             Check::Size(_) | Check::DateModified(_) | Check::DateCreated(_) | Check::Unknown(_) => {
                 1
             }
-            Check::Length { .. } => 3,
-            Check::Child { .. } => 6,
+            Check::Length { .. } | Check::Depth(_) => 3,
+            Check::Child { .. } | Check::ChildCount { .. } => 6,
             Check::Parent(_) => 2,
             Check::Text(_, matcher) => match matcher {
                 Matcher::Contains(_)
@@ -933,6 +946,26 @@ impl Check {
                                 &mut scratch.code_points,
                             )
                     })
+            }
+            Check::Depth(range) => range.contains(subject.index.depth(subject.idx)?.into()),
+            Check::ChildCount { kind, range } => {
+                if !entry.is_dir() {
+                    return Some(false);
+                }
+                if !subject.index.sees_into(subject.idx, subject.seen_by) {
+                    return None;
+                }
+                let children = subject
+                    .index
+                    .children(subject.idx)
+                    .filter(|&child| !subject.index.is_synthetic(child))
+                    .filter(|&child| match kind {
+                        None => true,
+                        Some(Kind::File) => !subject.index.entry(child).is_dir(),
+                        Some(Kind::Folder) => subject.index.entry(child).is_dir(),
+                    })
+                    .count();
+                range.contains(children as u64)
             }
             Check::Extension(exts) => match extension(entry.name(), entry.is_dir()) {
                 Some(ext) => {
@@ -2928,6 +2961,36 @@ mod tests {
             paths_under(&idx, r"C:\", "full-path-length:8 case:", None),
             ["C:\\İ😀\\x"]
         );
+    }
+
+    /// `empty:`, the child counts and `depth:` read the child chains and the
+    /// parents. A folder a filtered user may not list has no count, so it is
+    /// neither empty nor not empty for them: counting its hidden contents as
+    /// none would call a full folder empty.
+    #[test]
+    fn child_counts_and_depth_read_the_tree() {
+        let mut idx = sample_index();
+        idx.insert_enum(&enum_rec(frn(105), frn(100), "empty", true));
+        assert_eq!(run(&idx, "empty:"), ["docs\\empty"]);
+        assert_eq!(
+            run(&idx, "child-file-count:1 child-folder-count:2"),
+            ["docs"]
+        );
+        assert_eq!(run(&idx, "depth:3"), ["docs\\sub\\Report.PDF"]);
+        assert_eq!(run(&idx, "parents:1 folder:"), ["docs"]);
+        idx.set_folder_descriptor(NTFS_ROOT_FRN, b"open");
+        idx.set_folder_descriptor(frn(100), b"open");
+        idx.set_folder_descriptor(frn(101), b"hidden");
+        idx.set_folder_descriptor(frn(105), b"hidden");
+        let seen_by = SeenBy::Filtered(idx.listable(&|descriptor| descriptor == b"open"));
+        let found = |query: &str| {
+            let never = AtomicBool::new(false);
+            scan(&idx, "", &compiled(query), None, &seen_by, &never)
+                .records
+                .len()
+        };
+        assert_eq!(found("empty:"), 0);
+        assert_eq!(found("!empty: folder:"), 1, "only docs has a count");
     }
 
     #[test]

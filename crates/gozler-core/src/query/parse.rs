@@ -224,6 +224,15 @@ pub enum Test {
     /// A folder with an immediate visible child whose name matches this text
     /// or whole-name wildcard pattern.
     Child(String),
+    /// How many folders hold the entry, the root included, is in this range.
+    /// From protocol 21.
+    Depth(SizeRange),
+    /// A folder whose count of entries directly in it, of `kind` or of every
+    /// kind, is in this range. From protocol 21.
+    ChildCount {
+        kind: Option<Kind>,
+        range: SizeRange,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +339,8 @@ pub enum Malformed {
     Grouping,
     #[error("length: {0} is not a character count; use a number, comparison or range")]
     Length(String),
+    #[error("count: {0} is not a count; use a number, comparison or range")]
+    Count(String),
     /// A `!` that does not start a term.
     #[error("query: ! must start a term; quote it to search for it")]
     MisplacedNot,
@@ -387,6 +398,9 @@ enum Function {
     Size,
     Length(LengthTarget),
     Child,
+    Depth,
+    ChildCount(Option<Kind>),
+    Empty,
     Date(DateField),
     Path,
     Parent,
@@ -476,6 +490,38 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         function: Function::Child,
         example: "Cargo.toml",
         help: "Folders with an immediate visible child whose name contains text; `*` and `?` match the whole child name",
+    },
+    SearchFunction {
+        names: &["child-count", "childcount"],
+        function: Function::ChildCount(None),
+        example: ">100",
+        help: "Folders with this many files and folders directly in them; accepts comparisons \
+               and ranges; a folder you may not list has no count",
+    },
+    SearchFunction {
+        names: &["child-file-count", "childfilecount"],
+        function: Function::ChildCount(Some(Kind::File)),
+        example: "0",
+        help: "Folders with this many files directly in them",
+    },
+    SearchFunction {
+        names: &["child-folder-count", "childfoldercount"],
+        function: Function::ChildCount(Some(Kind::Folder)),
+        example: "0",
+        help: "Folders with this many folders directly in them",
+    },
+    SearchFunction {
+        names: &["empty"],
+        function: Function::Empty,
+        example: "",
+        help: "Folders with nothing directly in them; a folder you may not list is not empty",
+    },
+    SearchFunction {
+        names: &["depth", "parent-count", "parents"],
+        function: Function::Depth,
+        example: "2",
+        help: "How many folders hold the item, the drive's root included, so C:\\Windows has 1; \
+               accepts comparisons and ranges",
     },
     SearchFunction {
         names: &["ww"],
@@ -920,6 +966,18 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
                 return Ok(Operand::Text(Test::Length { target, range }));
             }
             Some(Function::Child) => return Ok(Operand::Text(Test::Child(value.to_owned()))),
+            Some(Function::Depth) => return Ok(Operand::Text(Test::Depth(count_range(value)?))),
+            Some(Function::ChildCount(kind)) => {
+                let range = count_range(value)?;
+                return Ok(Operand::Text(Test::ChildCount { kind, range }));
+            }
+            Some(Function::Empty) => {
+                if !value.trim().is_empty() {
+                    return Err(QueryError::Malformed(Malformed::Count(value.to_owned())));
+                }
+                let range = SizeRange { min: 0, max: 0 };
+                return Ok(Operand::Text(Test::ChildCount { kind: None, range }));
+            }
             Some(Function::Date(field)) => {
                 if value.eq_ignore_ascii_case("unknown") {
                     return Ok(Operand::Text(Test::Unknown(match field {
@@ -984,6 +1042,12 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
     let path_match = options.term_match.beyond_name_terms();
     let test = text_test(text, word.quote_at.is_some(), options, path_match)?;
     Ok(Operand::Text(test.unwrap_or(Test::Name(String::new()))))
+}
+
+/// The count range a `depth:` or child count value writes.
+fn count_range(value: &str) -> Result<SizeRange, QueryError> {
+    parse_range(value, |s| s.trim().parse().ok())
+        .ok_or_else(|| QueryError::Malformed(Malformed::Count(value.to_owned())))
 }
 
 fn whole_name(value: &str, options: &ParseOptions) -> Result<Operand, QueryError> {
@@ -1274,7 +1338,13 @@ fn lex(input: &str) -> Result<Vec<Lexeme>, QueryError> {
                         value.is_empty()
                             && matches!(
                                 function_named(name),
-                                Some(Function::Size | Function::Date(_) | Function::Length(_))
+                                Some(
+                                    Function::Size
+                                        | Function::Date(_)
+                                        | Function::Length(_)
+                                        | Function::Depth
+                                        | Function::ChildCount(_)
+                                )
                             )
                     })
                 }) =>

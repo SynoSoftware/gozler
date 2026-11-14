@@ -386,6 +386,7 @@
     "group_depth": "Los grupos se pueden anidar hasta {0} niveles. Quita algunos grupos.",
     "grouping": "Usa < y > en pareja, con una expresión de búsqueda entre ambos.",
     "length": "{0} no es un número de caracteres. Usa un número, una comparación o un intervalo, como >100 o 10..100.",
+    "count": "{0} no es un número. Usa un número, una comparación o un intervalo, como 0 o >100.",
     "unknown_function": "{0} no es una función de búsqueda. Presiona F1 para verlas, o pon el texto entre comillas para buscarlo.",
     "relative_path": "{0} es una ruta relativa. Escribe la ruta completa, como C:\\Users\\Public.",
     "no_query_start": "No se pudieron leer la fecha y la hora actuales. Vuelve a buscar.",

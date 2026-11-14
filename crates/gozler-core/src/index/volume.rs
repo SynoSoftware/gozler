@@ -660,18 +660,36 @@ impl VolumeIndex {
     /// and the entries of a folder whose descriptor they may list; a folder
     /// whose descriptor is not read hides its entries.
     pub(crate) fn is_seen(&self, idx: EntryIdx, seen_by: &SeenBy) -> bool {
+        let parent = self.entries.parent(idx);
+        idx == self.root || (parent != NIL && self.sees_into(parent, seen_by))
+    }
+
+    /// Whether `seen_by` sees the entries of folder `folder`: it may list the
+    /// folder's descriptor, which is read.
+    pub(crate) fn sees_into(&self, folder: EntryIdx, seen_by: &SeenBy) -> bool {
         match seen_by {
             SeenBy::Everything => true,
-            SeenBy::Filtered(listable) => {
-                let parent = self.entries.parent(idx);
-                idx == self.root
-                    || (parent != NIL
-                        && self
-                            .entries
-                            .descriptor(parent)
-                            .is_some_and(|id| listable.lists(id)))
-            }
+            SeenBy::Filtered(listable) => self
+                .entries
+                .descriptor(folder)
+                .is_some_and(|id| listable.lists(id)),
         }
+    }
+
+    /// How many folders hold entry `idx`, the root included, so an entry in
+    /// the root has 1; `None` for the root, and for an entry with no full
+    /// path, which lost+found holds or whose walk passes [`MAX_PATH_HOPS`].
+    pub(crate) fn depth(&self, idx: EntryIdx) -> Option<u32> {
+        let mut depth = 0;
+        let mut cur = self.entries.parent(idx);
+        while cur != NIL && cur != self.lost_found && (depth as usize) < MAX_PATH_HOPS {
+            depth += 1;
+            if cur == self.root {
+                return Some(depth);
+            }
+            cur = self.entries.parent(cur);
+        }
+        None
     }
 
     /// Whether the descriptor of `frn` is to be read: `frn` is a folder in
