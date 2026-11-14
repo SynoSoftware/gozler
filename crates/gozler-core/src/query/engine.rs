@@ -2385,25 +2385,20 @@ pub fn resolve_scope(index: &VolumeIndex, path: &[u8], match_case: bool) -> Opti
 
     // Case-sensitive scopes are rare (the persistent index is folded), so we do
     // not build a whole-volume raw-name map (one key Vec per directory) per
-    // query. Walk each component with a linear scan of the live entries,
-    // comparing raw names directly (no allocation), stopping at the first
-    // matching sibling. NOTE: do not reuse the folded `child_dir` walk with a
-    // post-hoc raw-name check: `dir_children` keeps a single entry per
-    // (parent, folded name), so it cannot represent case-variant siblings and
-    // would miss a legitimately case-matching sibling that folding collapsed.
+    // query. Walk each component through its folder's child chain, comparing
+    // raw names directly (no allocation), stopping at the first matching
+    // sibling. Each folder on the path is read once, so a whole path costs at
+    // most one pass over the volume, however many components it has. NOTE: do
+    // not reuse the folded `child_dir` walk with a post-hoc raw-name check:
+    // `dir_children` keeps a single entry per (parent, folded name), so it
+    // cannot represent case-variant siblings and would miss a legitimately
+    // case-matching sibling that folding collapsed.
     let mut cur = index.root();
-    'components: for comp in components {
-        for idx in index.live_entries() {
-            if index.is_synthetic(idx) {
-                continue;
-            }
+    for comp in components {
+        cur = index.children(cur).find(|&idx| {
             let e = index.entry(idx);
-            if e.is_dir() && e.parent() == cur && e.name() == comp {
-                cur = idx;
-                continue 'components;
-            }
-        }
-        return None;
+            !index.is_synthetic(idx) && e.is_dir() && e.name() == comp
+        })?;
     }
     Some(cur)
 }
@@ -2460,6 +2455,28 @@ mod tests {
         set_size(&mut idx, frn(103), 200);
         set_size(&mut idx, frn(104), 2 * 1024 * 1024);
         idx
+    }
+
+    /// A case-sensitive scope follows the exact names down the child chains:
+    /// a sibling that differs only by case is another folder, which the
+    /// folded folder index cannot tell apart, and a file is no folder.
+    #[test]
+    fn a_case_sensitive_scope_takes_the_exact_names() {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        for r in [
+            enum_rec(frn(100), NTFS_ROOT_FRN, "Docs", true),
+            enum_rec(frn(101), NTFS_ROOT_FRN, "docs", true),
+            enum_rec(frn(102), frn(100), "Sub", true),
+            enum_rec(frn(103), frn(101), "sub", true),
+            enum_rec(frn(104), frn(101), "file", false),
+        ] {
+            idx.insert_enum(&r);
+        }
+        let exact = |path: &[u8]| resolve_scope(&idx, path, true);
+        assert_eq!(exact(b"Docs"), idx.head_of(frn(100)));
+        assert_eq!(exact(br"docs/sub"), idx.head_of(frn(103)));
+        assert_eq!(exact(br"Docs\sub"), None);
+        assert_eq!(exact(br"docs\file"), None);
     }
 
     /// An orphan: a real file whose parent was never seen, so the parent is a
