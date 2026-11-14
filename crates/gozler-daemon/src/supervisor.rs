@@ -29,11 +29,19 @@
 //!   a full rescan. A tail that keeps dying gets one `error!` and is dropped
 //!   from supervision rather than alarmed about forever.
 //!
+//! A disk is let go of when Windows asks to remove it, between scans. The
+//! start worker registers for the removal events of the volume it opened
+//! (see [`watch_removal`]), and a removal query reaches this thread through
+//! [`StopFlag::post`]: the volume leaves the registry and its tail stops,
+//! closing the handle that would fail the removal, before the query is
+//! answered. The volume stays out of discovery until Windows says how the
+//! removal ended; if it failed, the volume is indexed again.
+//!
 //! The supervisor owns the [`TailHandle`]s outright: it is the only place
 //! that can replace one (revival) and the natural place to stop them all, so
 //! teardown is [`Supervisor::shutdown`] and nothing else holds a tail.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -42,7 +50,7 @@ use std::time::{Duration, Instant};
 use gozler_core::include::IndexSettings;
 use gozler_core::proto::LeftOutVolume;
 use gozler_core::types::VolumePhase;
-use gozler_winfs::{VolumeInfo, WinError};
+use gozler_winfs::{DeviceEvent, DeviceNotification, VolumeInfo, WinError};
 use parking_lot::{Condvar, Mutex};
 
 use crate::bootstrap;
@@ -162,10 +170,9 @@ fn accrue_health(
     }
 }
 
-/// What wakes the scan sleep: shutdown, and new Include settings or a
-/// rebuild asked for. Teardown and [`Include::reload`] set their flag under
-/// the mutex and wake the condvar, so neither waits out a full
-/// [`SCAN_INTERVAL`].
+/// What wakes the scan sleep: shutdown, new Include settings or a rebuild
+/// asked for, and the volumes' removal events. Each is set under the mutex
+/// with the condvar woken, so none waits out a full [`SCAN_INTERVAL`].
 struct StopFlag {
     signals: Mutex<Signals>,
     wake: Condvar,
@@ -175,6 +182,107 @@ struct StopFlag {
 struct Signals {
     stopped: bool,
     settings_changed: bool,
+    /// Set once shutdown has stopped every tail, so every volume is let go
+    /// of; a removal query asked during shutdown waits for it.
+    tails_stopped: bool,
+    /// Posted by the volumes' removal notifications, oldest first.
+    posted: Vec<Posted>,
+}
+
+/// One removal event of the volume `guid`.
+struct Removal {
+    guid: String,
+    event: DeviceEvent,
+}
+
+/// A removal as posted: for a query, with the notification callback that
+/// waits on the answer, told once the volume is let go of so the removal
+/// finds it closed.
+struct Posted {
+    removal: Removal,
+    done: Option<mpsc::SyncSender<()>>,
+}
+
+/// How long a removal query waits for the supervisor to let go of its volume:
+/// one release ([`RELEASE_MAX`]) with slack. A healthy tail is let go of
+/// within a teardown poll.
+const RELEASE_WAIT: Duration = Duration::from_secs(12);
+
+/// How long a volume let go of for a removal stays out of discovery when
+/// Windows never says how the removal ended. It always says, so this only
+/// keeps a missed event from hiding a disk that stayed.
+const REMOVAL_OUTCOME_WAIT: Duration = Duration::from_secs(60);
+
+impl StopFlag {
+    /// Posts a removal event of the volume `guid` and, for a query, waits
+    /// until the supervisor has let go of the volume, at most
+    /// [`RELEASE_WAIT`]. Runs on the notification's thread-pool thread.
+    fn post(&self, guid: &str, event: DeviceEvent) {
+        let (done, released) = match event {
+            DeviceEvent::QueryRemove => {
+                let (tx, rx) = mpsc::sync_channel(1);
+                (Some(tx), Some(rx))
+            }
+            DeviceEvent::QueryRemoveFailed | DeviceEvent::Removed => (None, None),
+        };
+        {
+            let mut signals = self.signals.lock();
+            if signals.stopped {
+                // Shutdown answers no removal, but it stops every tail,
+                // which lets go of every volume; a query waits for that.
+                if released.is_some() {
+                    let until = Instant::now() + RELEASE_WAIT;
+                    while !signals.tails_stopped && Instant::now() < until {
+                        self.wake.wait_until(&mut signals, until);
+                    }
+                }
+                return;
+            }
+            signals.posted.push(Posted {
+                removal: Removal {
+                    guid: guid.to_owned(),
+                    event,
+                },
+                done,
+            });
+        }
+        self.wake.notify_all();
+        // Disconnected means the query was dropped: by shutdown once every
+        // tail had stopped, which let go of the volume too, or by a
+        // supervisor that panicked and can let go of nothing.
+        if let Some(released) = released
+            && let Err(mpsc::RecvTimeoutError::Timeout) = released.recv_timeout(RELEASE_WAIT)
+        {
+            tracing::warn!(
+                guid,
+                "the volume was not let go of in time for its removal; the removal may fail"
+            );
+        }
+    }
+
+    /// Whether shutdown has begun.
+    fn stopping(&self) -> bool {
+        self.signals.lock().stopped
+    }
+
+    /// Takes back removals not acted on because shutdown began, so
+    /// [`Self::tails_stopped`] answers their queries once every volume is let
+    /// go of, as it answers a query posted during shutdown.
+    fn hand_back(&self, rest: impl IntoIterator<Item = Posted>) {
+        self.signals.lock().posted.extend(rest);
+    }
+
+    /// Says every tail has stopped, so every volume is let go of: the
+    /// queries still posted are dropped, which releases their callbacks,
+    /// and a query asked from now on returns at once.
+    fn tails_stopped(&self) {
+        let mut signals = self.signals.lock();
+        signals.stopped = true;
+        signals.tails_stopped = true;
+        signals.posted.clear();
+        drop(signals);
+        self.wake.notify_all();
+    }
 }
 
 /// The supervision thread and the means to stop it. Owns every tail: they
@@ -213,16 +321,9 @@ impl Supervisor {
                 woken.wake.notify_all();
             }),
         ));
-        let mut fleet = Fleet {
-            volumes: volumes.clone(),
-            include: include.clone(),
-            enumerated: Vec::new(),
-            supervised: Vec::new(),
-            skipped: HashSet::new(),
-            discovery: None,
-            starting: Some(Instant::now()),
-        };
-        fleet.reconcile(enumerated);
+        let mut fleet = Fleet::new(volumes.clone(), include.clone(), stop.clone());
+        fleet.starting = Some(Instant::now());
+        fleet.reconcile(enumerated, Instant::now());
         // `Builder::spawn` consumes its closure even when thread creation
         // fails, so the fleet rides in a slot the failure path can take back;
         // dropping it would detach tails that could then never be joined.
@@ -288,13 +389,17 @@ impl Supervisor {
     }
 }
 
+/// What a listing worker hands back.
+type Listing = Result<Vec<VolumeInfo>, WinError>;
+
 /// Everything the supervision thread owns.
 struct Fleet {
     volumes: Arc<VolumeRegistry>,
     include: Arc<Include>,
     /// The machine's volumes as last listed, which new Include settings are
-    /// applied to at once.
+    /// applied to at once, and when that listing began.
     enumerated: Vec<VolumeInfo>,
+    enumerated_at: Instant,
     /// The indexed volumes that have a tail or may get one. A volume leaves
     /// this list, and stays indexed, when its tail is given up on or when it
     /// is a snapshot, which needs no tail. Changed Include settings or a
@@ -302,39 +407,87 @@ struct Fleet {
     supervised: Vec<Supervised>,
     /// Volumes found that gozler does not index, each logged once.
     skipped: HashSet<String>,
-    /// The enumeration running on its worker thread, if one is.
-    discovery: Option<mpsc::Receiver<Result<Vec<VolumeInfo>, WinError>>>,
+    /// The enumeration running on its worker thread, if one is, and when it
+    /// began.
+    discovery: Option<(mpsc::Receiver<Listing>, Instant)>,
     /// When the daemon started, until no volume is `Bootstrapping`.
     starting: Option<Instant>,
+    /// Where the volumes' removal notifications post.
+    signals: Arc<StopFlag>,
+    /// Volumes let go of for a removal that has not ended, with the
+    /// notifications that will say how it ends. Discovery leaves them out.
+    removing: HashMap<String, Removing>,
+    /// Volumes removed from the machine, and when. A listing begun before
+    /// the removal can still name one, so discovery leaves it out until a
+    /// listing begun after.
+    removed: Vec<(String, Instant)>,
+}
+
+/// A volume let go of for a removal that has not ended.
+struct Removing {
+    notifications: Vec<DeviceNotification>,
+    since: Instant,
 }
 
 impl Fleet {
+    fn new(volumes: Arc<VolumeRegistry>, include: Arc<Include>, signals: Arc<StopFlag>) -> Fleet {
+        Fleet {
+            volumes,
+            include,
+            enumerated: Vec::new(),
+            enumerated_at: Instant::now(),
+            supervised: Vec::new(),
+            skipped: HashSet::new(),
+            discovery: None,
+            starting: None,
+            signals,
+            removing: HashMap::new(),
+            removed: Vec::new(),
+        }
+    }
+
     /// Brings the indexed volumes in step with `enumerated`, the volumes on
-    /// the machine now, and with the Include settings: starts indexing each
-    /// fixed NTFS and ReFS volume that is not indexed and that the settings
-    /// do not leave out, and removes each indexed volume that is no longer
-    /// listed or that the settings leave out.
+    /// the machine as a listing begun at `taken` saw them, and with the
+    /// Include settings: starts indexing each fixed NTFS and ReFS volume that
+    /// is not indexed and that the settings do not leave out, and removes
+    /// each indexed volume that is no longer listed or that the settings
+    /// leave out. A volume being removed, or removed after the listing
+    /// began, is not found.
     ///
     /// A listed volume that now classifies differently stays: a filesystem
     /// query that fails once must not cost a full rebuild.
-    fn reconcile(&mut self, enumerated: Vec<VolumeInfo>) {
+    fn reconcile(&mut self, enumerated: Vec<VolumeInfo>, taken: Instant) {
+        self.removed.retain(|(_, at)| *at > taken);
         let settings = self.include.applied();
         for indexed in self.volumes.current().iter() {
+            // Once shutdown has begun, stop_all stops every tail, so a
+            // volume left waits for it, and a volume found now would only be
+            // stopped.
+            if self.signals.stopping() {
+                return;
+            }
             if !enumerated.iter().any(|e| e.guid_path == indexed.guid) {
-                self.remove(indexed, "volume is gone; no longer indexed");
+                self.remove(&indexed.guid, "volume is gone; no longer indexed");
             } else if settings.rules_for(&indexed.guid).leaves_out_volume() {
                 self.remove(
-                    indexed,
+                    &indexed.guid,
                     "the Include settings leave the volume out; no longer indexed",
                 );
             }
+        }
+        if self.signals.stopping() {
+            return;
         }
         self.skipped
             .retain(|guid| enumerated.iter().any(|e| &e.guid_path == guid));
         let indexed = self.volumes.current();
         let mut left_out = Vec::new();
         for vol in &enumerated {
-            if indexed.iter().any(|v| v.guid == vol.guid_path) {
+            let guid = vol.guid_path.as_str();
+            if indexed.iter().any(|v| v.guid == guid)
+                || self.removing.contains_key(guid)
+                || self.removed.iter().any(|(g, _)| g == guid)
+            {
                 continue;
             }
             let rules = settings.rules_for(&vol.guid_path);
@@ -357,12 +510,14 @@ impl Fleet {
                     ));
                     tracing::info!(volume = %state.mount_prefix(), "volume found; indexing it");
                     self.volumes.add(state.clone());
-                    self.supervised.push(Supervised::start(state));
+                    self.supervised
+                        .push(Supervised::start(state, self.signals.clone()));
                 }
             }
         }
         self.include.set_left_out(left_out);
         self.enumerated = enumerated;
+        self.enumerated_at = taken;
     }
 
     /// Logs once why a volume is not indexed.
@@ -390,7 +545,7 @@ impl Fleet {
         // each is logged again.
         self.skipped.clear();
         // First, so a volume the settings now leave out gets no tail.
-        self.reconcile(self.enumerated.clone());
+        self.reconcile(self.enumerated.clone(), self.enumerated_at);
         let settings = self.include.applied();
         for state in self.volumes.current().iter() {
             state.set_rules(Arc::new(settings.rules_for(&state.guid)));
@@ -419,22 +574,138 @@ impl Fleet {
             && state.take_owed_for_new_tail()
         {
             tracing::info!(volume = %state.mount_prefix(), "{why}");
-            self.supervised.push(Supervised::start(state.clone()));
+            self.supervised
+                .push(Supervised::start(state.clone(), self.signals.clone()));
         }
     }
 
     /// Stops indexing a volume: queries leave it out from now on, and its
     /// tail stops. `why` is the log line.
-    fn remove(&mut self, gone: &VolumeState, why: &str) {
-        self.volumes.remove(&gone.guid);
-        tracing::info!(volume = %gone.mount_prefix(), "{why}");
-        if let Some(i) = self
-            .supervised
+    fn remove(&mut self, guid: &str, why: &str) {
+        retire(self.release(guid, why));
+    }
+
+    /// Stops indexing `guid`, logging `why`: queries leave it out from now
+    /// on, and its tail stops, which closes its handle on the volume. Returns
+    /// the volume's removal notifications, for the caller to keep or retire.
+    fn release(&mut self, guid: &str, why: &str) -> Vec<DeviceNotification> {
+        let volume = self
+            .volumes
+            .current()
             .iter()
-            .position(|s| s.state.guid == gone.guid)
-        {
-            let deadline = Instant::now() + PENDING_DRAIN_WAIT;
-            stop_tails(self.supervised.swap_remove(i).into_tails(deadline));
+            .find(|v| v.guid == guid)
+            .cloned();
+        self.volumes.remove(guid);
+        match &volume {
+            Some(volume) => tracing::info!(volume = %volume.mount_prefix(), guid, "{why}"),
+            None => tracing::info!(guid, "{why}"),
+        }
+        let Some(i) = self.supervised.iter().position(|s| s.state.guid == guid) else {
+            return Vec::new();
+        };
+        let gone = self.supervised.swap_remove(i);
+        let (tails, notifications) = gone.into_parts(Instant::now() + PENDING_DRAIN_WAIT);
+        stop_tails(tails);
+        notifications
+    }
+
+    /// Acts on the removals `posted`, answering each query once its volume is
+    /// let go of, and returns whether the volumes should be reconciled now.
+    /// `None` once shutdown has begun: the removals left go back to the
+    /// [`StopFlag`], so shutdown lets go of one volume at most before
+    /// [`Self::stop_all`] stops every tail (see [`SUPERVISOR_JOIN_WAIT`]).
+    fn act_on(&mut self, posted: Vec<Posted>) -> Option<bool> {
+        let mut relist = false;
+        let mut posted = posted.into_iter();
+        while let Some(p) = posted.next() {
+            if self.signals.stopping() {
+                self.signals.hand_back(std::iter::once(p).chain(posted));
+                return None;
+            }
+            relist |= self.on_removal(p.removal);
+            // Answered only now, with the volume let go of: the removal
+            // fails while any handle on it is open.
+            if let Some(done) = p.done {
+                let _ = done.send(());
+            }
+        }
+        (!self.signals.stopping()).then_some(relist)
+    }
+
+    /// Acts on a removal event of a volume, posted by its notification (see
+    /// [`StopFlag::post`]); a query is answered once this returns. Returns
+    /// whether the volumes should be reconciled now: a removal that failed
+    /// leaves a disk to index again.
+    fn on_removal(&mut self, removal: Removal) -> bool {
+        let Removal { guid, event } = removal;
+        let indexed = self.volumes.current().iter().any(|v| v.guid == guid);
+        match event {
+            DeviceEvent::QueryRemove => {
+                // Let go of the volume, which closes its tail's handle. The
+                // notifications stay registered to hear how the removal ends.
+                let notifications = if indexed {
+                    self.release(&guid, "the volume is being removed; letting go of it")
+                } else {
+                    Vec::new()
+                };
+                self.removing
+                    .entry(guid)
+                    .or_insert_with(|| Removing {
+                        notifications: Vec::new(),
+                        since: Instant::now(),
+                    })
+                    .notifications
+                    .extend(notifications);
+                false
+            }
+            DeviceEvent::QueryRemoveFailed => {
+                let Some(removing) = self.removing.remove(&guid) else {
+                    return false;
+                };
+                tracing::info!(
+                    guid,
+                    "the volume's removal did not happen; indexing it again"
+                );
+                retire(removing.notifications);
+                true
+            }
+            DeviceEvent::Removed => {
+                // Dropped now rather than at the next listing; a disk pulled
+                // without asking has its tail stopped here.
+                let mut notifications = if indexed {
+                    self.release(&guid, "the volume was removed; no longer indexed")
+                } else {
+                    Vec::new()
+                };
+                if let Some(removing) = self.removing.remove(&guid) {
+                    tracing::info!(guid, "the volume was removed");
+                    notifications.extend(removing.notifications);
+                }
+                retire(notifications);
+                self.removed.retain(|(g, _)| *g != guid);
+                self.removed.push((guid, Instant::now()));
+                false
+            }
+        }
+    }
+
+    /// Forgets the removals Windows never said the end of after
+    /// [`REMOVAL_OUTCOME_WAIT`], so a disk that stayed is found again.
+    fn expire_removing(&mut self) {
+        let expired: Vec<String> = self
+            .removing
+            .iter()
+            .filter(|(_, r)| r.since.elapsed() >= REMOVAL_OUTCOME_WAIT)
+            .map(|(guid, _)| guid.clone())
+            .collect();
+        for guid in expired {
+            if let Some(removing) = self.removing.remove(&guid) {
+                tracing::warn!(
+                    guid,
+                    "no word on how the volume's removal ended; finding it again"
+                );
+                retire(removing.notifications);
+            }
         }
     }
 
@@ -445,28 +716,29 @@ impl Fleet {
     fn discover(&mut self) {
         let finished = match &self.discovery {
             None => None,
-            Some(rx) => match rx.try_recv() {
+            Some((rx, taken)) => match rx.try_recv() {
                 Err(mpsc::TryRecvError::Empty) => return,
-                Ok(result) => Some(result),
+                Ok(result) => Some((result, *taken)),
                 // The worker died without reporting.
                 Err(mpsc::TryRecvError::Disconnected) => None,
             },
         };
         self.discovery = None;
         match finished {
-            Some(Ok(enumerated)) => self.reconcile(enumerated),
-            Some(Err(e)) => {
+            Some((Ok(enumerated), taken)) => self.reconcile(enumerated, taken),
+            Some((Err(e), _)) => {
                 tracing::warn!(error = %e, "could not list volumes; trying again next scan")
             }
             None => {}
         }
         let (tx, rx) = mpsc::sync_channel(1);
+        let taken = Instant::now();
         match std::thread::Builder::new()
             .name("gozler-volume-discovery".into())
             .spawn(move || {
                 let _ = tx.send(gozler_winfs::enumerate_volumes());
             }) {
-            Ok(_) => self.discovery = Some(rx),
+            Ok(_) => self.discovery = Some((rx, taken)),
             Err(e) => {
                 tracing::warn!(error = %e, "could not start listing volumes; trying again next scan")
             }
@@ -499,15 +771,66 @@ impl Fleet {
 
     /// Stops every tail, resolving in-flight starts first so a tail a worker
     /// hands over is stopped with the rest.
+    ///
+    /// A removal query is answered only then, with every volume let go of,
+    /// and the removal notifications are unregistered last, on this thread:
+    /// no callback waits on it any more (see [`StopFlag::post`]).
     fn stop_all(self) {
         let deadline = Instant::now() + PENDING_DRAIN_WAIT;
-        let tails = self
+        let (tails, notifications): (Vec<_>, Vec<_>) = self
             .supervised
             .into_iter()
-            .flat_map(|s| s.into_tails(deadline))
-            .collect();
-        stop_tails(tails);
+            .map(|s| s.into_parts(deadline))
+            .unzip();
+        stop_tails(tails.into_iter().flatten().collect());
+        self.signals.tails_stopped();
+        drop(notifications);
+        drop(self.removing);
     }
+}
+
+/// Unregisters removal notifications off the supervision thread:
+/// unregistering waits for the callbacks in flight, and one may be waiting on
+/// this thread to answer it (see [`StopFlag::post`]). Should no thread start,
+/// they unregister here, which waits at most that callback's
+/// [`RELEASE_WAIT`].
+fn retire(notifications: Vec<DeviceNotification>) {
+    if notifications.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name("gozler-unregister".into())
+        .spawn(move || drop(notifications));
+}
+
+/// Registers for the removal events of the volume `handle` is open on,
+/// posting them to `signals`. A volume without a registration is still
+/// indexed; only safe removal of its disk needs the service stopped.
+fn watch_removal(
+    handle: &gozler_winfs::VolumeHandle,
+    state: &VolumeState,
+    signals: Arc<StopFlag>,
+) -> Option<DeviceNotification> {
+    let guid = state.guid.clone();
+    match DeviceNotification::register(handle, move |event| signals.post(&guid, event)) {
+        Ok(notification) => Some(notification),
+        Err(e) => {
+            tracing::warn!(
+                volume = %state.mount_prefix(),
+                error = %e,
+                "cannot watch for the volume's removal; ejecting its disk needs the service stopped"
+            );
+            None
+        }
+    }
+}
+
+/// What a start worker hands back: the tail, and the notification that
+/// reports the removal of its volume (`None` when registering failed, which
+/// costs only safe removal of the disk).
+struct Started {
+    tail: TailHandle,
+    notification: Option<DeviceNotification>,
 }
 
 /// One supervised volume: its tail plus its revival history.
@@ -515,6 +838,10 @@ struct Supervised {
     state: Arc<VolumeState>,
     /// `None` until a start succeeds.
     tail: Option<TailHandle>,
+    /// Reports the removal of the volume the current tail opened.
+    notification: Option<DeviceNotification>,
+    /// Where `notification`, and those of later starts, post.
+    signals: Arc<StopFlag>,
     /// Revivals since the budget was last refunded.
     revive_attempts: u32,
     /// When the current unbroken run of healthy observations (a fresh
@@ -540,7 +867,7 @@ struct PendingRevival {
     /// [`Supervised::launch`]). Once this receiver drops, the worker's send
     /// fails and the worker shuts down any tail it built, so abandoning a
     /// wedged worker can never leak a live writer.
-    rx: mpsc::Receiver<std::io::Result<TailHandle>>,
+    rx: mpsc::Receiver<std::io::Result<Started>>,
     /// Real handle to the worker thread, so a wedged `open_volume` can be
     /// cancelled; `None` only if duplication failed on the worker.
     io: Option<gozler_winfs::ThreadIoHandle>,
@@ -566,11 +893,21 @@ const TEARDOWN_WAIT: Duration = Duration::from_secs(5);
 /// cannot stretch teardown past what [`SUPERVISOR_JOIN_WAIT`] covers.
 const PENDING_DRAIN_WAIT: Duration = Duration::from_secs(3);
 
+/// The longest letting go of a volume takes, and so [`Fleet::stop_all`] for
+/// all of them: a pending start's drain, then its tails' teardown, whose last
+/// poll can end a [`TEARDOWN_POLL`] past its deadline.
+const RELEASE_MAX: Duration = PENDING_DRAIN_WAIT
+    .saturating_add(TEARDOWN_WAIT)
+    .saturating_add(TEARDOWN_POLL);
+
 /// Total time [`Supervisor::shutdown`] waits for the supervision thread
-/// itself. It must comfortably exceed the thread's legitimate teardown worst
-/// case, [`TEARDOWN_WAIT`] plus [`PENDING_DRAIN_WAIT`]. A test pins the
-/// coupling.
-const SUPERVISOR_JOIN_WAIT: Duration = Duration::from_secs(15);
+/// itself. The thread sees the stop between steps (see [`Fleet::act_on`] and
+/// [`Fleet::reconcile`]), so its legitimate worst case is the step under way,
+/// one release, then [`Fleet::stop_all`]: two [`RELEASE_MAX`], here with
+/// 3.5 s to spare, 20 s in all. A test pins the coupling.
+const SUPERVISOR_JOIN_WAIT: Duration = RELEASE_MAX
+    .saturating_mul(2)
+    .saturating_add(Duration::from_millis(3_500));
 
 /// The supervisor thread body: run the scan loop, then stop every tail. The
 /// scan loop is unwind-guarded because the tails were moved in here: a panic
@@ -591,11 +928,14 @@ fn supervise(mut fleet: Fleet, stop: &StopFlag) {
         // Live and the query server keeps serving. Only supervision (stall
         // rescue, revival, volume discovery) is lost; park until shutdown so
         // teardown still stops and joins everything properly.
+        // A removal posted meanwhile is dropped unanswered, so its callback
+        // does not wait for what nobody can do.
         tracing::error!(
-            "volume supervisor panicked; tails keep running unsupervised (no stuck-I/O rescue, revival or new volumes) until shutdown"
+            "volume supervisor panicked; tails keep running unsupervised (no stuck-I/O rescue, revival, new volumes or safe removal) until shutdown"
         );
         let mut signals = stop.signals.lock();
         while !signals.stopped {
+            signals.posted.clear();
             stop.wake.wait(&mut signals);
         }
     }
@@ -607,7 +947,7 @@ fn supervise(mut fleet: Fleet, stop: &StopFlag) {
 /// stops it with the rest. A worker that stays wedged is abandoned; dropping
 /// its receiver makes its eventual send fail, and the worker then shuts down
 /// anything it built, so nothing leaks.
-fn drain_pending(pending: PendingRevival, mount: &str, deadline: Instant) -> Option<TailHandle> {
+fn drain_pending(pending: PendingRevival, mount: &str, deadline: Instant) -> Option<Started> {
     if let Some(io) = &pending.io {
         let _ = gozler_winfs::cancel_synchronous_io(io);
     }
@@ -623,7 +963,7 @@ fn drain_pending(pending: PendingRevival, mount: &str, deadline: Instant) -> Opt
         Err(_) => {
             tracing::warn!(
                 volume = %mount,
-                "a tail start is still blocked at shutdown; abandoning it (it cleans up anything it builds)"
+                "a tail start is still blocked; abandoning it (it cleans up anything it builds)"
             );
             None
         }
@@ -634,24 +974,45 @@ fn drain_pending(pending: PendingRevival, mount: &str, deadline: Instant) -> Opt
 /// need no more supervision; then bring the volumes in step with the machine.
 /// Returns when the stop flag flips.
 fn scan_loop(fleet: &mut Fleet, stop: &StopFlag) {
+    let mut next_scan = Instant::now() + SCAN_INTERVAL;
     loop {
-        let settings_changed = {
+        let (settings_changed, posted) = {
             let mut signals = stop.signals.lock();
-            if !signals.stopped && !signals.settings_changed {
-                stop.wake.wait_for(&mut signals, SCAN_INTERVAL);
+            while !signals.stopped
+                && !signals.settings_changed
+                && signals.posted.is_empty()
+                && Instant::now() < next_scan
+            {
+                stop.wake.wait_until(&mut signals, next_scan);
             }
             if signals.stopped {
                 return;
             }
-            std::mem::take(&mut signals.settings_changed)
+            (
+                std::mem::take(&mut signals.settings_changed),
+                std::mem::take(&mut signals.posted),
+            )
         };
-        if settings_changed {
-            // Only the settings: scanning early would cut short the grace a
-            // starting tail gets before its first poll.
-            fleet.apply_settings();
-            if fleet.include.take_rebuild() {
-                fleet.rebuild_all();
+        // A removal is acted on as soon as it is posted, between scans: the
+        // removal it asks about waits on the answer.
+        let Some(relist) = fleet.act_on(posted) else {
+            return;
+        };
+        if relist || settings_changed {
+            // Scanning now would cut short the grace a tail started here
+            // gets before its first poll, so the next scan waits a full
+            // interval.
+            if settings_changed {
+                fleet.apply_settings();
+                if fleet.include.take_rebuild() {
+                    fleet.rebuild_all();
+                }
+            } else {
+                fleet.reconcile(fleet.enumerated.clone(), fleet.enumerated_at);
             }
+            next_scan = Instant::now() + SCAN_INTERVAL;
+        }
+        if Instant::now() < next_scan {
             continue;
         }
         let now = awake_secs();
@@ -660,16 +1021,22 @@ fn scan_loop(fleet: &mut Fleet, stop: &StopFlag) {
         while i < supervised.len() {
             if supervised[i].scan(now) {
                 i += 1;
-            } else if let Some(tail) = supervised.swap_remove(i).tail {
-                // Given up on, or a snapshot: its thread already retired, so
-                // this join is immediate.
+                continue;
+            }
+            // Given up on, or a snapshot: its thread already retired, so
+            // this join is immediate.
+            let done = supervised.swap_remove(i);
+            retire(done.notification.into_iter().collect());
+            if let Some(tail) = done.tail {
                 tail.shutdown();
             }
         }
+        fleet.expire_removing();
         // After the scan, so a volume found now gets its first poll a full
         // scan interval after its start, the grace `poll_revival` assumes.
         fleet.discover();
         fleet.settle_once_indexed();
+        next_scan = Instant::now() + SCAN_INTERVAL;
     }
 }
 
@@ -727,10 +1094,12 @@ fn stop_tails(mut tails: Vec<TailHandle>) {
 impl Supervised {
     /// A volume that has no tail yet, with its first start under way. The
     /// first start is not a revival, so it costs no budget.
-    fn start(state: Arc<VolumeState>) -> Supervised {
+    fn start(state: Arc<VolumeState>, signals: Arc<StopFlag>) -> Supervised {
         let mut supervised = Supervised {
             state,
             tail: None,
+            notification: None,
+            signals,
             revive_attempts: 0,
             beating_since: None,
             pending: None,
@@ -742,16 +1111,19 @@ impl Supervised {
 
     /// Every tail this volume holds or has in flight, resolving a pending
     /// start by `deadline` (see [`drain_pending`]), so the caller stops them
-    /// together.
-    fn into_tails(self, deadline: Instant) -> Vec<TailHandle> {
+    /// together, and the removal notifications they registered.
+    fn into_parts(self, deadline: Instant) -> (Vec<TailHandle>, Vec<DeviceNotification>) {
         let mut tails = Vec::new();
+        let mut notifications = Vec::new();
         if let Some(pending) = self.pending
             && let Some(fresh) = drain_pending(pending, self.state.mount_prefix(), deadline)
         {
-            tails.push(fresh);
+            tails.push(fresh.tail);
+            notifications.extend(fresh.notification);
         }
         tails.extend(self.tail);
-        tails
+        notifications.extend(self.notification);
+        (tails, notifications)
     }
 
     /// One scan of this volume. Returns false when supervision should end.
@@ -784,7 +1156,8 @@ impl Supervised {
             if let Some(retired) = self.tail.take() {
                 retired.shutdown();
             }
-            *self = Supervised::start(self.state.clone());
+            retire(self.notification.take().into_iter().collect());
+            *self = Supervised::start(self.state.clone(), self.signals.clone());
             return true;
         }
         // Sampled at scan granularity, which can only under-count health,
@@ -855,6 +1228,7 @@ impl Supervised {
     /// later scans. The tail's first act is the full build.
     fn launch(&mut self) {
         let state = self.state.clone();
+        let signals = self.signals.clone();
         let (io_tx, io_rx) = mpsc::sync_channel(1);
         // Capacity 0 (rendezvous) on purpose: a buffered channel would let
         // the worker's send "succeed" with nobody listening, right as
@@ -871,7 +1245,11 @@ impl Supervised {
                 let _ = io_tx.send(gozler_winfs::current_thread_io_handle());
                 let outcome = bootstrap::open_volume(&state.guid)
                     .map_err(|e| std::io::Error::other(format!("{e:#}")))
-                    .and_then(|handle| tail::spawn(state.clone(), handle));
+                    .and_then(|handle| {
+                        let notification = watch_removal(&handle, &state, signals);
+                        let tail = tail::spawn(state.clone(), handle)?;
+                        Ok(Started { tail, notification })
+                    });
                 // A volume with no index says why now, not when the next scan
                 // collects this outcome. The revivals still follow.
                 if let Err(e) = &outcome
@@ -883,8 +1261,8 @@ impl Supervised {
                     // The supervisor stopped listening (teardown abandoned
                     // this worker). A tail built anyway must not run
                     // unowned; its thread already checks a fresh stop flag.
-                    if let Ok(tail) = returned.0 {
-                        tail.shutdown();
+                    if let Ok(started) = returned.0 {
+                        started.tail.shutdown();
                     }
                 }
             });
@@ -925,14 +1303,19 @@ impl Supervised {
                 // immediate.
                 let _ = pending.worker.join();
                 match outcome {
-                    Ok(fresh) => {
-                        tracing::info!(volume = %fresh.mount, "tail started");
+                    Ok(Started { tail, notification }) => {
+                        tracing::info!(volume = %tail.mount, "tail started");
                         // The old thread already retired, so this join is
                         // immediate; shutting it down (not just dropping
                         // it) reaps the thread.
-                        if let Some(old) = self.tail.replace(fresh) {
+                        if let Some(old) = self.tail.replace(tail) {
                             old.shutdown();
                         }
+                        retire(
+                            std::mem::replace(&mut self.notification, notification)
+                                .into_iter()
+                                .collect(),
+                        );
                     }
                     Err(e) => {
                         tracing::error!(
@@ -1111,15 +1494,11 @@ mod tests {
             bootstrap::Filesystem::Ntfs,
             Arc::new(defaults.rules_for(indexed)),
         )));
-        let mut fleet = Fleet {
-            volumes: volumes.clone(),
-            include: Arc::new(Include::new(defaults, None, Box::new(|| {}))),
-            enumerated: Vec::new(),
-            supervised: Vec::new(),
-            skipped: HashSet::new(),
-            discovery: None,
-            starting: None,
-        };
+        let mut fleet = Fleet::new(
+            volumes.clone(),
+            Arc::new(Include::new(defaults, None, Box::new(|| {}))),
+            stop_flag(),
+        );
         let listed = |guid: &str, is_fixed, filesystem: Option<&str>| VolumeInfo {
             guid_path: guid.into(),
             mounts: Vec::new(),
@@ -1129,14 +1508,75 @@ mod tests {
         let guids =
             || -> Vec<String> { volumes.current().iter().map(|v| v.guid.clone()).collect() };
 
-        fleet.reconcile(vec![
-            listed(indexed, true, None),
-            listed(usb_stick, false, Some("FAT32")),
-        ]);
+        fleet.reconcile(
+            vec![
+                listed(indexed, true, None),
+                listed(usb_stick, false, Some("FAT32")),
+            ],
+            Instant::now(),
+        );
         assert_eq!(guids(), [indexed]);
 
-        fleet.reconcile(Vec::new());
+        fleet.reconcile(Vec::new(), Instant::now());
         assert!(guids().is_empty(), "a volume that is gone leaves the index");
+    }
+
+    fn stop_flag() -> Arc<StopFlag> {
+        Arc::new(StopFlag {
+            signals: Mutex::new(Signals::default()),
+            wake: Condvar::new(),
+        })
+    }
+
+    /// Windows refuses to remove a disk while gozlerd holds its volume open.
+    /// A removal query lets go of the volume and keeps it out of discovery
+    /// until Windows says how the removal ended: a removal that failed
+    /// indexes the disk again, and a disk removed stays out even of a
+    /// listing begun before the removal.
+    #[test]
+    fn a_removal_lets_go_of_the_volume_until_it_ends() {
+        let disk = r"\\?\Volume{44444444-0000-0000-0000-000000000000}\";
+        let defaults = IndexSettings::default();
+        let volumes = Arc::new(VolumeRegistry::default());
+        let mut fleet = Fleet::new(
+            volumes.clone(),
+            Arc::new(Include::new(defaults, None, Box::new(|| {}))),
+            stop_flag(),
+        );
+        let listing = vec![VolumeInfo {
+            guid_path: disk.into(),
+            mounts: vec![r"X:\".into()],
+            is_fixed: true,
+            filesystem: Some("NTFS".into()),
+        }];
+        let indexed = || volumes.current().iter().any(|v| v.guid == disk);
+        let removal = |event| Removal {
+            guid: disk.into(),
+            event,
+        };
+        let before = Instant::now();
+        fleet.reconcile(listing.clone(), before);
+        assert!(indexed());
+
+        assert!(!fleet.on_removal(removal(DeviceEvent::QueryRemove)));
+        assert!(
+            !indexed(),
+            "the volume is let go of before the query is answered"
+        );
+        fleet.reconcile(listing.clone(), Instant::now());
+        assert!(!indexed(), "a disk being removed is not found again");
+
+        assert!(fleet.on_removal(removal(DeviceEvent::QueryRemoveFailed)));
+        fleet.reconcile(listing.clone(), Instant::now());
+        assert!(indexed(), "a removal that failed indexes the disk again");
+
+        assert!(!fleet.on_removal(removal(DeviceEvent::QueryRemove)));
+        assert!(!fleet.on_removal(removal(DeviceEvent::Removed)));
+        fleet.reconcile(listing, before);
+        assert!(
+            !indexed(),
+            "a listing begun before the removal still names it"
+        );
     }
 
     /// Only a tail applies changed Include rules, so a volume that has none,
@@ -1157,20 +1597,17 @@ mod tests {
             exclude_hidden: true,
             ..defaults
         };
-        let mut fleet = Fleet {
+        let mut fleet = Fleet::new(
             volumes,
-            include: Arc::new(Include::new(changed, None, Box::new(|| {}))),
-            enumerated: vec![VolumeInfo {
-                guid_path: snapshot.into(),
-                mounts: vec![r"S:\".into()],
-                is_fixed: true,
-                filesystem: Some("NTFS".into()),
-            }],
-            supervised: Vec::new(),
-            skipped: HashSet::new(),
-            discovery: None,
-            starting: None,
-        };
+            Arc::new(Include::new(changed, None, Box::new(|| {}))),
+            stop_flag(),
+        );
+        fleet.enumerated = vec![VolumeInfo {
+            guid_path: snapshot.into(),
+            mounts: vec![r"S:\".into()],
+            is_fixed: true,
+            filesystem: Some("NTFS".into()),
+        }];
 
         fleet.apply_settings();
         let guids: Vec<_> = fleet.supervised.iter().map(|s| &s.state.guid).collect();
@@ -1195,19 +1632,15 @@ mod tests {
         ));
         let volumes = Arc::new(VolumeRegistry::default());
         volumes.add(state.clone());
-        let mut fleet = Fleet {
+        let mut fleet = Fleet::new(
             volumes,
-            include: Arc::new(Include::new(
+            Arc::new(Include::new(
                 IndexSettings::default(),
                 None,
                 Box::new(|| {}),
             )),
-            enumerated: Vec::new(),
-            supervised: Vec::new(),
-            skipped: HashSet::new(),
-            discovery: None,
-            starting: None,
-        };
+            stop_flag(),
+        );
 
         fleet.rebuild_all();
         let guids: Vec<_> = fleet.supervised.iter().map(|s| &s.state.guid).collect();
@@ -1240,9 +1673,11 @@ mod tests {
         assert!(BUSY_STALL > BEAT_STALL);
         assert!(BEAT_FRESH >= SCAN_INTERVAL);
         assert!(BEAT_FRESH < BEAT_STALL);
-        // Shutdown outwaits draining pending revivals, then stopping the
-        // tails, with slack.
-        assert!(SUPERVISOR_JOIN_WAIT >= TEARDOWN_WAIT + PENDING_DRAIN_WAIT + TEARDOWN_WAIT);
+        // Shutdown outwaits the release under way, then stop_all, with
+        // slack, and a removal query outwaits one release.
+        assert!(RELEASE_MAX >= PENDING_DRAIN_WAIT + TEARDOWN_WAIT + TEARDOWN_POLL);
+        assert!(SUPERVISOR_JOIN_WAIT > RELEASE_MAX + RELEASE_MAX);
+        assert!(RELEASE_WAIT > RELEASE_MAX);
         // A zero budget would make revival dead code.
         const { assert!(MAX_REVIVES > 0) };
     }

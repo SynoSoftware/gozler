@@ -184,7 +184,7 @@ fn split_multi_sz(buf: &[u16]) -> Vec<String> {
 }
 
 /// An owned volume handle; `CloseHandle` on drop.
-pub struct VolumeHandle(FileHandle);
+pub struct VolumeHandle(pub(crate) FileHandle);
 
 impl VolumeHandle {
     /// The raw `HANDLE`, for this crate's own FSCTL calls.

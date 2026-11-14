@@ -30,6 +30,8 @@ mod console;
 #[cfg(windows)]
 mod copy;
 #[cfg(windows)]
+mod device_notify;
+#[cfg(windows)]
 mod elevation;
 #[cfg(windows)]
 mod entry;
@@ -83,6 +85,8 @@ pub use clock::{
 };
 #[cfg(windows)]
 pub use console::{console_width, enable_console_color};
+#[cfg(windows)]
+pub use device_notify::{DeviceEvent, DeviceNotification};
 #[cfg(windows)]
 pub use locale::first_day_of_week;
 #[cfg(windows)]

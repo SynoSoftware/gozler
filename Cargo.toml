@@ -41,6 +41,7 @@ jiff = "0.2"
 # winfs
 windows-sys = { version = "0.61", features = [
     "Wdk_Foundation",
+    "Win32_Devices_DeviceAndDriverInstallation",
     "Wdk_Storage_FileSystem",
     "Wdk_System_SystemServices",
     "Win32_Foundation",
