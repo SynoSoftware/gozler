@@ -232,7 +232,7 @@ impl NameStore {
             return id;
         }
 
-        let folded_bytes = crate::fold::fold(name);
+        let folded_bytes = crate::fold::fold_accents(name);
         let folded = Self::push(&mut self.folded, &folded_bytes);
         let raw = if folded_bytes.as_slice() == name {
             NameRef {

@@ -370,7 +370,7 @@ fn children_of_a_removed_folder_move_to_lost_found() {
     idx.apply_batch(&[delete(frn(100)), create(frn(102), root_frn(), "new", true)]);
     let new = idx.head_of(frn(102)).unwrap();
     assert_eq!(path_set(&idx), BTreeSet::from(["new".to_string()]));
-    assert_eq!(idx.child_dir(new, b"sub".to_vec()), None);
+    assert_eq!(idx.child_dir(new, b"sub"), None);
     assert!(
         idx.has_orphans(),
         "queries must check for entries without a path"

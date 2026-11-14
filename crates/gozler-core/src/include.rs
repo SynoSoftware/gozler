@@ -17,7 +17,7 @@
 //! [`VolumeIndex::count_kept`]: crate::index::VolumeIndex::count_kept
 
 use crate::attributes::PackedAttributes;
-use crate::fold::fold;
+use crate::fold::fold_accents;
 use crate::query::ParsedQuery;
 use crate::query::wildcard::{CodePointBuf, Wildcard};
 use rustc_hash::FxHashMap;
@@ -160,7 +160,7 @@ impl IndexSettings {
             .split(';')
             .map(str::trim)
             .filter(|pattern| !pattern.is_empty())
-            .map(|pattern| fold(pattern.as_bytes()))
+            .map(|pattern| fold_accents(pattern.as_bytes()))
             .collect()
     }
 
@@ -401,7 +401,7 @@ impl IncludedFolder {
 fn folded_parts(path: &str) -> Vec<Vec<u8>> {
     path.split(['\\', '/'])
         .filter(|p| !p.is_empty())
-        .map(|p| fold(p.as_bytes()))
+        .map(|p| fold_accents(p.as_bytes()))
         .collect()
 }
 
@@ -653,7 +653,7 @@ mod tests {
         for part in path.split('\\') {
             verdict = rules.verdict(
                 place,
-                &fold(part.as_bytes()),
+                &fold_accents(part.as_bytes()),
                 PackedAttributes::default(),
                 true,
                 &mut CodePointBuf::new(),
@@ -703,7 +703,7 @@ mod tests {
         let verdict = |name: &str, attributes: u32| {
             rules.verdict(
                 rules.root(),
-                &fold(name.as_bytes()),
+                &fold_accents(name.as_bytes()),
                 PackedAttributes::from_record(attributes),
                 false,
                 &mut CodePointBuf::new(),

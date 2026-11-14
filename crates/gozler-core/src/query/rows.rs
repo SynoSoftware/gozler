@@ -42,7 +42,7 @@ use super::engine::{
 use super::order::{OrderFields, SortRecord, compare, compare_paths};
 use super::paths::{FolderCopy, FolderId, ResultNames, root_name};
 use crate::attributes::Attributes;
-use crate::fold::fold;
+use crate::fold::fold_accents;
 use crate::index::{SeenBy, VolumeIndex};
 use crate::scope::{Scope, VolumeMounts};
 use crate::types::{EntryIdx, Frn, SortDir, SortKey, SortSpec};
@@ -529,7 +529,7 @@ impl Reply {
 fn merge_paths(dir: SortDir, volumes: &[VolumeReader]) -> Merge {
     let roots: Vec<Vec<u8>> = volumes
         .iter()
-        .map(|v| fold(root_name(&v.answer.mount_prefix)))
+        .map(|v| fold_accents(root_name(&v.answer.mount_prefix)))
         .collect();
     let nested = roots.iter().enumerate().any(|(i, a)| {
         roots
@@ -630,7 +630,7 @@ impl VolumeReader {
         }
         let mut path = Vec::new();
         names.folder_path_into(head, &mut path);
-        self.folder_path = Some((head, fold(&path)));
+        self.folder_path = Some((head, fold_accents(&path)));
     }
 
     /// Whether this volume's next row comes before `other`'s, each read from

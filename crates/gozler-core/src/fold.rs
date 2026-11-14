@@ -1,4 +1,6 @@
-//! Case folding for case-insensitive matching.
+//! Case folding for case-insensitive matching, in two forms: [`fold`], which
+//! keeps accents, for telling names apart as Windows does, and
+//! [`fold_accents`], which also drops them, for search.
 //!
 //! Two tiers: an ASCII fast path (`A..=Z` → `+0x20`) and, for non-ASCII,
 //! canonical decomposition, a simple 1:1 Unicode lowercase of each scalar (the
@@ -15,13 +17,25 @@
 //! Matching never affects index integrity. Both the needle and each candidate
 //! name are folded with the same function, so comparisons stay consistent.
 //!
+//! [`fold_accents`] compares as Everything does with Match Diacritics off, so
+//! `cafe` finds `Café`, `strasse` `Straße` and `kirmizi` `kırmızı`: it takes
+//! the compatibility decomposition (`ﬁ` is `fi`), drops the combining
+//! diacritical marks (U+0300 to U+036F), and spells the letters that carry
+//! their accent inside them as Everything does (`ß` is `ss`, `ø` is `o`). A
+//! mark with no letter before it is kept, so no name folds to nothing. The
+//! index keeps names in this form only, because a second folded copy of every
+//! name would cost memory on every volume; a name that only accents tell
+//! apart from another is told apart by [`fold`] of its stored name.
+//!
 //! Input and output are WTF-8. Unpaired surrogates (code points `U+D800..=
 //! U+DFFF`, which a real text needle can never contain) pass through
 //! unchanged.
 
 use crate::wtf8::{CodePoints, encode_code_point};
 use smallvec::SmallVec;
-use unicode_normalization::char::{canonical_combining_class, decompose_canonical};
+use unicode_normalization::char::{
+    canonical_combining_class, decompose_canonical, decompose_compatible,
+};
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 /// Folds `bytes` (WTF-8) into `out` (WTF-8), case-insensitively.
@@ -91,8 +105,84 @@ pub fn fold(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Folds `bytes` (WTF-8) into `out` (WTF-8), ignoring case and accents: the
+/// form search compares.
+pub fn fold_accents_into(bytes: &[u8], out: &mut Vec<u8>) {
+    // ASCII carries no accent and decomposes to itself.
+    if bytes.is_ascii() {
+        return fold_into(bytes, out);
+    }
+    fold_accents_non_ascii(bytes, out);
+}
+
+/// [`fold_accents_into`] into a new buffer.
+pub fn fold_accents(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    fold_accents_into(bytes, &mut out);
+    out
+}
+
+/// The non-ASCII path of [`fold_accents_into`], out of line for the reason
+/// [`fold_non_ascii`] is.
+#[inline(never)]
+fn fold_accents_non_ascii(bytes: &[u8], out: &mut Vec<u8>) {
+    let mut run: SmallVec<[char; 256]> = SmallVec::new();
+    for cp in CodePoints::new(bytes) {
+        match char::from_u32(cp) {
+            // A lowercase letter can decompose again, so its marks are
+            // dropped too.
+            Some(c) => decompose_compatible(c, |d| {
+                decompose_compatible(lower_char(d), |e| push_without_accent(&mut run, e));
+            }),
+            None => {
+                compose_into(&mut run, out);
+                encode_code_point(cp, out);
+            }
+        }
+    }
+    compose_into(&mut run, out);
+}
+
+/// Appends decomposed lowercase `c` to `run` without its accent: a
+/// diacritical mark after a letter is dropped, and a letter that carries its
+/// accent inside it is spelled without it.
+fn push_without_accent(run: &mut SmallVec<[char; 256]>, c: char) {
+    if is_diacritic(c) && !run.is_empty() {
+        return;
+    }
+    match without_accent(c) {
+        Some(spelled) => run.extend(spelled.chars()),
+        None => run.push(c),
+    }
+}
+
+/// Whether `c` is a combining diacritical mark, the marks Everything ignores.
+pub(crate) fn is_diacritic(c: char) -> bool {
+    ('\u{0300}'..='\u{036F}').contains(&c)
+}
+
+/// How Everything spells a lowercase letter whose accent no decomposition
+/// takes off.
+fn without_accent(c: char) -> Option<&'static str> {
+    Some(match c {
+        'ß' => "ss",
+        'æ' => "ae",
+        'œ' => "oe",
+        'ø' => "o",
+        'ł' => "l",
+        'đ' => "d",
+        'þ' => "th",
+        'ħ' => "h",
+        'ŧ' => "t",
+        'ŋ' => "n",
+        'ı' => "i",
+        'ς' => "σ",
+        _ => return None,
+    })
+}
+
 /// Each character boundary of `text`, its end included, with the length of
-/// [`fold`] of the text before it.
+/// [`fold_accents`] of the text before it, which search compares.
 ///
 /// Composition and the reordering of marks make that length differ from the
 /// sum of each character's folded length, and it can even shrink as the text
@@ -103,7 +193,7 @@ pub(crate) fn folded_lengths(text: &str) -> Vec<(usize, usize)> {
     let mut scratch = Vec::new();
     let mut folded = |part: &str| {
         scratch.clear();
-        fold_into(part.as_bytes(), &mut scratch);
+        fold_accents_into(part.as_bytes(), &mut scratch);
         scratch.len()
     };
     let mut lengths = Vec::with_capacity(text.len() + 1);
@@ -120,20 +210,25 @@ pub(crate) fn folded_lengths(text: &str) -> Vec<(usize, usize)> {
     lengths
 }
 
-/// Whether `c` folds apart from the text before it: its decomposition,
-/// lowercased, starts with a starter that composes with nothing before it
-/// (combining class 0 and NFC quick check Yes). Neither composition nor the
-/// reordering of marks crosses such a starter.
+/// Whether `c` folds apart from the text before it in [`fold_accents`]: its
+/// decomposition, lowercased and spelled without its accent, starts with a
+/// starter that composes with nothing before it (combining class 0 and NFC
+/// quick check Yes). Neither composition nor the reordering of marks crosses
+/// such a starter, and a diacritical mark, which is no starter, is dropped
+/// only after one.
 fn starts_segment(c: char) -> bool {
     let first = |c: char| {
         let mut first = None;
-        decompose_canonical(c, |d| {
+        decompose_compatible(c, |d| {
             first.get_or_insert(d);
         });
         first.unwrap_or(c)
     };
-    // The lowercase can decompose again, as `compose_into` decomposes it.
-    let starter = first(lower_char(first(c)));
+    // The lowercase can decompose again, as `fold_accents` decomposes it.
+    let lower = first(lower_char(first(c)));
+    let starter = without_accent(lower)
+        .and_then(|spelled| spelled.chars().next())
+        .unwrap_or(lower);
     canonical_combining_class(starter) == 0
         && is_nfc_quick(std::iter::once(starter)) == IsNormalized::Yes
 }
@@ -236,9 +331,43 @@ mod tests {
         assert_eq!(crate::wtf8::to_utf16(&folded), vec![0x0061, 0xD800, 0x0062]);
     }
 
+    /// Search ignores accents as Everything does: the marks, the letters
+    /// that hold theirs, and the compatibility forms, in either normalization
+    /// form; a lone mark is kept, so no name folds to nothing.
+    #[test]
+    fn search_folds_away_accents() {
+        for (name, query) in [
+            ("Caf\u{00E9}", "cafe"),
+            ("Cafe\u{0301}", "cafe"),
+            ("Stra\u{00DF}e", "strasse"),
+            ("k\u{0131}rm\u{0131}z\u{0131}", "kirmizi"),
+            ("\u{FB01}le", "file"),
+            ("\u{00C6}SIR", "aesir"),
+            ("\u{00D8}resund", "oresund"),
+            ("\u{0141}\u{00F3}d\u{017A}", "lodz"),
+        ] {
+            assert_eq!(fold_accents(name.as_bytes()), query.as_bytes(), "{name}");
+        }
+        assert_eq!(fold_accents("\u{0301}".as_bytes()), "\u{0301}".as_bytes());
+        // Accents still tell names apart where Windows does.
+        assert_ne!(fold("caf\u{00E9}".as_bytes()), fold(b"cafe"));
+    }
+
     use proptest::prelude::*;
 
     proptest! {
+        /// `fold_accents` is total and idempotent, as `fold` is: the index
+        /// keeps names in this form and every needle is folded the same way,
+        /// so a folded name folded again must not change.
+        #[test]
+        fn fold_accents_is_total_and_idempotent(units in proptest::collection::vec(any::<u16>(), 0..64)) {
+            let mut bytes = Vec::new();
+            crate::wtf8::from_utf16(&units, &mut bytes);
+            let once = fold_accents(&bytes);
+            let twice = fold_accents(&once);
+            prop_assert_eq!(once, twice);
+        }
+
         /// `fold` is total (never panics) and idempotent over arbitrary UTF-16
         /// (unpaired surrogates included): it is the case-fold basis of every
         /// query match, so folding a folded name must be a fixpoint.

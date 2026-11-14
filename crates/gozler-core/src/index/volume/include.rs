@@ -8,7 +8,7 @@
 //! folder would cost memory instead of nothing.
 
 use super::*;
-use crate::fold::fold;
+use crate::fold::fold_accents;
 use crate::include::{Place, Verdict};
 use crate::query::wildcard::CodePointBuf;
 use crate::usn::record::{USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE};
@@ -137,7 +137,13 @@ impl VolumeIndex {
         };
         let verdict = place.map_or(Verdict::LeftOut, |place| {
             let attributes = PackedAttributes::from_record(rec.attributes);
-            rules.verdict(place, &fold(&rec.name), attributes, rec.is_dir(), buf)
+            rules.verdict(
+                place,
+                &fold_accents(&rec.name),
+                attributes,
+                rec.is_dir(),
+                buf,
+            )
         });
         let head = self.head_of(rec.frn);
         if verdict == Verdict::LeftOut {
@@ -206,7 +212,13 @@ impl VolumeIndex {
             .iter()
             .filter(|link| match self.standing(rules, link.parent, &mut buf) {
                 Standing::At(place) => matches!(
-                    rules.verdict(place, &fold(&link.name), attributes, false, &mut buf),
+                    rules.verdict(
+                        place,
+                        &fold_accents(&link.name),
+                        attributes,
+                        false,
+                        &mut buf
+                    ),
                     Verdict::Kept(_)
                 ),
                 Standing::LeftOut => false,

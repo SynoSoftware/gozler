@@ -27,7 +27,7 @@ use super::rows::VolumeRows;
 use super::through::{LinkPaths, Target as LinkTarget, Through};
 use super::wildcard::{CodePointBuf, OneName, Wildcard};
 use crate::attributes::PackedAttributes;
-use crate::fold::fold;
+use crate::fold::fold_accents;
 use crate::index::store::{NameId, NamePair};
 use crate::index::{EntryView, SeenBy, VolumeIndex};
 use crate::links::Links;
@@ -294,8 +294,9 @@ pub(super) enum Matcher {
     /// Matches the whole text.
     Wildcard(Wildcard),
     /// Compiled case-insensitive unless the query matches case, when it
-    /// tests the folded text like every other matcher. The pattern itself is
-    /// never folded, because folding would turn `\D` into `\d`.
+    /// tests the folded text like every other matcher. Only the pattern's
+    /// non-ASCII runs are folded ([`folded_pattern`]), because folding its
+    /// ASCII would turn `\D` into `\d`.
     Regex(Regex),
     Ordered {
         terms: Vec<memmem::Finder<'static>>,
@@ -774,7 +775,7 @@ impl Check {
             if match_case {
                 s.as_bytes().to_vec()
             } else {
-                fold(s.as_bytes())
+                fold_accents(s.as_bytes())
             }
         };
         let finder = |s: &str| memmem::Finder::new(&text(s)).into_owned();
@@ -789,7 +790,12 @@ impl Check {
         };
         let wildcard = |s: &str| Wildcard::compile(&text(s));
         let regex = |pattern: &str| {
-            RegexBuilder::new(pattern)
+            let pattern = if match_case {
+                std::borrow::Cow::Borrowed(pattern)
+            } else {
+                std::borrow::Cow::Owned(folded_pattern(pattern))
+            };
+            RegexBuilder::new(&pattern)
                 .case_insensitive(!match_case)
                 .size_limit(REGEX_SIZE_LIMIT)
                 .dfa_size_limit(REGEX_CACHE_LIMIT)
@@ -824,9 +830,11 @@ impl Check {
                     term_match: *term_match,
                 },
             ),
-            Test::Extension(exts) => {
-                Check::Extension(exts.iter().map(|ext| fold(ext.as_bytes())).collect())
-            }
+            Test::Extension(exts) => Check::Extension(
+                exts.iter()
+                    .map(|ext| fold_accents(ext.as_bytes()))
+                    .collect(),
+            ),
             Test::Parent(s) => Check::Parent(text(s.trim_end_matches(['\\', '/']))),
             Test::Size(range) => Check::Size(*range),
             Test::Unknown(field) => Check::Unknown(*field),
@@ -929,7 +937,7 @@ impl Check {
             Check::Extension(exts) => match extension(entry.name(), entry.is_dir()) {
                 Some(ext) => {
                     scratch.extension.clear();
-                    crate::fold::fold_into(ext, &mut scratch.extension);
+                    crate::fold::fold_accents_into(ext, &mut scratch.extension);
                     exts.contains(&scratch.extension)
                 }
                 None => false,
@@ -972,6 +980,41 @@ fn holds_from(range: SizeRange, floor: u64) -> Option<bool> {
     } else {
         None
     }
+}
+
+/// `pattern` as a case-insensitive regular expression tests the folded text:
+/// each run of non-ASCII characters folded as [`fold_accents`] folds names,
+/// and escaped, so `regex:café` finds `Café` and `Cafe` as `café` does. The
+/// ASCII keeps its meaning, because the pattern's syntax is ASCII and the
+/// case-insensitive flag answers the case of its letters. A diacritical
+/// mark after other text is dropped, as folding a name drops it.
+fn folded_pattern(pattern: &str) -> String {
+    fn push_run(run: &mut String, out: &mut String) {
+        let text = if out.is_empty() {
+            run.as_str()
+        } else {
+            run.trim_start_matches(crate::fold::is_diacritic)
+        };
+        let folded = fold_accents(text.as_bytes());
+        out.push_str(&regex::escape(&String::from_utf8_lossy(&folded)));
+        run.clear();
+    }
+    let mut out = String::with_capacity(pattern.len());
+    let mut run = String::new();
+    for c in pattern.chars() {
+        if c.is_ascii() {
+            if !run.is_empty() {
+                push_run(&mut run, &mut out);
+            }
+            out.push(c);
+        } else {
+            run.push(c);
+        }
+    }
+    if !run.is_empty() {
+        push_run(&mut run, &mut out);
+    }
+    out
 }
 
 impl Matcher {
@@ -1268,7 +1311,7 @@ impl MatchedParts {
                 .targets
                 .iter()
                 .enumerate()
-                .map(|(number, target)| (fold(target.raw.as_bytes()), number))
+                .map(|(number, target)| (fold_accents(target.raw.as_bytes()), number))
                 .collect();
         }
         Ok(parts)
@@ -1395,7 +1438,7 @@ impl<'a> Compared<'a> {
         });
         Self {
             raw,
-            text: fold(raw.as_bytes()).into(),
+            text: fold_accents(raw.as_bytes()).into(),
             boundaries,
         }
     }
@@ -1822,7 +1865,7 @@ fn scan_with<'q, 'i>(
     let root = if query.match_case {
         root.to_vec()
     } else {
-        fold(root)
+        fold_accents(root)
     };
     if query.root_fails(&root) {
         return scan;
@@ -1897,7 +1940,7 @@ fn scan_with<'q, 'i>(
     // root's name holds the needle, which every full path starts with.
     if !query.match_case
         && let Some((bit, needle)) = &query.component_literal
-        && memmem::find(&fold(root_name(mount_prefix)), needle).is_none()
+        && memmem::find(&fold_accents(root_name(mount_prefix)), needle).is_none()
     {
         if scan.visit_components(*bit, needle, scope) {
             return scan;
@@ -2559,7 +2602,7 @@ pub fn resolve_scope(index: &VolumeIndex, path: &[u8], match_case: bool) -> Opti
     if !match_case {
         let mut cur = index.root();
         for comp in components {
-            cur = index.child_dir(cur, crate::fold::fold(comp))?;
+            cur = index.child_dir(cur, comp)?;
         }
         return Some(cur);
     }
@@ -2708,6 +2751,40 @@ mod tests {
             assert_eq!(found, sorted(every), "{text}");
             assert!(!found.is_empty() || literals == 0, "{text}");
         }
+    }
+
+    /// A search ignores accents in names, in the query, in a regular
+    /// expression and in a `-path` folder, and of two folders that only accents tell apart, the one
+    /// spelled as typed is the scope. One fold left keeping accents where
+    /// the index drops them would find no accented name at all.
+    #[test]
+    fn a_search_ignores_accents_and_a_scope_prefers_the_typed_spelling() {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        for r in [
+            enum_rec(frn(100), NTFS_ROOT_FRN, "Café", true),
+            enum_rec(frn(101), frn(100), "Résumé.pdf", false),
+            enum_rec(frn(102), NTFS_ROOT_FRN, "Cafe", true),
+            enum_rec(frn(103), frn(102), "resume.txt", false),
+        ] {
+            idx.insert_enum(&r);
+        }
+        for query in ["résume", r"regex:^r.sumé\."] {
+            let mut found = paths_under(&idx, r"C:\", query, None);
+            found.sort();
+            assert_eq!(
+                found,
+                [r"C:\Cafe\resume.txt", r"C:\Café\Résumé.pdf"],
+                "{query}"
+            );
+        }
+        assert_eq!(
+            paths_under(&idx, r"C:\", "resume", Some(r"C:\CAFÉ")),
+            [r"C:\Café\Résumé.pdf"]
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", "resume", Some(r"C:\cafe")),
+            [r"C:\Cafe\resume.txt"]
+        );
     }
 
     /// A case-sensitive scope follows the exact names down the child chains:
@@ -3372,7 +3449,7 @@ mod tests {
         raw.char_indices()
             .map(|(i, _)| i)
             .chain(std::iter::once(raw.len()))
-            .map(|i| (i, crate::fold::fold(&raw.as_bytes()[..i]).len()))
+            .map(|i| (i, crate::fold::fold_accents(&raw.as_bytes()[..i]).len()))
             .collect()
     }
 
@@ -4948,9 +5025,9 @@ mod tests {
         names
             .iter()
             .filter(|n| {
-                let fn_ = crate::fold::fold(n.as_bytes());
+                let fn_ = crate::fold::fold_accents(n.as_bytes());
                 terms.iter().all(|t| {
-                    let ft = crate::fold::fold(t.as_bytes());
+                    let ft = crate::fold::fold_accents(t.as_bytes());
                     fn_.windows(ft.len().max(1)).any(|w| w == ft.as_slice()) || ft.is_empty()
                 })
             })
@@ -5007,7 +5084,7 @@ mod tests {
             let out = run_query(&idx, r"C:\", &parsed, None, SortSpec::default(), None);
             let engine: BTreeSet<String> = texts(&out).into_iter().collect();
 
-            let needle = crate::fold::fold(term.as_bytes());
+            let needle = crate::fold::fold_accents(term.as_bytes());
             let mut naive = BTreeSet::new();
             for e in idx.live_entries().filter(|&e| !idx.is_synthetic(e)) {
                 let mut rel = Vec::new();
@@ -5015,7 +5092,7 @@ mod tests {
                     continue;
                 }
                 let full = [b"C:\\".as_slice(), &rel].concat();
-                let folded = crate::fold::fold(&full);
+                let folded = crate::fold::fold_accents(&full);
                 if folded.windows(needle.len()).any(|w| w == needle.as_slice()) {
                     naive.insert(crate::wtf8::to_string_lossy(&full));
                 }
@@ -5075,7 +5152,7 @@ mod tests {
                     continue;
                 }
                 let full = [mount_prefix.as_bytes(), &rel].concat();
-                let text = if match_case { full.clone() } else { crate::fold::fold(&full) };
+                let text = if match_case { full.clone() } else { crate::fold::fold_accents(&full) };
                 let passes = parsed.clauses.iter().all(|clause| {
                     clause.terms.iter().any(|term| {
                         let Ok(Check::Text(Target::Path, matcher)) = Check::new(&term.test, match_case)

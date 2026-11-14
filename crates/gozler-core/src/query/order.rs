@@ -244,7 +244,7 @@ pub(crate) fn folder_ranks(names: &ResultNames) -> Vec<u32> {
     let mut node_of: Vec<u32> = Vec::with_capacity(names.folder_count());
     let mut push = |parent: u32, name: &[u8]| {
         let start = folded.len();
-        crate::fold::fold_into(name, &mut folded);
+        crate::fold::fold_accents_into(name, &mut folded);
         nodes.push(RankNode {
             parent,
             name: start..folded.len(),
@@ -387,7 +387,7 @@ mod tests {
                     let folder = names.folder_at(position as u32).expect("in the table");
                     names.folder_path_into(folder, &mut path);
                     let mut key = Vec::new();
-                    crate::fold::fold_into(&path, &mut key);
+                    crate::fold::fold_accents_into(&path, &mut key);
                     key
                 })
                 .collect();

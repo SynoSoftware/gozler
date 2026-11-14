@@ -4,7 +4,7 @@
 
 use super::engine::{Matcher, is_word};
 use super::wildcard::CodePointBuf;
-use crate::fold::fold;
+use crate::fold::fold_accents;
 use crate::links::Links;
 use crate::wtf8::{CodePoints, encode_code_point};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -26,14 +26,14 @@ impl LinkPaths {
             if match_case {
                 s.as_bytes().to_vec()
             } else {
-                fold(s.as_bytes())
+                fold_accents(s.as_bytes())
             }
         };
         let mut targets = Vec::new();
         let mut numbers = FxHashMap::default();
         let mut seeds = Vec::new();
         for link in links.as_slice() {
-            let path = fold(link.target.as_bytes());
+            let path = fold_accents(link.target.as_bytes());
             let next = targets.len();
             let number = *numbers.entry(path.clone()).or_insert_with(|| {
                 targets.push(Target {
@@ -132,7 +132,7 @@ pub(super) fn nearest(
     path: &[u8],
     include_self: bool,
 ) -> Option<(usize, usize)> {
-    let compared = fold(path);
+    let compared = fold_accents(path);
     if include_self && let Some(&number) = numbers.get(&compared) {
         return Some((number, path.len()));
     }
@@ -335,14 +335,14 @@ mod tests {
         let path = if case {
             path.as_bytes().to_vec()
         } else {
-            fold(path.as_bytes())
+            fold_accents(path.as_bytes())
         };
         let mut buf = CodePointBuf::new();
         let numbers = paths
             .targets
             .iter()
             .enumerate()
-            .map(|(number, target)| (fold(target.raw.as_bytes()), number))
+            .map(|(number, target)| (fold_accents(target.raw.as_bytes()), number))
             .collect();
         matcher.matches(&path, &mut buf)
             || nearest(&numbers, &path, true)
@@ -461,7 +461,7 @@ mod tests {
                 _ => Test::PathWildcard(text.clone()),
             };
             let matcher = matcher(&test, case);
-            let form = |s: &str| if case { s.as_bytes().to_vec() } else { fold(s.as_bytes()) };
+            let form = |s: &str| if case { s.as_bytes().to_vec() } else { fold_accents(s.as_bytes()) };
             let mut buf = CodePointBuf::new();
             let real = format!("C:\\d{at}\\file");
             let mut expected = matcher.matches(&form(&real), &mut buf);

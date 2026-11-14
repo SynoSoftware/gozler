@@ -30,6 +30,7 @@ use super::store::{
     NamePair, NameRanks, NameStore, SIZE_UNKNOWN, hash_bytes, moved, shrink_vec,
 };
 use crate::attributes::{Attributes, PackedAttributes};
+use crate::fold::{fold, fold_accents};
 use crate::include::VolumeRules;
 use crate::layout::LayoutFile;
 use crate::links::{FolderLink, ReparseTarget};
@@ -1003,19 +1004,33 @@ impl VolumeIndex {
         (self.entries.frn(head) == frn).then_some(head)
     }
 
-    /// Looks up a child directory by its folded name via the persistent scope
-    /// index: O(1), no scan. Case-insensitive by construction (the key hashes
-    /// the folded name); the query engine's `resolve_scope` walks it component
-    /// by component. Every candidate under the hash is verified against the
-    /// real folded name, so a collision costs one extra compare, never a
-    /// wrong directory.
-    pub fn child_dir(&self, parent: EntryIdx, folded_name: Vec<u8>) -> Option<EntryIdx> {
+    /// Looks up the child directory `name` of `parent` via the persistent
+    /// scope index: O(1), no scan, ignoring case and accents as search does
+    /// (the key hashes the name in [`fold_accents`] form); the query
+    /// engine's `resolve_scope` walks it component by component. Every
+    /// candidate under the hash is verified against the folded name, so a
+    /// collision costs one extra compare, never a wrong directory. Of
+    /// folders that only accents tell apart, such as `Café` and `Cafe`, the
+    /// one whose name equals `name` apart from case wins.
+    pub fn child_dir(&self, parent: EntryIdx, name: &[u8]) -> Option<EntryIdx> {
+        let folded_name = fold_accents(name);
         let key = (parent, hash_bytes(&folded_name));
-        let cands = self.dir_children.get(&key)?;
-        cands
+        let mut found = self
+            .dir_children
+            .get(&key)?
             .iter()
             .copied()
-            .find(|&d| self.folded_name(d) == folded_name.as_slice())
+            .filter(|&d| self.folded_name(d) == folded_name.as_slice());
+        let first = found.next()?;
+        let Some(second) = found.next() else {
+            return Some(first);
+        };
+        let spelled = fold(name);
+        [first, second]
+            .into_iter()
+            .chain(found)
+            .find(|&d| fold(self.entry(d).name()) == spelled)
+            .or(Some(first))
     }
 
     /// Whether slot `idx` holds an entry.

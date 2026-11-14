@@ -43,7 +43,7 @@ impl NameForm {
         let root = root_name(mount_prefix);
         match self {
             NameForm::Raw => root.to_vec(),
-            NameForm::Folded => crate::fold::fold(root),
+            NameForm::Folded => crate::fold::fold_accents(root),
         }
     }
 }
