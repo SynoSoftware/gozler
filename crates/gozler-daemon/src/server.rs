@@ -72,6 +72,8 @@ const CONNECT_RETRY_PAUSE: Duration = Duration::from_millis(10);
 /// At most one log line per this period for failed connects; it counts the
 /// failures since the last one, so the service log cannot grow with them.
 const CONNECT_WARN_EVERY: Duration = Duration::from_secs(60);
+/// How often to try the pipe name again while another process holds it.
+const CLAIM_RETRY_EVERY: Duration = Duration::from_secs(2);
 
 /// Runs the pipe server until stopped. Blocks on a tokio runtime.
 ///
@@ -100,7 +102,9 @@ async fn accept_loop(
     security: PipeSecurity,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let mut server = create_instance(&security, true)?;
+    let Some(mut server) = claim_first_instance(&security, &mut shutdown).await? else {
+        return Ok(());
+    };
     let conn_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     tracing::info!(pipe = PIPE_NAME, "query server listening");
     let mut connect_failures = 0u64;
@@ -164,6 +168,64 @@ async fn accept_loop(
             }
         }
     }
+}
+
+/// Creates the first pipe instance, waiting while another process holds the
+/// name.
+///
+/// Any local user can create [`PIPE_NAME`] before gozlerd claims it (see
+/// `gozler_winfs::pipe_trust`), and the first instance is then refused.
+/// Failing here would make the service manager restart the service, which
+/// reads every volume again, about once a minute for as long as the name is
+/// held. So the built indexes wait instead, and the server starts once the
+/// name is free. Any other error is returned. `None` when a stop arrives
+/// first.
+async fn claim_first_instance(
+    security: &PipeSecurity,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<NamedPipeServer>> {
+    let mut waiting = false;
+    loop {
+        match create_instance(security, true) {
+            Ok(server) => {
+                if waiting {
+                    tracing::info!(pipe = PIPE_NAME, "pipe name is free again");
+                }
+                return Ok(Some(server));
+            }
+            Err(e) if name_taken(&e) => {
+                if !waiting {
+                    tracing::warn!(
+                        pipe = PIPE_NAME,
+                        error = %e,
+                        "another process holds the pipe name; waiting for it"
+                    );
+                    waiting = true;
+                }
+            }
+            Err(e) => return Err(e),
+        }
+        tokio::select! {
+            () = tokio::time::sleep(CLAIM_RETRY_EVERY) => {}
+            _ = tokio::signal::ctrl_c() => return Ok(None),
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+}
+
+/// Whether creating an instance failed because another process holds the
+/// name: the first instance is refused with access denied, and a holder that
+/// allowed one instance reports every instance busy.
+fn name_taken(e: &anyhow::Error) -> bool {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_PIPE_BUSY: i32 = 231;
+    e.downcast_ref::<std::io::Error>()
+        .and_then(std::io::Error::raw_os_error)
+        .is_some_and(|code| code == ERROR_ACCESS_DENIED || code == ERROR_PIPE_BUSY)
 }
 
 fn create_instance(security: &PipeSecurity, first: bool) -> Result<NamedPipeServer> {
@@ -811,6 +873,26 @@ mod tests {
         FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE,
         USN_REASON_RENAME_NEW_NAME,
     };
+
+    /// A taken pipe name must read as taken through the context
+    /// `create_instance` adds, or `claim_first_instance` returns the error and
+    /// the service manager restarts gozlerd, which reads every volume again,
+    /// once a minute for as long as another process holds the name.
+    #[test]
+    fn a_held_pipe_name_is_recognized_through_its_context() {
+        use anyhow::Context;
+        let failed = |code| {
+            Err::<(), _>(std::io::Error::from_raw_os_error(code))
+                .context("creating pipe instance")
+                .unwrap_err()
+        };
+        assert!(super::name_taken(&failed(5)));
+        assert!(super::name_taken(&failed(231)));
+        assert!(
+            !super::name_taken(&failed(2)),
+            "file not found is a real failure"
+        );
+    }
     use std::sync::Arc;
 
     fn dir_record(frn: u128, parent: u128, name: &str) -> ParsedUsnRecord {
