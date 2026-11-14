@@ -871,7 +871,14 @@ impl Supervised {
                 let _ = io_tx.send(gozler_winfs::current_thread_io_handle());
                 let outcome = bootstrap::open_volume(&state.guid)
                     .map_err(|e| std::io::Error::other(format!("{e:#}")))
-                    .and_then(|handle| tail::spawn(state, handle));
+                    .and_then(|handle| tail::spawn(state.clone(), handle));
+                // A volume with no index says why now, not when the next scan
+                // collects this outcome. The revivals still follow.
+                if let Err(e) = &outcome
+                    && !state.is_built()
+                {
+                    state.fail(e.to_string());
+                }
                 if let Err(returned) = result_tx.send(outcome) {
                     // The supervisor stopped listening (teardown abandoned
                     // this worker). A tail built anyway must not run

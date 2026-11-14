@@ -105,6 +105,10 @@ const ESCALATE_AFTER: Duration = Duration::from_secs(30);
 /// comfortably exceed it, and a test over there pins that coupling.
 const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(500);
 pub(crate) const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Longest wait between asks while a rebuild waits for its journal. Each ask
+/// that fails logs a line, so a disk that never recovers logs about a dozen
+/// lines an hour.
+const JOURNAL_WAIT_MAX: Duration = Duration::from_secs(5 * 60);
 /// Consecutive rescans before giving up and marking the volume Failed: a storm
 /// guard so a persistently broken journal cannot spin on rebuilds forever. Reset
 /// after any healthy batch.
@@ -532,6 +536,24 @@ fn rescan(
     detail: &str,
     stop: &AtomicBool,
 ) -> Option<ReadPosition> {
+    // Capture the cursor BEFORE reading the volume. A change landing after its
+    // MFT region or folder was read but before a late cursor capture would be in
+    // neither the snapshot nor the replay, and nothing would ever notice;
+    // captured first, such changes replay from the journal. The other race is
+    // safe: a journal deleted or recreated DURING the rebuild invalidates this
+    // cursor, the first read from it fails, and the ordinary error arms
+    // trigger another rescan. A stale cursor is loud, a late cursor is silent.
+    //
+    // A first build goes ahead without a journal, because an index without
+    // live updates still answers searches. A rebuild without one would retire
+    // the tail, and each revival would read the whole volume again.
+    let ask = || bootstrap::ensure_journal(handle, &state.guid);
+    let journal = if state.is_built() {
+        wait_for_journal(state, ask, pulse, stop)?
+    } else {
+        ask()
+    };
+
     // The rebuild stamps no pulse; `Busy` tells the supervisor that silence
     // is legitimate.
     let _busy = pulse.busy_scope();
@@ -541,15 +563,6 @@ fn rescan(
     } else {
         tracing::warn!(volume = %state.mount_prefix(), ?reason, detail, "rebuilding index");
     }
-
-    // Capture the cursor BEFORE reading the volume. A change landing after its
-    // MFT region or folder was read but before a late cursor capture would be in
-    // neither the snapshot nor the replay, and nothing would ever notice;
-    // captured first, such changes replay from the journal. The other race is
-    // safe: a journal deleted or recreated DURING the rebuild invalidates this
-    // cursor, the first read from it fails, and the ordinary error arms
-    // trigger another rescan. A stale cursor is loud, a late cursor is silent.
-    let journal = bootstrap::ensure_journal(handle, &state.guid);
 
     // Pass the stop flag so a shutdown arriving mid-rebuild aborts promptly
     // instead of blocking `TailHandle::shutdown`'s join for the full read.
@@ -702,6 +715,51 @@ fn sleep_unless_stopped(stop: &AtomicBool, total: Duration) {
             return;
         }
         std::thread::sleep(left.min(Duration::from_millis(50)));
+    }
+}
+
+/// Asks for the journal until it is usable or refused, and `None` when `stop`
+/// flips first. A journal that cannot be read yet, such as during a deletion
+/// that runs for minutes and continues across restarts, then gives one
+/// rebuild with a cursor. Meanwhile the volume reports Offline and the pulse
+/// beats, so the supervisor sees a live tail.
+fn wait_for_journal(
+    state: &VolumeState,
+    mut ask: impl FnMut() -> JournalSetup,
+    pulse: &TailPulse,
+    stop: &AtomicBool,
+) -> Option<JournalSetup> {
+    let mut wait = RETRY_BACKOFF_MIN;
+    let mut waited = false;
+    loop {
+        let journal = ask();
+        if !matches!(journal, JournalSetup::Unavailable) {
+            if waited {
+                tracing::info!(volume = %state.mount_prefix(), "USN journal readable again");
+            }
+            return Some(journal);
+        }
+        if !waited {
+            tracing::warn!(
+                volume = %state.mount_prefix(),
+                "USN journal unavailable; waiting for it before rebuilding the index"
+            );
+            state.journal_unavailable();
+            waited = true;
+        }
+        // Beat at least every RETRY_BACKOFF_MAX, inside the supervisor's
+        // stall window, however long the wait between asks.
+        let mut left = wait;
+        while !left.is_zero() {
+            pulse.beat();
+            let step = left.min(RETRY_BACKOFF_MAX);
+            sleep_unless_stopped(stop, step);
+            if stop.load(Ordering::Relaxed) {
+                return None;
+            }
+            left -= step;
+        }
+        wait = (wait * 2).min(JOURNAL_WAIT_MAX);
     }
 }
 
@@ -866,5 +924,48 @@ mod tests {
         use gozler_core::usn::record::USN_REASON_CLOSE;
         assert!(ops_for(&record_with(USN_REASON_CLOSE)).is_empty());
         assert_ne!(REASON_MASK & USN_REASON_CLOSE, 0);
+    }
+
+    /// A rebuild waits out a journal it cannot read yet and then gets the
+    /// cursor, instead of rebuilding without one and retiring. The volume
+    /// reports Offline while it waits.
+    #[test]
+    fn a_rebuild_waits_for_an_unavailable_journal() {
+        use crate::bootstrap::JournalSetup;
+        use crate::pulse::TailPulse;
+        use crate::volume_state::{Indexed, VolumeState};
+        use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
+        use gozler_core::types::VolumePhase;
+        use std::sync::atomic::AtomicBool;
+
+        let indexed = Indexed {
+            index: VolumeIndex::new(NTFS_ROOT_FRN),
+            metadata_pending: false,
+            journal_max_bytes: None,
+            built: true,
+        };
+        let state = VolumeState::in_state(r"C:\", indexed, VolumePhase::Live);
+        let journal = gozler_winfs::JournalInfo {
+            journal_id: 7,
+            first_usn: 0,
+            next_usn: 4096,
+            lowest_valid_usn: 0,
+            max_usn: i64::MAX,
+            maximum_size: 64 << 20,
+        };
+        let mut answers =
+            vec![JournalSetup::Unavailable, JournalSetup::Active(journal)].into_iter();
+        let mut phases = Vec::new();
+        let got = super::wait_for_journal(
+            &state,
+            || {
+                phases.push(state.phase());
+                answers.next().expect("asked again after a usable journal")
+            },
+            &TailPulse::new(),
+            &AtomicBool::new(false),
+        );
+        assert!(matches!(got, Some(JournalSetup::Active(info)) if info.next_usn == 4096));
+        assert_eq!(phases, [VolumePhase::Live, VolumePhase::Offline]);
     }
 }

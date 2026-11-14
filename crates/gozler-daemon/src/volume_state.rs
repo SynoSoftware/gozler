@@ -340,9 +340,20 @@ impl VolumeState {
             slot.next = Owed::Nothing;
             slot.unbuilt = Owed::Nothing;
         }
-        let first = !self.indexed.read().built;
+        let first = !self.is_built();
         self.apply(Event::BuildStarted { first });
         Building { state: self, first }
+    }
+
+    /// Whether a build has ever installed an index for this volume.
+    pub(crate) fn is_built(&self) -> bool {
+        self.indexed.read().built
+    }
+
+    /// A rebuild waits for a journal that it cannot read yet, so the index
+    /// no longer tracks the volume.
+    pub(crate) fn journal_unavailable(&self) {
+        self.apply(Event::JournalUnavailable);
     }
 
     /// The tail's journal reads have kept failing long enough that the index
@@ -446,6 +457,7 @@ enum Event<'a> {
         first: bool,
     },
     Built(&'a JournalSetup),
+    JournalUnavailable,
     ReadsKeepFailing,
     ReadsRecovered,
     Failed(String),
@@ -469,6 +481,10 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
     let to = match (phase, event) {
         (Offline, Event::ReadsRecovered) => Live,
         (Live, Event::ReadsKeepFailing) => Offline,
+        // Only a built volume waits for its journal. A failed or snapshot
+        // volume already reads as incomplete, and keeps saying why.
+        (Live | Offline, Event::JournalUnavailable) => Offline,
+        (Failed { .. } | Snapshot, Event::JournalUnavailable) => phase.clone(),
         // A volume's first build keeps the phase `Bootstrapping`, so
         // `--status` tells a volume that was never indexed from one being
         // rebuilt. A volume whose first build failed is still never indexed.
@@ -485,9 +501,13 @@ fn next(phase: &VolumePhase, event: &Event<'_>) -> Option<VolumePhase> {
             // and its results are flagged incomplete.
             JournalSetup::Unavailable => Offline,
         },
-        (Bootstrapping | Rescanning | Live | Offline, Event::Failed(reason)) => Failed {
-            reason: reason.clone(),
-        },
+        // A volume never indexed fails again on each revival that cannot
+        // open it, and says the latest reason.
+        (Bootstrapping | Rescanning | Live | Offline | Failed { .. }, Event::Failed(reason)) => {
+            Failed {
+                reason: reason.clone(),
+            }
+        }
         // Every deliberate exit of a tail sets Failed or Offline first, so a
         // phase still claiming to track is the panic signature. It is
         // corrected before the revival starts, so a revival blocked on sick

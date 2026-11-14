@@ -823,6 +823,28 @@ fn journal_target_bytes(volume_bytes: Option<u64>) -> u64 {
         .clamp(JOURNAL_MIN_SIZE, JOURNAL_MAX_SIZE)
 }
 
+/// Whether a failed `FSCTL_CREATE_USN_JOURNAL` means the volume never takes a
+/// journal: it is read-only, its filesystem has none, or it rejects the
+/// request. Only that makes a [`JournalSetup::Refused`] Snapshot, which nothing
+/// retries and which reports itself complete. Any other failure, such as a
+/// full or waking disk, a timed-out I/O or a deletion another tool started, is
+/// [`JournalSetup::Unavailable`], so the volume reports Offline and a rebuild
+/// waits for the journal.
+fn create_refused(code: u32) -> bool {
+    const ERROR_INVALID_FUNCTION: u32 = 1;
+    const ERROR_WRITE_PROTECT: u32 = 19;
+    const ERROR_NOT_SUPPORTED: u32 = 50;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    matches!(
+        code,
+        ERROR_INVALID_FUNCTION
+            | ERROR_ACCESS_DENIED
+            | ERROR_WRITE_PROTECT
+            | ERROR_NOT_SUPPORTED
+            | ERROR_INVALID_PARAMETER
+    )
+}
+
 /// What [`ensure_journal`] got for a volume.
 #[derive(Debug)]
 pub(crate) enum JournalSetup {
@@ -830,9 +852,9 @@ pub(crate) enum JournalSetup {
     Active(JournalInfo),
     /// The volume has no journal and refused to create one, so it never will.
     Refused,
-    /// No usable journal right now (a query that failed, a deletion in
-    /// progress, or a journal created but not yet active); a later attempt
-    /// may get one.
+    /// No usable journal right now (a query or create that failed, a
+    /// deletion in progress, or a journal created but not yet active); a
+    /// later attempt may get one.
     Unavailable,
 }
 
@@ -914,12 +936,19 @@ pub(crate) fn ensure_journal(handle: &VolumeHandle, guid_path: &str) -> JournalS
                         JournalSetup::Unavailable
                     }
                 },
+                Err(e) if create_refused(e.code) => {
+                    tracing::warn!(
+                        error = %e,
+                        "no USN journal and the volume refused one; live updates unavailable"
+                    );
+                    JournalSetup::Refused
+                }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
-                        "no USN journal and could not create one; live updates unavailable"
+                        "could not create a USN journal yet; live updates unavailable until it can be"
                     );
-                    JournalSetup::Refused
+                    JournalSetup::Unavailable
                 }
             }
         }
