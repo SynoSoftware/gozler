@@ -233,7 +233,8 @@ impl CustomDate {
     pub(super) fn new(strings: &Strings, shown: Option<DateRange>) -> CustomDate {
         CustomDate {
             shown,
-            week_ago: jiff::Zoned::now()
+            week_ago: jiff::Timestamp::now()
+                .to_zoned(gozler_winfs::local_time_zone())
                 .date()
                 .saturating_sub(jiff::Span::new().days(7)),
             order: strings.text("custom_date.order").to_owned(),

@@ -9,6 +9,7 @@ authors.workspace = true
 publish = false
 
 [target.'cfg(windows)'.dependencies]
+jiff.workspace = true
 windows-sys.workspace = true
 # widestring intentionally unused: UTF-16 conversions here are short, well-formed
 # system strings handled with std (`encode_utf16` / `from_utf16_lossy`); NTFS

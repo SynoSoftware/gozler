@@ -159,7 +159,7 @@ mod win {
             week_start: jiff::civil::Weekday::Monday
                 .wrapping_add(gozler_winfs::first_day_of_week()),
             now: jiff::Timestamp::now(),
-            time_zone: jiff::tz::TimeZone::system(),
+            time_zone: gozler_winfs::local_time_zone(),
         };
         let request = build_search(&plan, &working_dir()?, &start).map_err(Failure::Query)?;
         let totals = connection.totals(request)?;
@@ -203,7 +203,7 @@ mod win {
 
     fn search(mut plan: EsPlan) -> Result<ExitCode, Failure> {
         resolve_drive_relative(&mut plan)?;
-        let time_zone = jiff::tz::TimeZone::system();
+        let time_zone = gozler_winfs::local_time_zone();
         let start = QueryStart {
             week_start: jiff::civil::Weekday::Monday
                 .wrapping_add(gozler_winfs::first_day_of_week()),

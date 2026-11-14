@@ -60,6 +60,8 @@ mod service;
 #[cfg(windows)]
 mod storage;
 #[cfg(windows)]
+mod time_zone;
+#[cfg(windows)]
 mod volume;
 #[cfg(windows)]
 mod watch;
@@ -83,6 +85,8 @@ pub use clock::{
 pub use console::{console_width, enable_console_color};
 #[cfg(windows)]
 pub use locale::first_day_of_week;
+#[cfg(windows)]
+pub use time_zone::local_time_zone;
 #[cfg(windows)]
 pub use working_set::{SelfMemory, pin_working_set, self_memory, trim_working_set};
 

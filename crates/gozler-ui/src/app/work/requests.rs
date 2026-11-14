@@ -370,7 +370,7 @@ fn export(
         Ok(file) => {
             let mut writer = ResultWriter::new(
                 ask.format.clone(),
-                jiff::tz::TimeZone::system(),
+                gozler_winfs::local_time_zone(),
                 BufWriter::new(file),
             );
             let mut written = 0;

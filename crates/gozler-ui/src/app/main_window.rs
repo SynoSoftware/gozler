@@ -579,7 +579,10 @@ impl MainWindow {
         let accelerators = accelerator_table(&model.choices().shortcuts, model.mode())
             .expect("the accelerator table builds");
         let viewers = Viewers::new(model.viewer());
-        let dates = Dates::new(model.choices().date_format, jiff::Zoned::now());
+        let dates = Dates::new(
+            model.choices().date_format,
+            jiff::Timestamp::now().to_zoned(gozler_winfs::local_time_zone()),
+        );
         let instance = model.instance();
         let window = Rc::new(MainWindow {
             created: OnceCell::new(),
@@ -926,7 +929,7 @@ impl MainWindow {
         {
             let mut dates = self.dates.borrow_mut();
             dates.format = self.model.borrow().choices().date_format;
-            dates.set_time(jiff::Zoned::now());
+            dates.set_time(jiff::Timestamp::now().to_zoned(gozler_winfs::local_time_zone()));
         }
         self.follow_dates(hwnd);
         let controls = self.controls();
@@ -2185,7 +2188,7 @@ impl MainWindow {
             week_start: jiff::civil::Weekday::Monday
                 .wrapping_add(gozler_winfs::first_day_of_week()),
             now: jiff::Timestamp::now(),
-            time_zone: jiff::tz::TimeZone::system(),
+            time_zone: gozler_winfs::local_time_zone(),
         };
         let location = match list {
             List::Search => self.model.borrow().location().map(str::to_owned),
@@ -2670,7 +2673,9 @@ impl MainWindow {
     }
 
     fn refresh_dates(&self) {
-        self.dates.borrow_mut().set_time(jiff::Zoned::now());
+        self.dates
+            .borrow_mut()
+            .set_time(jiff::Timestamp::now().to_zoned(gozler_winfs::local_time_zone()));
         self.redraw_shown_lists();
     }
 

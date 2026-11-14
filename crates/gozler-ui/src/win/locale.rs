@@ -135,7 +135,7 @@ fn date_time(filetime: i64, time_flags: TIME_FORMAT_FLAGS) -> String {
     else {
         return String::new();
     };
-    let local = at.to_zoned(jiff::tz::TimeZone::system()).datetime();
+    let local = at.to_zoned(gozler_winfs::local_time_zone()).datetime();
     let time = system_time(local);
     let mut clock = [0u16; 64];
     // SAFETY: `time` is a complete SYSTEMTIME; the call writes at most its

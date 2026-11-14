@@ -513,6 +513,7 @@ dependencies = [
 name = "gozler-winfs"
 version = "0.5.9"
 dependencies = [
+ "jiff",
  "windows-sys",
 ]
 

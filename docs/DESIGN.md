@@ -161,6 +161,8 @@ For a literal or wildcard path clause with one positive term, the last required 
 
 A `dm:` or `dc:` value resolves once, to UTC bounds, from the query start and a time zone. The date resolver in `gozler-core` (`query::dates`, with `jiff`) does it: the client passes its own clock and time zone, and the daemon's text path passes its own. The bounds travel as UTC, so the daemon never needs the client's time zone.
 
+The time zone is the one the clock in the taskbar keeps (`gozler_winfs::local_time_zone`), for `dm:` and `dc:` and for every date that gozler and the window show. With "Adjust for daylight saving time automatically" off, that is the zone's standard offset all year. `jiff`'s system zone follows the zone's rules by name and would put every date an hour off through the summer.
+
 - `today`, `yesterday`, `tomorrow` and a `YYYY-MM-DD` date are calendar days in the time zone, from midnight to the next midnight, so a day around a daylight-saving change lasts 23 or 25 hours.
 - `this`, `last` and `next` before `week`, `month` or `year` name calendar periods. `current` is `this`, `past` and `prev` are `last`, and `coming` is `next`. Weeks start on the first day set in Windows, carried by `QueryStart::week_start`; the pure core never reads the machine's locale.
 - `Nminutes`, `Nhours`, `Ndays` and `Nweeks`, also prefixed by `last`, count fixed durations ending at the query start: 60 seconds, 3,600 seconds, 24 hours and seven days per unit. Counts must be positive and their resolved times representable. A slash date such as `03/04/2026` is refused because it names a different day in another locale.
