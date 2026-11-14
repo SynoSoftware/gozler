@@ -20,7 +20,7 @@ use crate::types::{Frn, IndexProgress, SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 20;
+pub const PROTO_VERSION: u16 = 21;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -395,6 +395,12 @@ pub struct DaemonStatus {
     /// process holds regardless of what is currently resident. 0 = unavailable.
     #[serde(default)]
     pub process_private_bytes: u64,
+    /// The bytes the daemon's allocator holds from Windows, in use or freed
+    /// and not yet returned: the part of [`Self::process_private_bytes`]
+    /// inside the allocator. 0 = unavailable.
+    pub allocator_committed: u64,
+    /// The bytes the result snapshots the daemon keeps hold.
+    pub result_snapshots_bytes: u64,
     /// The Include settings the daemon applies; `None` from a daemon before
     /// protocol 8.
     #[serde(default)]
@@ -726,6 +732,8 @@ mod tests {
             volumes_incomplete: true,
             process_working_set: 123_456_789,
             process_private_bytes: 987_654_321,
+            allocator_committed: 876_543_210,
+            result_snapshots_bytes: 32_000_000,
             include: Some(crate::include::IndexSettings::default()),
             left_out: vec![LeftOutVolume {
                 guid: r"\\?\Volume{d}\".into(),

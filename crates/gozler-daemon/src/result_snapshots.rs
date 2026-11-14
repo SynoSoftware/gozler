@@ -80,6 +80,14 @@ impl<W: Clone> ResultSnapshots<W> {
         found.last_read = now;
         Some((found.snapshot.clone(), found.volumes.clone()))
     }
+
+    /// The bytes every result snapshot kept `now` holds, after it drops the
+    /// ones nobody read for [`EXPIRY`].
+    pub(crate) fn bytes(&self, now: Instant) -> u64 {
+        let mut kept = self.kept.lock().expect("no table user panics");
+        expire(&mut kept, now);
+        kept.iter().map(|k| k.snapshot.bytes()).sum()
+    }
 }
 
 /// Drops each result snapshot nobody read for [`EXPIRY`].

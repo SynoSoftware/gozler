@@ -444,7 +444,7 @@ fn serve(
             ..
         }) => return reply(emit, hello(volumes, proto_min, proto_max)),
         Ok(Request::Status { links_held }) => {
-            let mut status = build_status(volumes, include, access.caller_sees());
+            let mut status = build_status(volumes, include, snapshots, access.caller_sees());
             if let (Some(held), Access::Sees(visibility)) = (links_held, access) {
                 let links = folder_links(volumes, visibility.viewer());
                 status.links = (links.fingerprint() != held).then_some(links);
@@ -787,7 +787,12 @@ fn count_included(volumes: &VolumeSet, settings: &IndexSettings) -> u64 {
         .sum()
 }
 
-fn build_status(volumes: &VolumeSet, include: &Include, caller_sees: CallerSees) -> DaemonStatus {
+fn build_status(
+    volumes: &VolumeSet,
+    include: &Include,
+    snapshots: &Snapshots,
+    caller_sees: CallerSees,
+) -> DaemonStatus {
     let mut incomplete = false;
     let vols = volumes
         .iter()
@@ -836,6 +841,8 @@ fn build_status(volumes: &VolumeSet, include: &Include, caller_sees: CallerSees)
         volumes_incomplete: incomplete,
         process_working_set: self_mem.working_set,
         process_private_bytes: self_mem.private_bytes,
+        allocator_committed: crate::run::allocator_committed(),
+        result_snapshots_bytes: snapshots.bytes(Instant::now()),
         include: Some((*include.applied()).clone()),
         left_out: include.left_out(),
         caller_sees,
@@ -1072,7 +1079,8 @@ mod tests {
             volume(r"D:\", windows_index(), VolumePhase::Snapshot),
         ]);
         assert!(
-            !build_status(&vols, &defaults(), CallerSees::EveryFile).volumes_incomplete,
+            !build_status(&vols, &defaults(), &Snapshots::new(), CallerSees::EveryFile)
+                .volumes_incomplete,
             "a fully indexed journal-less volume must not flag results incomplete"
         );
         assert!(
@@ -1095,6 +1103,7 @@ mod tests {
             !build_status(
                 &set(&[live_volume(r"C:\")]),
                 &defaults(),
+                &Snapshots::new(),
                 CallerSees::EveryFile
             )
             .volumes_incomplete
@@ -1110,7 +1119,8 @@ mod tests {
         ] {
             let vols = set(&[live_volume(r"C:\"), volume(r"D:\", windows_index(), phase)]);
             assert!(
-                build_status(&vols, &defaults(), CallerSees::EveryFile).volumes_incomplete,
+                build_status(&vols, &defaults(), &Snapshots::new(), CallerSees::EveryFile)
+                    .volumes_incomplete,
                 "one non-Live volume must taint the whole status"
             );
         }
@@ -1998,7 +2008,8 @@ mod tests {
             };
             assert_eq!(
                 ready,
-                !build_status(&vols, &defaults(), CallerSees::EveryFile).volumes_incomplete,
+                !build_status(&vols, &defaults(), &Snapshots::new(), CallerSees::EveryFile)
+                    .volumes_incomplete,
                 "ready must track the same bar as volumes_incomplete"
             );
         }

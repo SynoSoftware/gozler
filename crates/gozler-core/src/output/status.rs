@@ -26,6 +26,30 @@ pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
             bytes(s.process_private_bytes),
             bytes(s.process_working_set),
         )?;
+        // Where the private bytes go: the indexes and the result snapshots
+        // live in the allocator, which also holds other data and freed
+        // memory it has not returned yet; the rest of the private bytes are
+        // outside it.
+        if s.allocator_committed > 0 {
+            let indexes: u64 = s
+                .volumes
+                .iter()
+                .filter_map(|v| v.memory.as_ref())
+                .map(|m| m.total().alloc)
+                .sum();
+            let known = indexes.saturating_add(s.result_snapshots_bytes);
+            writeln!(
+                out,
+                "  indexes {}, result snapshots {}, other allocator memory {}, outside the allocator {}",
+                bytes(indexes),
+                bytes(s.result_snapshots_bytes),
+                bytes(s.allocator_committed.saturating_sub(known)),
+                bytes(
+                    s.process_private_bytes
+                        .saturating_sub(s.allocator_committed)
+                ),
+            )?;
+        }
     }
     for v in &s.volumes {
         writeln!(

@@ -40,6 +40,29 @@ pub(crate) fn return_freed_memory() {
     unsafe { libmimalloc_sys::mi_collect(false) };
 }
 
+/// The bytes mimalloc holds from Windows now, in use or freed and not yet
+/// returned, which `--status` reports; 0 when mimalloc does not say.
+/// mimalloc counts it in every build, unlike its other statistics.
+pub(crate) fn allocator_committed() -> u64 {
+    // SAFETY: with no buffer, mimalloc allocates the text with its own
+    // allocator and returns it NUL-terminated, or null.
+    let text = unsafe { libmimalloc_sys::mi_stats_get_json(0, std::ptr::null_mut()) };
+    if text.is_null() {
+        return 0;
+    }
+    // SAFETY: `text` is the NUL-terminated buffer mimalloc just returned,
+    // read before it is freed below.
+    let json = unsafe { std::ffi::CStr::from_ptr(text) }
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: `text` came from mimalloc's allocator and is freed once.
+    unsafe { libmimalloc_sys::mi_free(text.cast()) };
+    serde_json::from_str::<serde_json::Value>(&json)
+        .ok()
+        .and_then(|stats| stats["committed"]["current"].as_u64())
+        .unwrap_or(0)
+}
+
 /// Best-effort post-bootstrap memory settling, which the supervisor runs once
 /// no volume is `Bootstrapping`. Never fatal: logs and continues.
 ///
@@ -103,4 +126,16 @@ pub(crate) fn run_console() -> Result<()> {
 
     supervisor.shutdown();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    /// `--status` splits the daemon's memory by what the allocator holds, which
+    /// it reads by name from mimalloc's statistics; a mimalloc update that
+    /// renames or drops the figure would silently remove that line.
+    #[test]
+    fn the_allocator_reports_what_it_holds() {
+        let _held = vec![0u8; 1 << 20];
+        assert!(super::allocator_committed() >= 1 << 20);
+    }
 }

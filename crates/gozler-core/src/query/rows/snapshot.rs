@@ -148,6 +148,21 @@ impl ResultSnapshot {
         self.total
     }
 
+    /// The bytes its rows and their merged order hold, which `--status`
+    /// reports for every result snapshot gozlerd keeps.
+    pub fn bytes(&self) -> u64 {
+        let rows: u64 = self.answers.iter().map(VolumeRows::bytes).sum();
+        let order = self.order.as_ref().map_or(0, |order| {
+            order.tags.capacity()
+                + order
+                    .checkpoints
+                    .iter()
+                    .map(|c| size_of_val(&**c))
+                    .sum::<usize>()
+        });
+        rows + order as u64
+    }
+
     /// Whether a volume searched was not complete, as
     /// [`ResultRows::volumes_incomplete`] said when it was made.
     pub fn volumes_incomplete(&self) -> bool {

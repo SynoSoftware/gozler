@@ -118,6 +118,15 @@ impl RowList {
         }
     }
 
+    /// The bytes the rows hold, their room to grow included.
+    fn bytes(&self) -> u64 {
+        let bytes = match self {
+            RowList::Narrow(rows) => rows.capacity() * size_of::<NarrowRow>(),
+            RowList::Wide(rows) => rows.capacity() * size_of::<WideRow>(),
+        };
+        bytes as u64
+    }
+
     /// Keeps the rows whose place `kept` marks, in their order.
     fn retain_kept(&mut self, kept: &[bool]) {
         let mut kept = kept.iter();
@@ -185,6 +194,11 @@ impl VolumeRows {
     /// Every match's [`MatchSums`], when the search asked for them.
     pub(crate) fn sums(&self) -> Option<MatchSums> {
         self.sums
+    }
+
+    /// The bytes its rows hold.
+    pub(crate) fn bytes(&self) -> u64 {
+        self.rows.bytes()
     }
 }
 
