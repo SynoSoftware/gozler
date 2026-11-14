@@ -127,7 +127,7 @@ async fn accept_loop(
                     tokio::time::sleep(CONNECT_RETRY_PAUSE).await;
                     continue;
                 }
-                let connected = server;
+                let mut connected = server;
                 // Create the next instance before handling, so there is never
                 // a window with no listener for a client to race into.
                 server = create_instance(&security, false)?;
@@ -141,9 +141,16 @@ async fn accept_loop(
                         let snapshots = snapshots.clone();
                         tokio::spawn(async move {
                             let _permit = permit; // held for the connection's lifetime
-                            if let Err(e) = handle_connection(connected, vols, include, snapshots).await {
+                            if let Err(e) = handle_connection(&mut connected, vols, include, snapshots).await {
                                 tracing::debug!(error = %e, "connection ended");
                             }
+                            // Dropping the instance cancels only reads and
+                            // connects, so a page the client never took would
+                            // keep the handle and its buffer alive outside
+                            // MAX_CONNECTIONS until the client reads or
+                            // closes. Disconnecting fails that write and frees
+                            // both.
+                            let _ = connected.disconnect();
                         });
                     }
                     Err(_) => {
@@ -294,7 +301,7 @@ fn create_instance(security: &PipeSecurity, first: bool) -> Result<NamedPipeServ
 }
 
 async fn handle_connection(
-    mut server: NamedPipeServer,
+    server: &mut NamedPipeServer,
     volumes: Arc<VolumeRegistry>,
     include: Arc<Include>,
     snapshots: Arc<Snapshots>,
@@ -371,7 +378,7 @@ async fn handle_connection(
             });
             let mut write_err: Option<std::io::Error> = None;
             while let Some(reply) = rx.recv().await {
-                if let Err(e) = write_reply(&mut server, &reply).await {
+                if let Err(e) = write_reply(server, &reply).await {
                     write_err = Some(e);
                     break;
                 }
