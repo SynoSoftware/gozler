@@ -69,7 +69,7 @@ without adding folders a second time. Check the exit code for completeness.
 | `more` | Matching rows were omitted |
 | `volumes_incomplete` | A volume in scope is not ready; matches may be missing |
 | `metadata_pending` | A size and date pass failed or stopped; some metadata is unknown |
-| `generation` | The index generation reported for this result |
+| `generation` | Always 0; kept so scripts that read it still parse |
 
 Each item contains `path` and `is_dir`. Optional fields are omitted when
 unknown or not requested; absence is different from zero.

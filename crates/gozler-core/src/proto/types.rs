@@ -266,7 +266,8 @@ pub struct QueryResults {
     /// `true` → the size and date pass failed or stopped on at least one
     /// volume in scope; requested size and date columns may be `None`.
     pub metadata_pending: bool,
-    /// Index generation the results were computed against.
+    /// Always 0: gozlerd sends no index generation. The field stays because
+    /// `--json` prints it and scripts may read it.
     pub generation: u64,
     /// Every match's files and folders and their sizes, when the request
     /// asked for them with [`Rows::want_sums`] and the daemon knows them.
