@@ -918,6 +918,10 @@ pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
     }
     let mut plan = EsPlan::default();
     let mut query: Vec<Cow<str>> = Vec::new();
+    // What `/ad` and the other attribute switches add, which goes before the
+    // search text: after it, a trailing `|` or an open quote in the text
+    // would take it in, so `foo| /ad` would find foo or any folder.
+    let mut filters: Vec<String> = Vec::new();
     let mut rest = args.iter();
 
     while let Some(token) = rest.next() {
@@ -950,12 +954,17 @@ pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
         match action {
             SwitchAction::Help(screen) => return Ok(Command::Help(screen)),
             SwitchAction::Version => return Ok(Command::Version),
-            SwitchAction::Attributes(switch) => query.push(switch.query_text().into()),
+            SwitchAction::Attributes(switch) => filters.push(switch.query_text()),
             action => apply_switch(action, token, &mut rest, &mut plan)?,
         }
     }
 
-    plan.query = query.join(" ");
+    plan.query = filters
+        .iter()
+        .map(String::as_str)
+        .chain(query.iter().map(AsRef::as_ref))
+        .collect::<Vec<_>>()
+        .join(" ");
     Ok(Command::Run(plan))
 }
 
@@ -1401,11 +1410,13 @@ mod tests {
     /// Bug 3: `/ad` and `/a-d` become `folder:` and `file:`, the letter in
     /// either case. The other letters become `attrib:`, each excluded letter
     /// its own `!attrib:`, and an `/a` token that names no attributes exits 4
-    /// instead of becoming search text that matches nothing.
+    /// instead of becoming search text that matches nothing. They go before
+    /// the search text, so a trailing `|` in it cannot take them in.
     #[test]
     fn attribute_switches_become_attribute_functions_or_exit_4() {
         assert_eq!(plan(&["/a-d", "report"]).query, "file: report");
-        assert_eq!(plan(&["report", "/aD"]).query, "report folder:");
+        assert_eq!(plan(&["report", "/aD"]).query, "folder: report");
+        assert_eq!(plan(&["foo|", "/ad"]).query, "folder: foo|");
         assert_eq!(
             plan(&["/as-r-hd", "x"]).query,
             "folder: attrib:S !attrib:R !attrib:H x"
