@@ -16,7 +16,7 @@ pub mod record;
 #[cfg(any(test, doc))]
 pub mod fixtures;
 
-pub use ops::{UsnOp, ops_for};
+pub use ops::{UsnOp, moves_folder_date, ops_for};
 pub use record::{
     EnumWalk, JournalWalk, ParsedUsnRecord, WalkError, record_usn, walk_enum_buffer,
     walk_journal_buffer,

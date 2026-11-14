@@ -471,6 +471,23 @@ fn created_and_deleted_in_same_batch_nets_to_nothing() {
     assert_eq!(path_set(&idx), BTreeSet::from(["dir".to_string()]));
 }
 
+/// A name added to a folder moves the folder's date, and NTFS writes no
+/// record for the folder, so the batch asks for a stat of the folder as well
+/// as of the new file. Deleting a tree asks for none of the entries it
+/// removed, only for the folder left holding it.
+#[test]
+fn a_name_change_asks_for_its_folder_but_not_for_removed_entries() {
+    let mut idx = index_from_enum(&[create(frn(10), root_frn(), "dir", true)]);
+    let outcome = idx.apply_batch(&[create(frn(100), frn(10), "a.txt", false)]);
+    assert_eq!(outcome.needs_stat, [frn(10), frn(100)]);
+
+    let outcome = idx.apply_batch(&[
+        record(frn(100), frn(10), "a.txt", false, USN_REASON_FILE_DELETE),
+        record(frn(10), root_frn(), "dir", true, USN_REASON_FILE_DELETE),
+    ]);
+    assert_eq!(outcome.needs_stat, [root_frn()]);
+}
+
 /// USN reason bits accumulate, so one hard-link creation writes a
 /// `HARD_LINK_CHANGE` record and then a `HARD_LINK_CHANGE | CLOSE` one. Each
 /// FRN the batch reports costs the tail a file open and a link walk, so a
@@ -512,10 +529,13 @@ fn a_renamed_folder_the_index_lacks_is_reported_for_a_walk() {
     let folder = moved_in(&mut idx, frn(300), true, USN_REASON_RENAME_NEW_NAME);
     assert_eq!(
         (folder.needs_walk, folder.needs_stat),
-        (vec![frn(300)], vec![frn(300)])
+        (vec![frn(300)], vec![root_frn(), frn(300)])
     );
     let file = moved_in(&mut idx, frn(400), false, USN_REASON_RENAME_NEW_NAME);
-    assert_eq!((file.needs_walk, file.needs_stat), (vec![], vec![frn(400)]));
+    assert_eq!(
+        (file.needs_walk, file.needs_stat),
+        (vec![], vec![root_frn(), frn(400)])
+    );
 }
 
 /// A folder's descriptor decides who sees its entries, so it must be read

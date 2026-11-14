@@ -13,8 +13,22 @@ use super::record::{
     ParsedUsnRecord, USN_REASON_BASIC_INFO_CHANGE, USN_REASON_DATA_EXTEND,
     USN_REASON_DATA_OVERWRITE, USN_REASON_DATA_TRUNCATION, USN_REASON_FILE_CREATE,
     USN_REASON_FILE_DELETE, USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
-    USN_REASON_SECURITY_CHANGE,
+    USN_REASON_RENAME_OLD_NAME, USN_REASON_SECURITY_CHANGE,
 };
+
+/// Whether the record adds or removes a name in its folder, which moves the
+/// folder's date modified. NTFS writes no record for the folder, so its date
+/// must be read again. A move is two records, the old name's in the old
+/// folder and the new name's in the new folder, so both folders are read.
+pub fn moves_folder_date(rec: &ParsedUsnRecord) -> bool {
+    rec.reason
+        & (USN_REASON_FILE_CREATE
+            | USN_REASON_FILE_DELETE
+            | USN_REASON_RENAME_OLD_NAME
+            | USN_REASON_RENAME_NEW_NAME
+            | USN_REASON_HARD_LINK_CHANGE)
+        != 0
+}
 
 /// One normalized index operation derived from a USN record. It applies to
 /// the record it came from, which carries the file ID, name and parent.

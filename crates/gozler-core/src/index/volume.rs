@@ -35,7 +35,7 @@ use crate::layout::LayoutFile;
 use crate::links::{FolderLink, ReparseTarget};
 use crate::types::{EntryIdx, Frn, NIL};
 use crate::usn::record::{FILE_ATTRIBUTE_REPARSE_POINT, USN_REASON_RENAME_NEW_NAME};
-use crate::usn::{ParsedUsnRecord, UsnOp, ops_for};
+use crate::usn::{ParsedUsnRecord, UsnOp, moves_folder_date, ops_for};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::sync::Arc;
@@ -505,6 +505,11 @@ impl VolumeIndex {
             let frn = rec.frn;
             let mut ops = ops_for(rec);
             let mut security_changed = false;
+            // Also for a name the Include rules leave out: its folder's date
+            // moved all the same.
+            if moves_folder_date(rec) {
+                outcome.needs_stat.push(rec.parent_frn);
+            }
             let screen = match &mut screening {
                 Some(screening) => self.screen(screening, rec),
                 None => Screen::Apply,
@@ -592,6 +597,11 @@ impl VolumeIndex {
         outcome.needs_walk.dedup();
         outcome.needs_descriptor.sort_unstable();
         outcome.needs_descriptor.dedup();
+        // A stat of an entry the batch removed is a blocking open for
+        // nothing, and deleting a tree would ask for one per folder in it.
+        outcome
+            .needs_stat
+            .retain(|&frn| self.head_of(frn).is_some());
         self.generation += 1;
         // Compaction is NOT performed here: it is reported so the caller can do
         // the expensive part off the write lock, where it would block queries.

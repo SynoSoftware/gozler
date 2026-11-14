@@ -177,6 +177,8 @@ A folder has a size only for a user who sees every file (see "Visibility"). For 
 
 A file's size or date is unknown when the size and date pass failed or stopped, or could not read that file. A size or date test, negated or not, never matches an unknown value: `!size:>1mb` does not report an unread file as small, and `report|size:>1mb` still finds `report.txt` through its other term. Because every clause is an OR, this gives the same rows as three-valued logic without tracking unknown results for each entry.
 
+A folder's date modified moves when a name in it is created, deleted or renamed, or gains or loses a hard link, and the journal records no change to the folder itself. So each such record also makes the tail read the date of the record's folder again, and a move reads both folders (`gozler_core::usn::moves_folder_date`). This holds for a name the Include settings leave out, because the folder's date moved all the same.
+
 The size and date pass runs in each build, before the volume serves as live, so a live volume never has the pass still running. A pass that failed or stopped sets the volume's `metadata_pending`, and `--status` shows it. Each results page and totals reply carries the flag for the volumes in scope. The client warns and exits 2 when the flag is set and the query tests a size or a date or asks for a size total, because that answer may be short. When the flag is set and the rows show sizes, in a Size column or JSON, or are sorted by size, the client warns that some sizes are unknown and a folder's size counts only the files read, and exits 0, because every row is there. A file that a successful pass could not read is left out without exit 2; such files are rare, and the help says so.
 
 ### Visibility
