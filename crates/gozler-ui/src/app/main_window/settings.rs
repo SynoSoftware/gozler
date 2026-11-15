@@ -277,6 +277,7 @@ impl SettingsBridge {
             win::gdi::show_icons(edited.show_icons);
             window.apply_glyphs(hwnd.dpi());
             window.viewers.apply_glyphs();
+            window.compare_windows.apply_glyphs();
             // The menus, the button widths and the Kind list follow.
             window.refresh_text(hwnd);
         }

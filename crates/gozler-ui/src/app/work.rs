@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 mod clipboard;
+pub(super) mod compare;
 pub(super) mod drops;
 pub(super) mod elevated;
 pub(super) mod fixes;

@@ -272,7 +272,9 @@ fn presents(call: &str, file: &str, function: &str) -> bool {
         "WM_VSCROLL"
             if matches!(
                 (file, function),
-                ("win/window.rs", "decode") | ("win/pane.rs", "procedure")
+                ("win/window.rs", "decode")
+                    | ("win/pane.rs", "procedure")
+                    | ("win/compare.rs", "procedure")
             ) =>
         {
             true

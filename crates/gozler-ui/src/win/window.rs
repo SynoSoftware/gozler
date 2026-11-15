@@ -23,6 +23,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -45,13 +46,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     TranslateMessage, UnhookWindowsHookEx, WA_INACTIVE, WH_MSGFILTER, WINDOWPLACEMENT,
     WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND,
     WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DEVICECHANGE, WM_DPICHANGED, WM_ENABLE, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_EXITMENULOOP,
-    WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR, WM_SYSCOLORCHANGE,
-    WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_VSCROLL, WM_WINDOWPOSCHANGED,
-    WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_CONTROLPARENT, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
+    WM_DEVICECHANGE, WM_DPICHANGED, WM_DROPFILES, WM_ENABLE, WM_ENDSESSION, WM_ENTERSIZEMOVE,
+    WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN,
+    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
+    WM_NOTIFY, WM_QUERYENDSESSION, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
+    WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_VSCROLL,
+    WM_WINDOWPOSCHANGED, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CHILD, WS_CLIPCHILDREN,
+    WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -180,6 +181,9 @@ pub(crate) enum Message<'a> {
     },
     /// The system colours changed, as a high contrast theme does.
     SysColorChange,
+    /// Windows asks whether the session may end. A handler answers 1 to
+    /// let it, or 0 to hold it after [`Hwnd::block_shutdown`].
+    QueryEndSession,
     EndSession {
         ending: bool,
     },
@@ -190,6 +194,12 @@ pub(crate) enum Message<'a> {
     CopyData {
         tag: usize,
         text: String,
+    },
+    /// File Explorer dropped `files` at `point`, in client coordinates, on
+    /// a window that accepts files.
+    DropFiles {
+        files: Vec<Vec<u16>>,
+        point: (i32, i32),
     },
     Enabled(bool),
     Close,
@@ -1104,6 +1114,7 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
                     .is_ok_and(|area| area == "intl"),
         },
         WM_SYSCOLORCHANGE => Message::SysColorChange,
+        WM_QUERYENDSESSION => Message::QueryEndSession,
         WM_ENDSESSION => Message::EndSession {
             ending: wparam.0 != 0,
         },
@@ -1143,9 +1154,36 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
             }
         }
         WM_ENABLE => Message::Enabled(wparam.0 != 0),
+        WM_DROPFILES => {
+            // SAFETY: WM_DROPFILES's wparam is the drop's handle, which
+            // `dropped_files` ends.
+            let (files, point) = unsafe {
+                super::shell::dropped_files(windows::Win32::UI::Shell::HDROP(wparam.0 as *mut _))
+            };
+            Message::DropFiles { files, point }
+        }
         WM_CLOSE => Message::Close,
         WM_DESTROY => Message::Destroy,
         _ => Message::Other(msg),
+    }
+}
+
+/// The message loop of a process whose windows [`own_keys`] all names,
+/// such as the compare window of `--compare`, until `WM_QUIT`: each
+/// message goes to its window's keys, as `route_other` gives them.
+pub(crate) fn run_other_loop() {
+    let _filter = MessageFilter::install();
+    let mut msg = MSG::default();
+    // SAFETY: `msg` is a local that each call fills in or reads.
+    unsafe {
+        while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+            let routed =
+                !msg.hwnd.is_invalid() && route_other(GetAncestor(msg.hwnd, GA_ROOT), &msg);
+            if !routed {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
     }
 }
 
@@ -1211,6 +1249,12 @@ pub(crate) fn shift_held() -> bool {
 /// Whether Ctrl was down when the message being handled was read.
 pub(crate) fn ctrl_held() -> bool {
     held(VK_CONTROL)
+}
+
+/// Whether `key` was down when the message being handled was read, as it
+/// is while its shortcut runs a command.
+pub(crate) fn key_held(key: crate::core::commands::Key) -> bool {
+    held(VIRTUAL_KEY(super::keys::virtual_key(key)))
 }
 
 pub(crate) fn only_alt_held() -> bool {
@@ -1284,6 +1328,21 @@ impl Hwnd {
     pub(crate) fn kill_timer(self, id: usize) {
         // SAFETY: plain values; a timer that does not run is no error here.
         let _ = unsafe { KillTimer(Some(self.0), id) };
+    }
+
+    /// Holds the end of the session for this window, which Windows names
+    /// with `reason` among the programs that prevent it, until
+    /// [`Self::allow_shutdown`].
+    pub(crate) fn block_shutdown(self, reason: &str) {
+        // SAFETY: plain values; Windows copies the reason, which outlives
+        // the call. A failure leaves the session free to end.
+        let _ = unsafe { ShutdownBlockReasonCreate(self.0, &HSTRING::from(reason)) };
+    }
+
+    pub(crate) fn allow_shutdown(self) {
+        // SAFETY: a plain value; a window that holds nothing gives an
+        // error, which changes nothing.
+        let _ = unsafe { ShutdownBlockReasonDestroy(self.0) };
     }
 
     /// Sends the window every mouse message until [`release_mouse`], as a

@@ -69,10 +69,12 @@ pub(crate) enum CommandId {
     SelectFiles,
     UnselectFiles,
     Update,
+    /// Compare by content (DESIGN.md: Compare by content).
+    Compare,
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 43] = [
+    pub(crate) const ALL: [CommandId; 44] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
         CommandId::ShowInCommander,
@@ -116,6 +118,7 @@ impl CommandId {
         CommandId::SelectFiles,
         CommandId::UnselectFiles,
         CommandId::Update,
+        CommandId::Compare,
     ];
 
     /// The command's row; a `match`, so every command has one.
@@ -163,12 +166,7 @@ impl CommandId {
                     copy,
                     None,
                 ),
-                C::CopyAsPath => (
-                    "command.copy_as_path",
-                    const { &[Keystroke::ctrl_shift(Key::Letter(b'C'))] },
-                    files,
-                    None,
-                ),
+                C::CopyAsPath => ("command.copy_as_path", &[], files, None),
                 C::CopyName => ("command.copy_name", &[], files, None),
                 C::CopyFolder => ("command.copy_folder", &[], files, None),
                 C::SelectAll => (
@@ -231,6 +229,21 @@ impl CommandId {
                 C::CopyToFolder => ("command.copy_to_folder", &[], transfer, None),
                 C::MoveToFolder => ("command.move_to_folder", &[], transfer, None),
                 C::Synchronize => ("command.synchronize", &[], operations_available, None),
+                C::Compare => (
+                    "command.compare",
+                    const { &[Keystroke::ctrl_shift(Key::Letter(b'C'))] },
+                    |s| match s.list {
+                        List::Panel(_) => s.model.chosen_count(s.list) > 0,
+                        // Search has no other panel, so two selected
+                        // results are the two files.
+                        List::Search => {
+                            (s.model.search_list().selection().files()).is_some_and(|files| {
+                                files.len() == 2 && files.iter().all(|file| !file.is_dir)
+                            })
+                        }
+                    },
+                    None,
+                ),
                 C::Delete => ("command.delete", &[], file_operation, None),
                 C::Cut => ("command.cut", &[], cut, None),
                 C::Paste => ("command.paste", &[], paste, None),
@@ -314,6 +327,7 @@ impl CommandId {
             C::Edit => Glyph::Edit,
             C::NewFolder => Glyph::NewFolder,
             C::Cancel
+            | C::Compare
             | C::FileOperations
             | C::Filters
             | C::Inspector
@@ -346,6 +360,7 @@ impl CommandId {
             | C::FileOperations
             | C::Commander
             | C::Synchronize
+            | C::Compare
             | C::SelectAll
             | C::ClearSelection
             | C::Refresh
@@ -1564,7 +1579,7 @@ fn every_menu() -> Vec<Menu> {
                     C::Properties,
                 ]),
                 run(&[C::CopyToFolder, C::MoveToFolder, C::NewFolder, C::Delete]),
-                run(&[C::Synchronize]),
+                run(&[C::Synchronize, C::Compare]),
                 run(&[C::ExportResults, C::Cancel]),
                 run(&[C::Settings]),
                 run(&[C::Exit]),

@@ -4,7 +4,8 @@ use super::{
     CF_HDROP, ClipboardFiles, DROPEFFECT_MOVE, effect_block, paste_succeeded,
     preferred_drop_effect, sequence,
 };
-use crate::win::{shell::Session, wake::OpenWaker, work::OffThread};
+use crate::win::shell::{self, Session};
+use crate::win::{wake::OpenWaker, work::OffThread};
 use std::ffi::OsString;
 use std::mem::ManuallyDrop;
 use std::os::windows::ffi::OsStringExt;
@@ -17,7 +18,7 @@ use windows::Win32::System::Com::{
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard};
 use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::{OleGetClipboard, ReleaseStgMedium};
-use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+use windows::Win32::UI::Shell::HDROP;
 use windows::core::AgileReference;
 
 #[derive(Clone)]
@@ -208,20 +209,11 @@ unsafe fn read_format(data: &IDataObject, format: u32) -> Option<STGMEDIUM> {
 /// # Safety
 /// `medium` holds a `CF_HDROP` block that `read_format` returned.
 unsafe fn drop_paths(medium: &STGMEDIUM) -> Vec<PathBuf> {
-    // SAFETY: the block is a DROPFILES, which DragQueryFileW reads.
-    unsafe {
-        let drop = HDROP(medium.u.hGlobal.0);
-        let count = DragQueryFileW(drop, u32::MAX, None);
-        (0..count)
-            .filter_map(|index| {
-                let length = DragQueryFileW(drop, index, None) as usize;
-                let mut buffer = vec![0u16; length + 1];
-                let copied = DragQueryFileW(drop, index, Some(&mut buffer)) as usize;
-                (copied > 0)
-                    .then(|| PathBuf::from(OsString::from_wide(&buffer[..copied.min(length)])))
-            })
-            .collect()
-    }
+    // SAFETY: the block is a DROPFILES.
+    let paths = unsafe { shell::drop_paths(HDROP(medium.u.hGlobal.0)) };
+    (paths.iter())
+        .map(|path| PathBuf::from(OsString::from_wide(path)))
+        .collect()
 }
 
 /// The effect that a 4-byte effect block holds.

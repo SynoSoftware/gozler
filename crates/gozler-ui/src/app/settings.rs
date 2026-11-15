@@ -22,7 +22,7 @@ use crate::core::ids::{ControlId, DialogId};
 use crate::core::include::{AfterOk, SummaryRow};
 use crate::core::layout::{Px, Rect, StatusLayout, StatusWidths};
 use crate::core::model::Model;
-use crate::core::open::browse_command;
+use crate::core::open::{browse_command, browse_compare_command};
 use crate::core::results::Fix;
 use crate::core::settings::{
     ContextItem, ItemVisibility, Mode, ServiceChanges, SettingsDraft, SettingsPage, SettingsValues,
@@ -144,8 +144,9 @@ const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 10] = [
 ];
 
 /// Each command of the Open with group's box, its Browse… button, its cue
-/// and the command it shows: the open commands and the External viewer.
-const OPEN_COMMANDS: [(ControlId, ControlId, &str, Field<String>); 4] = [
+/// and the command it shows: the open commands, the External viewer and
+/// the Comparison tool.
+const OPEN_COMMANDS: [(ControlId, ControlId, &str, Field<String>); 5] = [
     (
         ControlId::ContextMenuOpenFolders,
         ControlId::ContextMenuOpenFoldersBrowse,
@@ -169,6 +170,12 @@ const OPEN_COMMANDS: [(ControlId, ControlId, &str, Field<String>); 4] = [
         ControlId::ContextMenuExternalViewerBrowse,
         "settings_context_menu.cue_default",
         |v| &mut v.choices.external_viewer,
+    ),
+    (
+        ControlId::ContextMenuCompareTool,
+        ControlId::ContextMenuCompareToolBrowse,
+        "settings_context_menu.cue_compare",
+        |v| &mut v.choices.compare_tool,
     ),
 ];
 
@@ -2240,15 +2247,20 @@ impl<'a> SettingsDialog<'a> {
     }
 
     /// Writes the program that the person chooses into the open command
-    /// box `edit`, as `"<program>" "%1"`.
+    /// box `edit`, as `"<program>" "%1"`, or for the Comparison tool as
+    /// `"<program>" "%1" "%2"`.
     fn browse(&self, dialog: Hwnd, edit: ControlId) {
         let title = self.strings.text("settings_context_menu.browse_title");
         let programs = self.strings.text("settings_context_menu.programs");
         if let Some(program) = win::shell::pick_program(dialog, title, programs)
-            && let Some(edit) = self.control(SettingsPage::ContextMenu, edit)
+            && let Some(control) = self.control(SettingsPage::ContextMenu, edit)
         {
             // EN_CHANGE then puts it in the draft.
-            edit.set_text(&browse_command(&program));
+            control.set_text(&if edit == ControlId::ContextMenuCompareTool {
+                browse_compare_command(&program)
+            } else {
+                browse_command(&program)
+            });
         }
     }
 

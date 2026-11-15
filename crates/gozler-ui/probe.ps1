@@ -615,7 +615,7 @@ menu.file
   command.exit|Ctrl+Q|on|
 menu.edit
   command.copy|Ctrl+C|off|
-  command.copy_as_path|Ctrl+Shift+C|off|
+  command.copy_as_path||off|
   command.copy_name||off|
   -
   command.select_all|Ctrl+A|on|

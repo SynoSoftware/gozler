@@ -210,11 +210,41 @@ pub(crate) struct CommandLine {
     pub(crate) parameters: String,
 }
 
+/// The command that Browse… writes for the chosen comparison tool, as
+/// [`browse_command`] does, with both files.
+pub(crate) fn browse_compare_command(program: &str) -> String {
+    format!("\"{program}\" \"%1\" \"%2\"")
+}
+
 /// `command` for the entry at `path`, or `None` when the command is empty,
-/// which does what File Explorer does. The program is the quoted start of
-/// the command, or its first word.
+/// which does what File Explorer does.
 fn expand(command: &str, path: &str) -> Option<CommandLine> {
-    let command = command.trim().replace("%1", path);
+    split_command(&command.trim().replace("%1", path))
+}
+
+/// The comparison tool's `command` for two files, whose paths replace
+/// `%1` and `%2` (DESIGN.md: Compare by content); `None` when the command
+/// is empty. A path that holds `%2` stays as it is.
+pub(crate) fn compare_command(command: &str, files: [&str; 2]) -> Option<CommandLine> {
+    let mut line = String::new();
+    let mut rest = command.trim();
+    while let Some(at) = rest.find('%') {
+        line.push_str(&rest[..at]);
+        let (text, length) = match rest.as_bytes().get(at + 1) {
+            Some(b'1') => (files[0], 2),
+            Some(b'2') => (files[1], 2),
+            _ => ("%", 1),
+        };
+        line.push_str(text);
+        rest = &rest[at + length..];
+    }
+    line.push_str(rest);
+    split_command(&line)
+}
+
+/// `command` split into the program, its quoted start or else its first
+/// word, and the parameters; `None` when it is empty.
+fn split_command(command: &str) -> Option<CommandLine> {
     if command.is_empty() {
         return None;
     }
@@ -222,7 +252,7 @@ fn expand(command: &str, path: &str) -> Option<CommandLine> {
         Some(quoted) => quoted.split_once('"').unwrap_or((quoted, "")),
         None => command
             .split_once(char::is_whitespace)
-            .unwrap_or((&command, "")),
+            .unwrap_or((command, "")),
     };
     Some(CommandLine {
         program: program.to_owned(),
@@ -255,6 +285,20 @@ mod tests {
             None,
             "empty does what File Explorer does"
         );
+    }
+
+    /// Each file takes its own place, also when a path holds `%1`.
+    #[test]
+    fn the_comparison_tool_gets_both_files() {
+        let command = browse_compare_command(r"C:\Program Files\WinMerge\WinMergeU.exe");
+        assert_eq!(
+            compare_command(&command, [r"C:\100%1\a.txt", r"D:\b.txt"]),
+            Some(CommandLine {
+                program: r"C:\Program Files\WinMerge\WinMergeU.exe".into(),
+                parameters: r#""C:\100%1\a.txt" "D:\b.txt""#.into(),
+            })
+        );
+        assert_eq!(compare_command(" ", ["a", "b"]), None);
     }
 
     /// An older copy is usually a backup, and a 32-bit Total Commander

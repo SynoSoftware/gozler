@@ -9,6 +9,7 @@
 pub(crate) mod about;
 pub(crate) mod accounts;
 pub(crate) mod clipboard;
+pub(crate) mod compare;
 pub(crate) mod controls;
 pub(crate) mod dialog;
 pub(crate) mod drop_target;

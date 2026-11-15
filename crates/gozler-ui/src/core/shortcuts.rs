@@ -283,6 +283,11 @@ impl Serialize for CommandShortcuts {
     }
 }
 
+/// Default keys that a version added after tables were saved, which such a
+/// table can give another command: Compare's was Copy path's before.
+const LATER_DEFAULTS: &[(CommandId, Keystroke)] =
+    &[(CommandId::Compare, Keystroke::ctrl_shift(Key::Letter(b'C')))];
+
 impl<'de> Deserialize<'de> for CommandShortcuts {
     /// A table that breaks a rule, such as two commands with one shortcut
     /// or a shortcut for a command that takes none, is refused whole, so
@@ -306,6 +311,19 @@ impl<'de> Deserialize<'de> for CommandShortcuts {
             // Saved command bindings predate the fixed mode keys.
             keys.retain(|key| mode_for_key(*key).is_none());
             table.set(command, keys);
+        }
+        // A table saved before a default was added can give that key to
+        // another command; the person's choice keeps it, so the rest of the
+        // table still loads. Any other conflict is a hand edit, refused below.
+        for &(command, key) in LATER_DEFAULTS {
+            let taken =
+                (table.changed.iter()).any(|(c, keys)| *c != command && keys.contains(&key));
+            if taken && !table.changed.iter().any(|(c, _)| *c == command) {
+                let kept = (command.row().shortcuts.iter().copied())
+                    .filter(|default| *default != key)
+                    .collect();
+                table.set(command, kept);
+            }
         }
         // Checked once every command has its keys, because a key that moved
         // from one command to another is taken until both are read.
@@ -529,6 +547,19 @@ mod tests {
         .expect("fixed mode keys are removed from saved command bindings");
         assert_eq!(table.of(CommandId::Find), [key("Ctrl+F"), key("Ctrl+K")]);
         assert_eq!(table.of(CommandId::Commander), [key("Ctrl+J")]);
+    }
+
+    /// A default key that a later version adds stays with the command the
+    /// person gave it to, and their other keys still load (reported
+    /// defect: Compare's new Ctrl+Shift+C refused the whole table).
+    #[test]
+    fn a_new_default_leaves_a_saved_key_where_the_person_put_it() {
+        let table: CommandShortcuts =
+            serde_json::from_str(r#"{"copy_name":["Ctrl+Shift+C"],"find":["Ctrl+K"]}"#)
+                .expect("the person's key outranks a newer default");
+        assert_eq!(table.of(CommandId::CopyName), [key("Ctrl+Shift+C")]);
+        assert_eq!(table.of(CommandId::Find), [key("Ctrl+K")]);
+        assert!(table.of(CommandId::Compare).is_empty());
     }
 
     /// Without the Windows key a shortcut would take its key from every

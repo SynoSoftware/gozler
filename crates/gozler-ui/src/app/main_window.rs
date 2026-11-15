@@ -11,6 +11,7 @@
 //! their delivery and are consumed once. [`Message::Deferred`] repairs
 //! interrupted areas.
 
+use super::compare::{CompareWindows, Source as CompareSource};
 use super::dialogs::{
     About, CustomDate, CustomSize, DeleteUnseen, SearchSyntax, Transfer, TransferAction,
     TransferMode, TransferStart,
@@ -432,6 +433,9 @@ pub(crate) struct MainWindow {
     selection_timer: Cell<bool>,
     operation_timer: Cell<bool>,
     ending: Cell<Ending>,
+    /// The end that an Exit waiting for compare windows' saves reaches when
+    /// it runs again.
+    ending_after_saves: Cell<Ending>,
     /// The tooltip of each toolbar button, by its ID, which a toolbar asks
     /// for when the pointer rests on the button.
     tool_tips: RefCell<Vec<(u16, String)>>,
@@ -459,6 +463,8 @@ pub(crate) struct MainWindow {
     file_operations: OnceCell<FileOperations>,
     /// The open Viewers (DESIGN.md: The Viewer).
     viewers: Viewers,
+    /// The open compare windows (DESIGN.md: Compare by content).
+    compare_windows: CompareWindows,
     /// The window's registration as a drop target, which only a window with
     /// file operations has, so another window accepts no drop.
     drop_target: RefCell<Option<DropRegistration>>,
@@ -579,6 +585,7 @@ impl MainWindow {
         let accelerators = accelerator_table(&model.choices().shortcuts, model.mode())
             .expect("the accelerator table builds");
         let viewers = Viewers::new(model.viewer());
+        let compare_windows = CompareWindows::new(model.compare(), false);
         let dates = Dates::new(
             model.choices().date_format,
             jiff::Timestamp::now().to_zoned(gozler_winfs::local_time_zone()),
@@ -605,6 +612,7 @@ impl MainWindow {
             selection_timer: Cell::new(false),
             operation_timer: Cell::new(false),
             ending: Cell::new(Ending::Running),
+            ending_after_saves: Cell::new(Ending::Running),
             tool_tips: RefCell::new(Vec::new()),
             splitter_drag: Cell::new(None),
             accelerators: RefCell::new(Rc::new(accelerators)),
@@ -618,6 +626,7 @@ impl MainWindow {
             shutdown: RefCell::new(None),
             file_operations: OnceCell::new(),
             viewers,
+            compare_windows,
             drop_target: RefCell::new(None),
             drag_in: RefCell::new(None),
             dropping: RefCell::new(HashMap::new()),
@@ -923,6 +932,7 @@ impl MainWindow {
             self.refresh_operations();
         }
         self.viewers.set_strings(&Strings::load(language));
+        self.compare_windows.set_strings(&Strings::load(language));
     }
 
     fn apply_text(&self, hwnd: Hwnd, captions: &WindowCaptions) {
@@ -1308,12 +1318,18 @@ impl MainWindow {
         self.settings.post_settings_reply();
     }
 
-    /// Closes the window after its message loop has ended, when the setup
-    /// asked for it in [`MainWindow::run_setup`].
-    pub(super) fn close_for_setup(&self, hwnd: Hwnd) {
-        if self.ending.get() == Ending::ForSetup {
-            self.exit(hwnd);
+    /// Exits as File > Exit does after the message loop has ended, when the
+    /// setup asked for it in [`MainWindow::run_setup`]. Whether the message
+    /// loop runs again: while the compare windows' saves that Exit waits
+    /// for run, after which Exit goes on, or when the person kept Gozler.
+    pub(super) fn close_for_setup(&self, hwnd: Hwnd) -> bool {
+        if self.ending.get() != Ending::ForSetup {
+            return false;
         }
+        // Exit sets it again when it ends Gozler; until then the window
+        // runs as before.
+        self.ending.set(Ending::Running);
+        !self.exit(hwnd, Ending::ForSetup)
     }
 
     /// Setup can end the message loop before destroying the window, so its
@@ -1949,7 +1965,7 @@ impl MainWindow {
             MenuItem::Mode(mode) => return self.show_mode(hwnd, mode),
             MenuItem::Run(command) => match command {
                 CommandId::Exit => {
-                    self.exit(hwnd);
+                    self.exit(hwnd, Ending::Running);
                     return;
                 }
                 CommandId::About => {
@@ -2093,6 +2109,7 @@ impl MainWindow {
                     return self.controls().panels.new_folder(self, hwnd, active);
                 }
                 CommandId::View => return self.view(hwnd, list, false),
+                CommandId::Compare => return self.compare(hwnd, list),
                 // Not available in this version (DESIGN.md: Commands in Two
                 // panels).
                 CommandId::Edit => return,
@@ -3600,6 +3617,57 @@ impl MainWindow {
         }
     }
 
+    /// File > Compare by content: the comparison tool of Settings > Context
+    /// menu runs on the two files, or the compare window opens with `Shift`
+    /// or without a tool (DESIGN.md: Compare by content).
+    fn compare(&self, hwnd: Hwnd, list: List) {
+        let (source, strings, tool) = {
+            let model = self.model.borrow();
+            let source = match list {
+                List::Panel(side) => {
+                    let panels = model.panels();
+                    let Some(source) = panels.chosen_source(side) else {
+                        return;
+                    };
+                    // A search panel's entries are its selected results.
+                    let selected =
+                        |panel: &panel::Panel| panel.search().is_some() || panel.has_selection();
+                    let other = panels.panel(side.other());
+                    CompareSource::Chosen {
+                        source,
+                        selected: selected(panels.panel(side)),
+                        target: selected(other)
+                            .then(|| panels.chosen_source(side.other()))
+                            .flatten(),
+                        folder: other.destination().map(str::to_owned),
+                    }
+                }
+                List::Search => {
+                    let Some(source) = self.selected_source(list) else {
+                        return;
+                    };
+                    CompareSource::Chosen {
+                        source,
+                        selected: true,
+                        target: None,
+                        folder: None,
+                    }
+                }
+            };
+            // Shift held beyond the shortcut that runs the command, such as
+            // the default Ctrl+Shift+C, asks for the built-in window.
+            let shift = win::window::shift_held()
+                && !(model.choices().shortcuts.of(CommandId::Compare).iter())
+                    .any(|keys| keys.shift && win::window::key_held(keys.key));
+            let tool = &model.choices().compare_tool;
+            let tool = (!tool.trim().is_empty() && !shift).then(|| tool.clone());
+            (source, model.strings().clone(), tool)
+        };
+        if let Err(error) = self.compare_windows.open(source, tool, strings, Some(hwnd)) {
+            self.log_error(format!("The compare window did not open: {error}"));
+        }
+    }
+
     /// `Alt+F3`: the External viewer of Settings > Context menu opens the
     /// file that `Shift+F3` views, or Windows' default program when none
     /// is set (DESIGN.md: The Viewer).
@@ -4507,7 +4575,7 @@ impl MainWindow {
                 extension: format.extension(),
             })
             .collect();
-        let Some((path, index)) = shell::save_dialog(hwnd, &title, &file_name, &types) else {
+        let Some((path, index)) = shell::save_dialog(hwnd, &title, None, &file_name, &types) else {
             return;
         };
         let chosen = ExportFormat::ALL
@@ -4610,7 +4678,7 @@ impl MainWindow {
     /// and exits otherwise (DESIGN.md: Window lifetime).
     fn close(&self, hwnd: Hwnd) {
         if self.instance() == Instance::Another || !self.model.borrow().choices().keep_running {
-            self.exit(hwnd);
+            self.exit(hwnd, Ending::Running);
             return;
         }
         hwnd.hide();
@@ -4642,8 +4710,14 @@ impl MainWindow {
     /// operations run or wait, it asks first, and stops them
     /// (DESIGN.md: File operations), over the window, which comes forward from
     /// the notification area or another start's request. Returns whether Gozler
-    /// ends; `false` when the person kept the operations.
-    fn exit(&self, hwnd: Hwnd) -> bool {
+    /// ends; `false` when the person kept the operations or a compare
+    /// window's changes, or while those changes save, after which
+    /// [`Self::finish_exit`] runs for the same `ending`.
+    fn exit(&self, hwnd: Hwnd, ending: Ending) -> bool {
+        // An exit that ran inside this call's loops already ended Gozler.
+        if self.shutdown.borrow().is_some() {
+            return true;
+        }
         let counts = self
             .file_operations
             .get()
@@ -4660,12 +4734,69 @@ impl MainWindow {
                 return false;
             }
         }
-        // Each Viewer leaves its size, place and Wrap long lines as it
-        // closes, so the save holds them.
+        self.finish_exit(hwnd, ending)
+    }
+
+    /// The rest of Exit, after the person let the file operations stop: the
+    /// compare windows settle their changes, and Exit closes them once none
+    /// has changes. Returns as [`Self::exit`] does.
+    fn finish_exit(&self, hwnd: Hwnd, ending: Ending) -> bool {
+        // An exit that ran inside the question's or the saves' loops already
+        // ended Gozler.
+        if self.shutdown.borrow().is_some() {
+            return true;
+        }
+        if !self.compare_windows.settle_for_exit() {
+            self.ending_after_saves.set(ending);
+            return false;
+        }
+        // Each Viewer and compare window leaves its size, place and options
+        // as it closes, so the save holds them.
         self.viewers.close_all();
+        self.compare_windows.close_all();
         self.save_settings(true);
+        self.ending.set(ending);
         hwnd.destroy();
         true
+    }
+
+    /// Exit for another program's start, such as the setup's, which waits
+    /// for the answer ([`super::EXIT_MESSAGE`]): the compare windows' saves
+    /// that Exit asks for end here first, so the answer says what happens.
+    fn exit_answering(&self, hwnd: Hwnd) -> bool {
+        // An Exit that already waits for saves, such as Reset all's, has
+        // asked about the file operations and goes on with its own ending.
+        // The stored ending counts only while Exit waits, because a Cancel or
+        // a failed save ends the wait.
+        let (ending, mut exited) = if self.compare_windows.exit_waits() {
+            let ending = self.ending_after_saves.get();
+            (ending, self.finish_exit(hwnd, ending))
+        } else {
+            (Ending::Running, self.exit(hwnd, Ending::Running))
+        };
+        loop {
+            if exited {
+                return true;
+            }
+            if !self.compare_windows.take_exit_wait() {
+                return false;
+            }
+            // Another exit can end Gozler while this one waits, as the
+            // setup's does that arrives meanwhile.
+            let ended = || self.shutdown.borrow().is_some();
+            win::window::run_messages_until(hwnd, &|| self.accelerators(), &|| {
+                ended() || !self.compare_windows.saving()
+            });
+            if ended() {
+                return true;
+            }
+            // A WM_QUIT ended the wait first, or a save that failed stopped
+            // Exit, as it stops Exit from the menu.
+            if self.compare_windows.saving() || !self.compare_windows.exit_waits() {
+                return false;
+            }
+            exited = self.finish_exit(hwnd, ending);
+        }
     }
 
     /// Asks GitHub for the latest release when
@@ -4707,10 +4838,7 @@ impl MainWindow {
     /// opens the window again, as a new installation (DESIGN.md: Settings
     /// dialog).
     fn reset_all(&self, hwnd: Hwnd) {
-        self.ending.set(Ending::ForReset);
-        if !self.exit(hwnd) {
-            self.ending.set(Ending::Running);
-        }
+        self.exit(hwnd, Ending::ForReset);
     }
 
     /// Whether the window exited for Settings' Reset all.
@@ -4729,6 +4857,7 @@ impl MainWindow {
         let changes = {
             let mut model = self.model.borrow_mut();
             model.set_viewer(self.viewers.state());
+            model.set_compare(self.compare_windows.state());
             model.settings_changes(scope)
         };
         if let Some(changes) = changes {
@@ -5049,6 +5178,12 @@ impl WindowProc for MainWindow {
                 if let Some(state) = self.viewers.take_state() {
                     self.model.borrow_mut().set_viewer(state);
                 }
+                if let Some(state) = self.compare_windows.take_state() {
+                    self.model.borrow_mut().set_compare(state);
+                }
+                if self.compare_windows.take_exit() {
+                    self.finish_exit(hwnd, self.ending_after_saves.get());
+                }
                 self.note_saved_state(hwnd);
                 self.apply_pending(hwnd);
                 if self.controls().search.select_on_click.replace(false) {
@@ -5241,6 +5376,7 @@ impl WindowProc for MainWindow {
                 if self.ending_session.replace(true) {
                     return Some(LRESULT(0));
                 }
+                self.compare_windows.close_all();
                 self.viewers.close_all();
                 hwnd.hide();
                 self.save_settings(false);
@@ -5298,7 +5434,8 @@ impl WindowProc for MainWindow {
                 let (settings_finished, cleanup) = self.created().work.borrow_mut().close();
                 let cleanup = win::work::spawn(cleanup);
                 self.shortcuts.close();
-                // No Viewer outlives the message loop.
+                // No Viewer or compare window outlives the message loop.
+                self.compare_windows.close_all();
                 self.viewers.close_all();
                 let error_log = self.settings_file.with_file_name("ui-error.log");
                 let shutdown = win::window::quit_after(move |worker| {
@@ -5353,7 +5490,7 @@ impl WindowProc for MainWindow {
             // the dialog's loop runs on the window.
             Message::Other(msg) if msg == self.exit_message => {
                 let closes = if hwnd.is_enabled() {
-                    self.exit(hwnd)
+                    self.exit_answering(hwnd)
                 } else {
                     self.show_window(hwnd);
                     false
@@ -5397,7 +5534,10 @@ impl WindowProc for MainWindow {
                 }
                 Some(LRESULT(0))
             }
-            Message::Other(_) => None,
+            // The window takes dropped files through its OLE drop target.
+            // Only a compare window holds changes that a sign-out would
+            // lose, and each one answers WM_QUERYENDSESSION itself.
+            Message::Other(_) | Message::DropFiles { .. } | Message::QueryEndSession => None,
         }
     }
 }

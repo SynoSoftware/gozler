@@ -8,6 +8,9 @@ use std::path::PathBuf;
 
 pub(crate) const SAVE_ARGUMENT: &str = "--save-include";
 pub(crate) const REBUILD_ARGUMENT: &str = "--rebuild-index";
+/// Opens only the compare window for two files (DESIGN.md: Compare by
+/// content).
+pub(crate) const COMPARE_ARGUMENT: &str = "--compare";
 pub(crate) const REQUEST_TAG: usize = 0x475a_0001;
 pub(crate) const MAX_HANDOFF_BYTES: usize = 256 * 1024;
 
@@ -83,6 +86,10 @@ pub(crate) struct Arguments {
     pub(crate) save_include: Option<PathBuf>,
     pub(crate) rebuild_index: bool,
     pub(crate) unregister_shortcut: bool,
+    /// The two files that `--compare` names. It is no [`Request`],
+    /// because it opens a process of its own that the first window never
+    /// sees.
+    pub(crate) compare: Option<[PathBuf; 2]>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -123,6 +130,15 @@ impl Arguments {
                 "--unregister-shortcut" => result.unregister_shortcut = true,
                 SAVE_ARGUMENT => result.save_include = args.next().map(PathBuf::from),
                 REBUILD_ARGUMENT => result.rebuild_index = true,
+                COMPARE_ARGUMENT => {
+                    let left = value(&mut args, &arg)?;
+                    let right = value(&mut args, &arg)?;
+                    let invalid = |path: &str| path.is_empty() || path.contains('\0');
+                    if invalid(&left) || invalid(&right) {
+                        return Err(Error::Value(arg.into_owned()));
+                    }
+                    result.compare = Some([PathBuf::from(left), PathBuf::from(right)]);
+                }
                 "--location" => {
                     location = args
                         .next()
@@ -190,6 +206,8 @@ impl Arguments {
         if commander && (has_search || location.is_some())
             || reveal.is_some() && open.is_some()
             || result.sign_in && (has_search || commander || result.new_window)
+            || result.compare.is_some()
+                && (has_search || commander || location.is_some() || result.sign_in)
         {
             return Err(Error::Conflict);
         }
@@ -268,6 +286,24 @@ mod tests {
         assert!(Request::decode(r#"{"request":"reveal","value":4}"#).is_none());
         assert!(Request::decode(r#"{"request":"reveal","value":"\u0000"}"#).is_none());
         assert!(Request::decode(&" ".repeat(MAX_HANDOFF_BYTES)).is_none());
+    }
+
+    /// `--compare` takes two paths and stands alone.
+    #[test]
+    fn compare_takes_two_files_and_nothing_else() {
+        let arguments = parse(&["--compare", r"C:\a.txt", r"D:\b.txt"]).unwrap();
+        assert_eq!(
+            arguments.compare,
+            Some([PathBuf::from(r"C:\a.txt"), PathBuf::from(r"D:\b.txt")])
+        );
+        assert_eq!(
+            parse(&["--compare", r"C:\a.txt"]).err(),
+            Some(Error::Missing("--compare".into()))
+        );
+        assert_eq!(
+            parse(&["--compare", "a", "b", "--search", "x"]).err(),
+            Some(Error::Conflict)
+        );
     }
 
     #[test]

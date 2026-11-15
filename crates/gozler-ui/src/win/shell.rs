@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use windows::Win32::Foundation::{
     CloseHandle, E_POINTER, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, FILETIME, HANDLE,
-    HWND, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
+    HWND, POINT, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, GetVolumeInformationW, WIN32_FIND_DATAW,
@@ -33,15 +33,18 @@ use windows::Win32::System::Registry::{
 use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
 use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
-    FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppData, FOS_FILEMUSTEXIST,
-    FOS_FORCEFILESYSTEM, FOS_NOTESTFILECREATE, FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS,
-    FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IFileSystemBindData,
-    IFileSystemBindData_Impl, ILClone, ILCreateFromPathW, ILFindLastID, ILFree, ILIsParent,
-    ILRemoveLastID, IShellItem, KF_FLAG_DEFAULT, KF_FLAG_DONT_VERIFY, KNOWN_FOLDER_FLAG,
-    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHCreateDataObject,
-    SHCreateItemFromParsingName, SHDoDragDrop, SHELLEXECUTEINFOW, SHGetKnownFolderPath,
-    SHOP_FILEPATH, SHObjectProperties, SHOpenFolderAndSelectItems, SHParseDisplayName,
-    SIGDN_FILESYSPATH, STR_FILE_SYS_BIND_DATA, ShellExecuteExW,
+    DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, FOLDERID_Documents,
+    FOLDERID_Downloads, FOLDERID_LocalAppData, FOS_FILEMUSTEXIST, FOS_FORCEFILESYSTEM,
+    FOS_NOTESTFILECREATE, FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
+    HDROP, IFileOpenDialog, IFileSaveDialog, IFileSystemBindData, IFileSystemBindData_Impl,
+    ILClone, ILCreateFromPathW, ILFindLastID, ILFree, ILIsParent, ILRemoveLastID, IShellBrowser,
+    IShellDispatch2, IShellFolderViewDual, IShellItem, IShellWindows, KF_FLAG_DEFAULT,
+    KF_FLAG_DONT_VERIFY, KNOWN_FOLDER_FLAG, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC,
+    SEE_MASK_NOCLOSEPROCESS, SHCreateDataObject, SHCreateItemFromParsingName, SHDoDragDrop,
+    SHELLEXECUTEINFOW, SHGetKnownFolderPath, SHOP_FILEPATH, SHObjectProperties,
+    SHOpenFolderAndSelectItems, SHParseDisplayName, SID_STopLevelBrowser, SIGDN_FILESYSPATH,
+    STR_FILE_SYS_BIND_DATA, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellExecuteExW,
+    ShellWindows,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL};
 use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
@@ -450,13 +453,15 @@ pub(crate) struct FileType<'a> {
     pub(crate) extension: &'a str,
 }
 
-/// Shows the Windows save dialog, which asks before it replaces a file, and
-/// returns the chosen file and the index of the type it showed, or `None`
-/// when the person cancels. It runs its own message loop, so the caller
-/// holds no borrow across it (DESIGN.md: window rule 1).
+/// Shows the Windows save dialog, open at `start` when that folder exists,
+/// which asks before it replaces a file, and returns the chosen file and the
+/// index of the type it showed, or `None` when the person cancels. It runs
+/// its own message loop, so the caller holds no borrow across it
+/// (DESIGN.md: window rule 1).
 pub(crate) fn save_dialog(
     owner: Hwnd,
     title: &str,
+    start: Option<&str>,
     file_name: &str,
     types: &[FileType],
 ) -> Option<(PathBuf, usize)> {
@@ -486,12 +491,21 @@ pub(crate) fn save_dialog(
             .ok()?;
         dialog.SetFileTypes(&filters).ok()?;
         dialog.SetFileTypeIndex(1).ok()?;
-        if let Some(first) = types.first() {
+        // A type of any extension, `*`, adds none to a name typed without.
+        if let Some(first) = types.first().filter(|first| first.extension != "*") {
             dialog
                 .SetDefaultExtension(&HSTRING::from(first.extension))
                 .ok()?;
         }
         dialog.SetTitle(&HSTRING::from(title)).ok()?;
+        if let Some(start) = start
+            && let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(
+                &HSTRING::from(start),
+                None::<&IBindCtx>,
+            )
+        {
+            let _ = dialog.SetFolder(&folder);
+        }
         dialog.SetFileName(&HSTRING::from(file_name)).ok()?;
         let _modal = super::present::modal_loop();
         dialog.Show(Some(owner.0)).ok()?;
@@ -549,10 +563,63 @@ pub(crate) fn pick_folder(owner: Hwnd, start: Option<&str>) -> Option<String> {
 /// the person cancels. It runs its own message loop, so the caller holds no
 /// borrow across it (DESIGN.md: window rule 1).
 pub(crate) fn pick_program(owner: Hwnd, title: &str, programs: &str) -> Option<String> {
-    let name = HSTRING::from(format!("{programs} (*.exe)"));
+    pick_file(owner, title, &format!("{programs} (*.exe)"), "*.exe")
+}
+
+/// Lets `window` take files that File Explorer drops on it.
+pub(crate) fn accept_files(window: Hwnd) {
+    // SAFETY: plain values.
+    unsafe { DragAcceptFiles(window.0, true) };
+}
+
+/// The files of the drop `drop` and its point in the window's client
+/// coordinates; ends the drop.
+///
+/// # Safety
+/// `drop` is the handle of a `WM_DROPFILES` that the window received.
+pub(super) unsafe fn dropped_files(drop: HDROP) -> (Vec<Vec<u16>>, (i32, i32)) {
+    // SAFETY: the caller's contract; DragFinish ends the handle's life last.
+    unsafe {
+        let files = drop_paths(drop);
+        let mut point = POINT::default();
+        let _ = DragQueryPoint(drop, &raw mut point);
+        DragFinish(drop);
+        (files, (point.x, point.y))
+    }
+}
+
+/// The paths that the drop block `drop` holds.
+///
+/// # Safety
+/// `drop` is a `DROPFILES` block: a drop's handle or a `CF_HDROP` medium.
+pub(super) unsafe fn drop_paths(drop: HDROP) -> Vec<Vec<u16>> {
+    // SAFETY: the caller's contract; each buffer holds the length the call
+    // reports.
+    unsafe {
+        let count = DragQueryFileW(drop, u32::MAX, None);
+        (0..count)
+            .map(|index| {
+                let length = DragQueryFileW(drop, index, None) as usize;
+                let mut path = vec![0u16; length + 1];
+                let copied = DragQueryFileW(drop, index, Some(&mut path)) as usize;
+                path.truncate(copied);
+                path
+            })
+            .filter(|path| !path.is_empty())
+            .collect()
+    }
+}
+
+/// Shows the Windows file dialog, titled `title`, for the files that
+/// `spec` matches, such as `*.*`, whose type is named `name`, and returns
+/// the chosen file, or `None` when the person cancels. It runs its own
+/// message loop, so the caller holds no borrow across it (DESIGN.md:
+/// window rule 1).
+pub(crate) fn pick_file(owner: Hwnd, title: &str, name: &str, spec: &str) -> Option<String> {
+    let (name, spec) = (HSTRING::from(name), HSTRING::from(spec));
     let filter = [COMDLG_FILTERSPEC {
         pszName: PCWSTR(name.as_ptr()),
-        pszSpec: w!("*.exe"),
+        pszSpec: PCWSTR(spec.as_ptr()),
     }];
     // SAFETY: every string outlives the dialog, which copies them; the
     // chosen path is copied, then freed as the call requires.

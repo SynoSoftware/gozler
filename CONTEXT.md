@@ -314,6 +314,11 @@ The two ways the Viewer shows a file: Text decodes it into lines, and Hex
 shows each byte. The Viewer chooses from the file's first bytes, and `1`
 and `3` switch.
 
+**Compare window**:
+The window that Compare by content opens, which shows two files side by
+side, marks where they differ, and lets the person copy and save the
+changes. It is not synchronization's Comparison.
+
 **File operation**:
 A person's command to copy, move, synchronize, delete, rename or create a
 folder. An operation includes its whole selection; every delete is permanent.

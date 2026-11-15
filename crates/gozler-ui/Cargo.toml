@@ -32,12 +32,15 @@ gozler-winfs = { path = "../gozler-winfs" }
 # Settings > Visibility's Select Users or Groups dialog, and the VARIANT
 # that brings each chosen account's SID; QueryPerformanceCounter for the
 # times in ui-frames.log, which align with a screen recording's frames; the
-# cloak of the presenter's cover.
+# cloak of the presenter's cover; the RichEdit controls of the compare
+# window, and the reason it gives Windows for holding the end of the session.
 windows = { workspace = true, features = [
     "Win32_Graphics_Dwm",
     "Win32_Networking_ActiveDirectory",
     "Win32_System_Performance",
+    "Win32_System_Shutdown",
     "Win32_System_Variant",
+    "Win32_UI_Controls_RichEdit",
 ] }
 windows-core.workspace = true
 

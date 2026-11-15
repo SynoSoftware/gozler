@@ -81,6 +81,10 @@ pub(crate) struct Choices {
     /// default program (DESIGN.md: The Viewer).
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) external_viewer: String,
+    /// The program that Compare by content runs on two files; empty for
+    /// the built-in compare window (DESIGN.md: Compare by content).
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) compare_tool: String,
     /// Which items a row's context menu shows.
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) context_menu: ContextMenu,
@@ -152,6 +156,7 @@ impl Default for Choices {
             open_files: String::new(),
             open_file_location: String::new(),
             external_viewer: String::new(),
+            compare_tool: String::new(),
             context_menu: ContextMenu::default(),
             search_as_you_type: on(),
             show_all_when_empty: on(),
@@ -387,6 +392,7 @@ impl SettingsValues {
                 choices.open_files = defaults.open_files;
                 choices.open_file_location = defaults.open_file_location;
                 choices.external_viewer = defaults.external_viewer;
+                choices.compare_tool = defaults.compare_tool;
                 choices.context_menu = defaults.context_menu;
             }
             SettingsPage::Keyboard => {
@@ -776,6 +782,8 @@ pub(crate) struct WindowState {
     /// The Viewer's size and place, and Wrap long lines.
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) viewer: ViewerState,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) compare: CompareState,
 }
 
 impl Default for WindowState {
@@ -797,6 +805,7 @@ impl Default for WindowState {
             destination_folder: None,
             panels: SavedPanels::default(),
             viewer: ViewerState::default(),
+            compare: CompareState::default(),
         }
     }
 }
@@ -849,6 +858,58 @@ impl Default for ViewerState {
 
 fn default_zoom() -> u16 {
     super::viewer_window::DEFAULT_ZOOM
+}
+
+/// What the compare window remembers (DESIGN.md: Compare by content): the
+/// size and place of the one moved or closed last, its check boxes, the
+/// extra lines, the two-line list, Above each other and the text size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CompareState {
+    #[serde(
+        default,
+        deserialize_with = "placement",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) placement: Option<Placement>,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) case_sensitive: bool,
+    #[serde(default = "on", deserialize_with = "on_or_default")]
+    pub(crate) ignore_spaces: bool,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) only_differences: bool,
+    #[serde(default = "default_extra_lines", deserialize_with = "extra_lines")]
+    pub(crate) extra_lines: u32,
+    #[serde(default = "on", deserialize_with = "on_or_default")]
+    pub(crate) two_line_list: bool,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) above_each_other: bool,
+    #[serde(default = "default_zoom", deserialize_with = "zoom")]
+    pub(crate) zoom: u16,
+}
+
+impl Default for CompareState {
+    fn default() -> CompareState {
+        CompareState {
+            placement: None,
+            case_sensitive: false,
+            ignore_spaces: on(),
+            only_differences: false,
+            extra_lines: default_extra_lines(),
+            two_line_list: on(),
+            above_each_other: false,
+            zoom: default_zoom(),
+        }
+    }
+}
+
+fn default_extra_lines() -> u32 {
+    super::compare::DEFAULT_EXTRA_LINES
+}
+
+/// A number beyond the box's range comes into it.
+fn extra_lines<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let lines = or_default::<D, Option<u32>>(deserializer)?.unwrap_or_else(default_extra_lines);
+    Ok(lines.min(super::compare::MAX_EXTRA_LINES))
 }
 
 /// A size outside the range that zoom reaches comes into it, so an edited
@@ -1393,6 +1454,16 @@ mod tests {
                     }),
                     wrap: false,
                     zoom: 120,
+                },
+                compare: CompareState {
+                    placement: None,
+                    case_sensitive: true,
+                    ignore_spaces: false,
+                    only_differences: true,
+                    extra_lines: 5,
+                    two_line_list: false,
+                    above_each_other: true,
+                    zoom: 80,
                 },
             },
         };

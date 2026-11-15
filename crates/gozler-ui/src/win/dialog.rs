@@ -878,6 +878,51 @@ pub(crate) fn ask(owner: Hwnd, question: &Question) -> bool {
     shown.is_ok() && chosen == CONFIRM
 }
 
+/// Asks `instruction` in a Windows task dialog titled `title`, owned by
+/// `owner`, with a button for each of `choices`, the first the default,
+/// and `cancel` last, as Notepad asks to save. Returns the index of the
+/// chosen one; `None` for Cancel, `Esc` and the close button.
+pub(crate) fn choose(
+    owner: Hwnd,
+    title: &str,
+    instruction: &str,
+    choices: &[&str],
+    cancel: &str,
+) -> Option<usize> {
+    let [title, instruction, cancel] = [title, instruction, cancel].map(wide);
+    let texts: Vec<Vec<u16>> = choices.iter().map(|choice| wide(choice)).collect();
+    let buttons: Vec<TASKDIALOG_BUTTON> = (texts.iter().enumerate())
+        .map(|(index, text)| TASKDIALOG_BUTTON {
+            nButtonID: CONFIRM + index as i32,
+            pszButtonText: PCWSTR(text.as_ptr()),
+        })
+        .chain([TASKDIALOG_BUTTON {
+            nButtonID: IDCANCEL.0,
+            pszButtonText: PCWSTR(cancel.as_ptr()),
+        }])
+        .collect();
+    let config = TASKDIALOGCONFIG {
+        cbSize: size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: owner.0,
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW,
+        pszWindowTitle: PCWSTR(title.as_ptr()),
+        pszMainInstruction: PCWSTR(instruction.as_ptr()),
+        cButtons: buttons.len() as u32,
+        pButtons: buttons.as_ptr(),
+        nDefaultButton: CONFIRM,
+        ..Default::default()
+    };
+    let mut chosen = 0;
+    let _modal = super::present::modal_loop();
+    // SAFETY: the texts and the buttons outlive the call, which returns
+    // when the dialog closes.
+    let shown = unsafe { TaskDialogIndirect(&config, Some(&raw mut chosen), None, None) };
+    shown.ok()?;
+    usize::try_from(chosen - CONFIRM)
+        .ok()
+        .filter(|index| *index < choices.len())
+}
+
 /// Shows the administrator shield on [`ask`]'s confirm button, as Windows'
 /// own buttons that ask for permission show it.
 unsafe extern "system" fn shield_on_confirm(

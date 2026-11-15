@@ -423,6 +423,10 @@ impl CaptionTable {
                         Control(C::ContextMenuExternalViewerLabel),
                         "settings_context_menu.external_viewer",
                     ),
+                    (
+                        Control(C::ContextMenuCompareToolLabel),
+                        "settings_context_menu.compare_tool",
+                    ),
                     (Control(C::ContextMenuRestore), "settings.reset"),
                 ],
                 plain: &[
@@ -431,7 +435,7 @@ impl CaptionTable {
                         Control(C::ContextMenuOpenGroup),
                         "settings_context_menu.open_with",
                     ),
-                    // One letter cannot name four buttons (DESIGN.md: The
+                    // One letter cannot name five buttons (DESIGN.md: The
                     // Context menu page).
                     (
                         Control(C::ContextMenuOpenFoldersBrowse),
@@ -447,6 +451,10 @@ impl CaptionTable {
                     ),
                     (
                         Control(C::ContextMenuExternalViewerBrowse),
+                        "settings_context_menu.browse",
+                    ),
+                    (
+                        Control(C::ContextMenuCompareToolBrowse),
                         "settings_context_menu.browse",
                     ),
                     (

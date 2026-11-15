@@ -120,7 +120,7 @@ extension of this roadmap.
 | 10 | Arrange the two working folders | Swap panels and show the active folder in the other panel | `cm_Exchange`, `cm_MatchSrc` |
 | 11 | Select a related group | Invert selection and select/unselect by the focused file's extension | `cm_ExchangeSelection`, `cm_SelectCurrentExtension` |
 | 12 | Rename many files | Preview changes and collisions, then submit through the file-operation engine | `cm_MultiRenameFiles` |
-| 13 | Compare two versions | Launch a chosen external comparison tool on two files | `cm_CompareFilesByContent` |
+| 13 | Compare two versions | The built-in compare window, with line and word marks, edit mode and Save; a chosen comparison tool runs instead while one is set (DESIGN.md: Compare by content) | `cm_CompareFilesByContent`, `cm_IntCompareFilesByContent` |
 | 14 | Check a download or copied bundle | Create/verify checksum files and report mismatches or unreadable files | `cm_CRCcreate`, `cm_CRCcheck` |
 | 15 | Find descendants in one list | Indexed branch view with truthful completeness | `cm_DirBranch` |
 

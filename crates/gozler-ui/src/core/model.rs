@@ -30,7 +30,8 @@ use super::selection::{
     Sums, wide_path,
 };
 use super::settings::{
-    Changes, Choices, Mode, Placement, SavedColumn, Settings, SettingsPage, ViewerState,
+    Changes, Choices, CompareState, Mode, Placement, SavedColumn, Settings, SettingsPage,
+    ViewerState,
 };
 use super::text::{self, LanguageChoice, Strings};
 use super::update;
@@ -1174,6 +1175,15 @@ impl Model {
     /// What the Viewer remembers, which the next Viewer opens with.
     pub(crate) fn viewer(&self) -> ViewerState {
         self.settings.window.viewer
+    }
+
+    /// What the compare window remembers, which the next one opens with.
+    pub(crate) fn compare(&self) -> CompareState {
+        self.settings.window.compare
+    }
+
+    pub(crate) fn set_compare(&mut self, state: CompareState) {
+        self.settings.window.compare = state;
     }
 
     pub(crate) fn set_viewer(&mut self, state: ViewerState) {

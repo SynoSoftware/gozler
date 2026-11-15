@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+mod compare;
 mod dialogs;
 mod file_operations;
 mod icons;
@@ -75,6 +76,10 @@ pub(crate) fn run() {
             .join("Gozler")
     });
     set_panic_report(|report| report.folder = Some(data_dir.clone()));
+    if let Some(files) = &arguments.compare {
+        compare_alone(files, &data_dir.join("ui.json"));
+        return;
+    }
     let suffix = arguments
         .data_dir
         .as_deref()
@@ -177,8 +182,14 @@ pub(crate) fn run() {
         arguments.sign_in,
         arguments.request,
     );
-    win::window::run_message_loop(hwnd, &|| window.accelerators());
-    window.close_for_setup(hwnd);
+    // The setup's update ends the loop before Gozler exits, and Exit can
+    // wait for compare windows to save, which needs the loop again.
+    loop {
+        win::window::run_message_loop(hwnd, &|| window.accelerators());
+        if !window.close_for_setup(hwnd) {
+            break;
+        }
+    }
     window.finish_shutdown();
     if window.resets_settings() {
         // The new window must find no first one.
@@ -213,6 +224,37 @@ fn read_arguments() -> Result<Arguments, startup::Error> {
         request.validate()?;
     }
     Ok(arguments)
+}
+
+/// Shows only the compare window of `files` for `--compare`, and returns
+/// when it closes. It reads `ui.json` and never writes it, because the main
+/// window owns it.
+fn compare_alone(files: &[PathBuf; 2], settings_file: &Path) {
+    win::shell::initialize_com();
+    win::shell::initialize_ole();
+    win::controls::initialize();
+    let settings = work::load_settings(settings_file);
+    let language = settings
+        .choices
+        .language
+        .resolve(&win::locale::display_languages());
+    set_panic_report(|report| report.language = Some(language));
+    let strings = Strings::load(language);
+    let wide = |path: &PathBuf| {
+        use std::os::windows::ffi::OsStrExt;
+        std::path::absolute(path)
+            .unwrap_or_else(|_| path.clone())
+            .as_os_str()
+            .encode_wide()
+            .collect::<Vec<u16>>()
+    };
+    let compare_windows = compare::CompareWindows::new(settings.window.compare, true);
+    let source = compare::Source::Files([wide(&files[0]), wide(&files[1])]);
+    if let Err(error) = compare_windows.open(source, None, strings.clone(), None) {
+        win::dialog::error_box(None, &error.message(), strings.text("compare.window"));
+        return;
+    }
+    win::window::run_other_loop();
 }
 
 fn hand_over(window: win::Hwnd, message: u32, request: Option<&Request>) {
