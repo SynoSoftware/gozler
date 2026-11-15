@@ -162,7 +162,7 @@ impl DialogItem {
 /// caption shows the same icon on every button that has it (DESIGN.md:
 /// Look). A fix that needs administrator permission shows the
 /// administrator shield instead, so its caption has no icon here.
-const BUTTON_GLYPHS: [(&str, Glyph); 27] = [
+const BUTTON_GLYPHS: [(&str, Glyph); 32] = [
     ("button.ok", Glyph::Accept),
     ("button.cancel", Glyph::Cancel),
     ("button.close", Glyph::Cancel),
@@ -190,6 +190,11 @@ const BUTTON_GLYPHS: [(&str, Glyph); 27] = [
     ("fix.open_services", Glyph::Processing),
     ("panel.retry", Glyph::Refresh),
     ("panel.choose_drive", Glyph::HardDrive),
+    ("compare.browse", Glyph::FolderOpen),
+    ("compare.browse_right", Glyph::FolderOpen),
+    ("compare.compare", Glyph::Refresh),
+    ("compare.next", Glyph::ChevronDown),
+    ("compare.previous", Glyph::ChevronUp),
 ];
 
 /// The icon of a push button whose caption is the catalogue text `key`.

@@ -176,6 +176,18 @@ impl CompareCommand {
         }
     }
 
+    /// The tooltip of its button: its menu label and its key, such as "Next
+    /// difference (Alt+Down)".
+    pub(crate) fn tip(self, strings: &Strings) -> String {
+        let label = text::without_access_key(&self.label(strings));
+        match self.keystroke() {
+            Some(keystroke) => {
+                strings.format("compare.command_tip", &[&label, &keystroke.text(strings)])
+            }
+            None => label,
+        }
+    }
+
     fn item(self, strings: &Strings) -> MenuNode {
         MenuNode::Item {
             id: self.id(),
@@ -323,9 +335,14 @@ pub(crate) fn context_menu(strings: &Strings) -> Vec<MenuNode> {
 /// What the menus show of the window's state.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct MenuState {
+    /// The path boxes name two files.
+    pub(crate) can_compare: bool,
     /// The mode of the comparison that shows, with each side's encoding
     /// in Text; `None` while none shows.
     pub(crate) shown: Option<(Mode, [Option<Encoding>; 2])>,
+    /// A difference follows, and one comes before, the caret's row.
+    pub(crate) next: bool,
+    pub(crate) previous: bool,
     /// Why the comparison that shows is in Hex; `None` when lines can be
     /// compared: both files are text within the limits.
     pub(crate) note: Option<Note>,
@@ -363,7 +380,8 @@ pub(crate) fn menu_states(state: MenuState) -> Vec<(u16, bool, bool)> {
     CompareCommand::all()
         .map(|command| {
             let (enabled, checked) = match command {
-                C::Compare | C::Close | C::Swap => (true, false),
+                C::Compare => (state.can_compare, false),
+                C::Close | C::Swap => (true, false),
                 C::Save => (state.changed, false),
                 C::Undo => (editing && state.can_undo, false),
                 C::Copy => (state.selected, false),
@@ -379,9 +397,9 @@ pub(crate) fn menu_states(state: MenuState) -> Vec<(u16, bool, bool)> {
                     false,
                 ),
                 C::Resync => (mode == Some(Mode::Text), false),
-                C::NextDifference | C::PreviousDifference | C::NextInLine | C::PreviousInLine => {
-                    (shown, false)
-                }
+                C::NextDifference => (shown && state.next, false),
+                C::PreviousDifference => (shown && state.previous, false),
+                C::NextInLine | C::PreviousInLine => (shown, false),
                 C::Text => (shown && state.note.is_none(), mode == Some(Mode::Text)),
                 C::Hex => (shown, mode == Some(Mode::Hex)),
                 C::OnlyDifferences => (true, state.only_differences),
@@ -533,11 +551,16 @@ pub(crate) fn compare_key(keystroke: Keystroke, focus: KeyFocus) -> Option<Compa
     }
 }
 
-/// The window's title: both files' names and the command.
-pub(crate) fn title(strings: &Strings, names: [&str; 2]) -> String {
+/// The window's title: both files' names, each after `*` while it has
+/// unsaved changes, as Notepad marks them, and the command.
+pub(crate) fn title(strings: &Strings, names: [&str; 2], changed: [bool; 2]) -> String {
     match names {
         ["", ""] => strings.text("compare.window").to_owned(),
-        [left, right] => strings.format("compare.title", &[left, right]),
+        _ => {
+            let [left, right] = [0, 1]
+                .map(|side| format!("{}{}", if changed[side] { "*" } else { "" }, names[side]));
+            strings.format("compare.title", &[&left, &right])
+        }
     }
 }
 
@@ -581,12 +604,34 @@ pub(crate) fn note_text(strings: &Strings, numbers: &dyn Numbers, note: Note) ->
     }
 }
 
-/// The status bar's count: "3 differences found".
-pub(crate) fn differences_text(strings: &Strings, numbers: &dyn Numbers, count: usize) -> String {
-    match count {
-        0 => strings.text("compare.no_differences").to_owned(),
-        _ => strings.count("compare.differences", count as u64, numbers, &[]),
+/// The status bar's count: "Difference 2 of 3" while the caret is in the
+/// difference at `index`, else "3 differences found".
+pub(crate) fn differences_text(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    index: Option<usize>,
+    count: usize,
+) -> String {
+    match (index, count) {
+        (_, 0) => strings.text("compare.no_differences").to_owned(),
+        (Some(index), _) => strings.format(
+            "compare.position",
+            &[
+                &numbers.integer(index as u64 + 1),
+                &numbers.integer(count as u64),
+            ],
+        ),
+        (None, _) => strings.count("compare.differences", count as u64, numbers, &[]),
     }
+}
+
+/// A side's encoding in the status bar: "Left: UTF-8".
+pub(crate) fn encoding_text(strings: &Strings, side: Side, name: &str) -> String {
+    let key = match side {
+        Side::Left => "compare.left_encoding",
+        Side::Right => "compare.right_encoding",
+    };
+    strings.format(key, &[name])
 }
 
 /// The text of a fold's row: "125 lines".
@@ -600,12 +645,19 @@ pub(crate) fn fold_text(strings: &Strings, numbers: &dyn Numbers, hidden: u64) -
 pub(crate) struct CompareSizes {
     /// The height of a path box, a button and a check box.
     pub(crate) line: Px,
+    /// The height of a label's text.
+    pub(crate) text: Px,
+    /// The captions of Left: and Right:.
+    pub(crate) labels: [Px; 2],
     pub(crate) browse: Px,
-    pub(crate) compare: Px,
+    /// Compare, Next and Previous.
+    pub(crate) buttons: [Px; 3],
     pub(crate) cancel: Px,
-    /// The captions of Case sensitive, Ignore repeated spaces and Show
-    /// only differences.
-    pub(crate) checks: [Px; 3],
+    /// The captions of Edit mode, Case sensitive, Ignore repeated spaces
+    /// and Show only differences.
+    pub(crate) checks: [Px; 4],
+    /// The caption of Extra lines:.
+    pub(crate) extra_label: Px,
     /// The widest text of the extra lines box.
     pub(crate) extra: Px,
     /// The height of a row of the sides' text at their zoom.
@@ -617,10 +669,15 @@ pub(crate) struct CompareSizes {
 /// Where the compare window's controls go.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CompareLayout {
+    pub(crate) labels: [Rect; 2],
     pub(crate) paths: [Rect; 2],
     pub(crate) browse: [Rect; 2],
-    pub(crate) compare: Rect,
-    pub(crate) checks: [Rect; 3],
+    /// Compare, Next and Previous.
+    pub(crate) buttons: [Rect; 3],
+    /// Edit mode, Case sensitive, Ignore repeated spaces and Show only
+    /// differences.
+    pub(crate) checks: [Rect; 4],
+    pub(crate) extra_label: Rect,
     pub(crate) extra: Rect,
     pub(crate) progress: Rect,
     pub(crate) cancel: Rect,
@@ -628,14 +685,19 @@ pub(crate) struct CompareLayout {
     /// Each side's line numbers, inside the side's border and above its
     /// horizontal scroll bar, so their rows line up with the side's.
     pub(crate) numbers: [Rect; 2],
+    /// Why no comparison shows, in the sides' place.
+    pub(crate) message: Rect,
     /// The two-line list; no height while it is hidden.
     pub(crate) list: Rect,
 }
 
 /// The compare window's layout in `area`, its client above the status
-/// bar: the paths with Browse… in two halves, the row of Compare and the
-/// check boxes with the progress and Cancel at its end, the sides beside
-/// or `above_each_other`, and the two-line list.
+/// bar: the paths, each after its label and with Browse…, in two halves;
+/// the buttons and the options, which go on in a row below when the
+/// window is too narrow for one, with the progress and Cancel at the end of
+/// the last; the sides beside or `above_each_other`; and the two-line
+/// list. The progress and Cancel keep their place while they are hidden,
+/// so the sides do not move when a comparison starts or ends.
 pub(crate) fn compare_layout(
     area: Size,
     sizes: &CompareSizes,
@@ -648,7 +710,9 @@ pub(crate) fn compare_layout(
             .rescale(Dpi::new(96).expect("96 is not zero"), dpi)
             .0
     };
-    let (margin, gap, edge, scroll_bar) = (px(11), px(7), px(2), px(17));
+    // The message stands as far below the top of the sides' place as the
+    // Viewer's below its area's.
+    let (margin, gap, edge, scroll_bar, message_top) = (px(11), px(7), px(2), px(17), px(60));
     let rect = |x: i32, y: i32, width: i32, height: i32| Rect {
         x: Px(x),
         y: Px(y),
@@ -657,33 +721,58 @@ pub(crate) fn compare_layout(
     };
     let width = area.width.0;
     let line = sizes.line.0;
+    let text = sizes.text.0;
+    let label = |x: i32, y: i32, caption: Px| rect(x, y + (line - text) / 2, caption.0, text);
     let half = ((width - 2 * margin - gap) / 2).max(0);
     let mut layout = CompareLayout::default();
     for (index, x) in [margin, margin + half + gap].into_iter().enumerate() {
+        let caption = sizes.labels[index].0.min(half);
         let browse = sizes.browse.0.min(half);
-        layout.paths[index] = rect(x, margin, half - browse - gap, line);
+        layout.labels[index] = label(x, margin, Px(caption));
+        let path_x = x + caption + px(4);
+        layout.paths[index] = rect(path_x, margin, x + half - browse - gap - path_x, line);
         layout.browse[index] = rect(x + half - browse, margin, browse, line);
     }
-    let y = margin + line + gap;
-    layout.compare = rect(margin, y, sizes.compare.0, line);
-    let mut x = layout.compare.right().0 + 2 * gap;
-    for (index, caption) in sizes.checks.into_iter().enumerate() {
-        // The box and its gap before the caption.
-        let box_width = caption.0 + px(20);
-        layout.checks[index] = rect(x, y, box_width, line);
-        x += box_width + gap;
+    // The buttons, then the options: each goes on the row while it fits,
+    // and Show only differences keeps its extra lines beside it.
+    let check = |caption: Px| caption.0 + px(20);
+    let extra_box = sizes.extra.0 + px(16);
+    let only = check(sizes.checks[3]) + gap + sizes.extra_label.0 + px(4) + extra_box;
+    let end = width - margin;
+    let (mut x, mut y) = (margin, margin + line + gap);
+    let mut place = |item_width: i32, lead: i32| {
+        if x > margin && x + lead + item_width > end {
+            (x, y) = (margin, y + line + gap);
+        } else if x > margin {
+            x += lead;
+        }
+        let at = rect(x, y, item_width, line);
+        x += item_width;
+        at
+    };
+    for (index, button) in sizes.buttons.into_iter().enumerate() {
+        layout.buttons[index] = place(button.0, gap);
     }
-    layout.extra = rect(x - gap + px(2), y, sizes.extra.0 + px(16), line);
+    for index in 0..3 {
+        let lead = if index == 0 { 2 * gap } else { gap };
+        layout.checks[index] = place(check(sizes.checks[index]), lead);
+    }
+    let group = place(only, gap);
+    layout.checks[3] = rect(group.x.0, group.y.0, check(sizes.checks[3]), line);
+    let extra_label_x = layout.checks[3].right().0 + gap;
+    layout.extra_label = label(extra_label_x, group.y.0, sizes.extra_label);
+    layout.extra = rect(group.right().0 - extra_box, group.y.0, extra_box, line);
     let cancel = sizes.cancel.0;
-    layout.cancel = rect(width - margin - cancel, y, cancel, line);
-    let progress = px(100).min((layout.cancel.x.0 - gap - layout.extra.right().0 - gap).max(0));
+    let progress = px(100);
+    let running = place(progress + gap + cancel, 2 * gap);
+    layout.cancel = rect(end - cancel, running.y.0, cancel, line);
     layout.progress = rect(
         layout.cancel.x.0 - gap - progress,
-        y + (line - px(12)) / 2,
+        running.y.0 + (line - px(12)) / 2,
         progress,
         px(12),
     );
-    let top = y + line + gap;
+    let top = running.y.0 + line + gap;
     let list_height = if two_line_list {
         2 * sizes.row.0 + 2 * edge + px(4)
     } else {
@@ -721,6 +810,12 @@ pub(crate) fn compare_layout(
             side.height.0,
         );
     }
+    layout.message = rect(
+        margin,
+        top + message_top,
+        width - 2 * margin,
+        bottom - top - message_top,
+    );
     layout.list = rect(0, bottom + list_gap, width, list_height);
     layout
 }
@@ -736,16 +831,19 @@ mod tests {
         let dpi = Dpi::new(96).expect("96 is not zero");
         let sizes = CompareSizes {
             line: Px(23),
+            text: Px(15),
+            labels: [Px(30), Px(35)],
             browse: Px(75),
-            compare: Px(75),
+            buttons: [Px(75), Px(75), Px(75)],
             cancel: Px(75),
-            checks: [Px(80), Px(120), Px(130)],
+            checks: [Px(70), Px(80), Px(120), Px(130)],
+            extra_label: Px(60),
             extra: Px(20),
             row: Px(15),
             numbers: [Px(30), Px(40)],
         };
         let area = Size {
-            width: Px(1000),
+            width: Px(1400),
             height: Px(700),
         };
         let beside = compare_layout(area, &sizes, false, true, dpi);
@@ -759,6 +857,46 @@ mod tests {
         assert!(above.sides[0].bottom() < above.sides[1].y);
         assert_eq!(above.sides[1].bottom(), Px(700));
         assert_eq!(above.list.height, Px(0));
+    }
+
+    /// A wide window holds the buttons, the options and Cancel in one row;
+    /// a narrow one goes on in rows below, with nothing past its edge,
+    /// Show only differences beside its extra lines, and the sides below
+    /// Cancel, which keeps its place while it is hidden.
+    #[test]
+    fn the_options_go_on_in_rows_below_in_a_narrow_window() {
+        let dpi = Dpi::new(96).expect("96 is not zero");
+        let sizes = CompareSizes {
+            line: Px(23),
+            text: Px(15),
+            labels: [Px(30), Px(35)],
+            browse: Px(75),
+            buttons: [Px(75), Px(75), Px(75)],
+            cancel: Px(75),
+            checks: [Px(70), Px(80), Px(120), Px(130)],
+            extra_label: Px(60),
+            extra: Px(20),
+            row: Px(15),
+            numbers: [Px(30), Px(40)],
+        };
+        let at = |width: i32| {
+            let area = Size {
+                width: Px(width),
+                height: Px(700),
+            };
+            compare_layout(area, &sizes, false, false, dpi)
+        };
+        let wide = at(1400);
+        assert_eq!(wide.buttons[0].y, wide.cancel.y);
+        let narrow = at(600);
+        assert!(narrow.cancel.y > narrow.buttons[0].y);
+        assert_eq!(narrow.extra.y, narrow.checks[3].y);
+        assert!(narrow.extra_label.right() <= narrow.extra.x);
+        let all = [narrow.buttons.as_slice(), narrow.checks.as_slice()].concat();
+        for each in all.iter().chain([&narrow.extra, &narrow.cancel]) {
+            assert!(each.right() <= Px(600 - 11), "{each:?}");
+        }
+        assert!(narrow.sides[0].y > narrow.cancel.bottom());
     }
 
     /// Each key has one meaning, each command's ID reads back, and the

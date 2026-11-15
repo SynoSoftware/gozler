@@ -503,9 +503,9 @@
 #define IDC_VIEWER_FIND_WORDS 3514
 #define IDC_VIEWER_FIND_HEX 3515
 
-// The compare window: the two paths with Browse…, Compare and its options,
-// the progress, the sides with their line numbers, the two-line list and
-// the status bar.
+// The compare window: the two paths with their labels and Browse…,
+// Compare, Next, Previous and the options, the progress, the sides with
+// their line numbers or the message, the two-line list and the status bar.
 #define IDC_COMPARE_LEFT_PATH 3801
 #define IDC_COMPARE_LEFT_BROWSE 3802
 #define IDC_COMPARE_RIGHT_PATH 3803
@@ -523,3 +523,10 @@
 #define IDC_COMPARE_RIGHT_NUMBERS 3815
 #define IDC_COMPARE_LIST 3816
 #define IDC_COMPARE_STATUS 3817
+#define IDC_COMPARE_LEFT_LABEL 3818
+#define IDC_COMPARE_RIGHT_LABEL 3819
+#define IDC_COMPARE_NEXT 3820
+#define IDC_COMPARE_PREVIOUS 3821
+#define IDC_COMPARE_EDIT_MODE 3822
+#define IDC_COMPARE_EXTRA_LABEL 3823
+#define IDC_COMPARE_MESSAGE 3824

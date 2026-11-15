@@ -51,28 +51,43 @@ pub(crate) struct Matching {
     pub(crate) ignore_spaces: bool,
 }
 
+/// The files that Compare by content found in the panels' selections.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Chosen {
+    Both([Vec<u16>; 2]),
+    /// One file, which the window keeps while the person chooses the other.
+    First(Vec<u16>),
+    Neither,
+}
+
 /// Which two files Compare by content compares, by Total Commander's four
 /// rules: two or more selected files, the first two; else the selected or
 /// focused file of the active panel with the first selected file of the
 /// other panel, or else with the file of the same name in the other panel's
-/// folder. `None` when that gives fewer than two files.
+/// folder, when `exists` finds it there.
 pub(crate) fn choose_files(
     source: &[Selected],
     source_selected: bool,
     target: &[Selected],
     target_folder: Option<&str>,
-) -> Option<[Vec<u16>; 2]> {
+    exists: &dyn Fn(&[u16]) -> bool,
+) -> Chosen {
     let mut files = source.iter().filter(|entry| !entry.is_folder);
-    let first = files.next()?.path.clone();
+    let Some(first) = files.next() else {
+        return Chosen::Neither;
+    };
+    let first = first.path.clone();
     if source_selected {
         if let Some(second) = files.next() {
-            return Some([first, second.path.clone()]);
+            return Chosen::Both([first, second.path.clone()]);
         }
         if let Some(other) = target.iter().find(|entry| !entry.is_folder) {
-            return Some([first, other.path.clone()]);
+            return Chosen::Both([first, other.path.clone()]);
         }
     }
-    let folder = target_folder?;
+    let Some(folder) = target_folder else {
+        return Chosen::First(first);
+    };
     let name_start = first
         .iter()
         .rposition(|&unit| unit == u16::from(b'\\'))
@@ -82,7 +97,10 @@ pub(crate) fn choose_files(
         second.push(u16::from(b'\\'));
     }
     second.extend_from_slice(&first[name_start..]);
-    (second != first).then_some([first, second])
+    if second == first || !exists(&second) {
+        return Chosen::First(first);
+    }
+    Chosen::Both([first, second])
 }
 
 /// The line end a file is written with.
@@ -279,6 +297,24 @@ pub(crate) fn encoded(lines: &[String], form: Form, encode: &CodePageBytes) -> O
         }
         Encoding::CodePage(page) => encode(page, &text)?,
     })
+}
+
+/// The first character of `lines` that `code_page` cannot hold, with the
+/// index of its line, which the message of a save that [`encoded`] refused
+/// names.
+pub(crate) fn first_unencodable(
+    lines: &[String],
+    code_page: CodePage,
+    encode: &CodePageBytes,
+) -> Option<(usize, char)> {
+    let line = lines
+        .iter()
+        .position(|line| encode(code_page, line).is_none())?;
+    let mut buffer = [0; 4];
+    let character = lines[line]
+        .chars()
+        .find(|each| encode(code_page, each.encode_utf8(&mut buffer)).is_none())?;
+    Some((line, character))
 }
 
 /// `text` as `matching` compares it.
@@ -642,14 +678,82 @@ pub(crate) struct ShownRows {
     pub(crate) forced: bool,
     /// The rows stop after [`SHOWN_LIMIT`].
     pub(crate) truncated: bool,
+    /// The runs of `rows` that differ, in order, which the caret's moves
+    /// search instead of the rows.
+    differences: Vec<Range<usize>>,
 }
 
 impl ShownRows {
+    fn new(rows: Vec<Shown>, forced: bool, truncated: bool) -> ShownRows {
+        let mut differences: Vec<Range<usize>> = Vec::new();
+        for (index, _) in rows.iter().enumerate().filter(|(_, row)| row.differs()) {
+            match differences.last_mut() {
+                Some(last) if last.end == index => last.end += 1,
+                _ => differences.push(index..index + 1),
+            }
+        }
+        ShownRows {
+            rows,
+            forced,
+            truncated,
+            differences,
+        }
+    }
+
     /// The sides swapped, as Swap sides shows them.
     pub(crate) fn swapped(self) -> ShownRows {
         ShownRows {
             rows: self.rows.into_iter().map(Shown::swapped).collect(),
             ..self
+        }
+    }
+
+    /// The differences that show, in order.
+    pub(crate) fn differences(&self) -> &[Range<usize>] {
+        &self.differences
+    }
+
+    /// The index in [`Self::differences`] of the difference with `row`.
+    pub(crate) fn difference_index(&self, row: usize) -> Option<usize> {
+        let index = self
+            .differences
+            .partition_point(|difference| difference.start <= row)
+            .checked_sub(1)?;
+        (self.differences[index].end > row).then_some(index)
+    }
+
+    /// The row that starts the difference after the one with `row`, or
+    /// after `row`.
+    pub(crate) fn next_difference(&self, row: usize) -> Option<usize> {
+        let after = self
+            .differences
+            .partition_point(|difference| difference.start <= row);
+        self.differences
+            .get(after)
+            .map(|difference| difference.start)
+    }
+
+    /// The row that starts the difference before the one with `row`, or
+    /// before `row`.
+    pub(crate) fn previous_difference(&self, row: usize) -> Option<usize> {
+        let up_to = self
+            .differences
+            .partition_point(|difference| difference.start <= row);
+        let skipped = if self.difference_index(row).is_some() {
+            2
+        } else {
+            1
+        };
+        let index = up_to.checked_sub(skipped)?;
+        Some(self.differences[index].start)
+    }
+
+    /// The rows of the difference with `row`, or `row` alone when it does
+    /// not differ.
+    pub(crate) fn difference_at(&self, row: usize) -> Range<usize> {
+        match self.difference_index(row) {
+            Some(index) => self.differences[index].clone(),
+            None => row..row + 1,
         }
     }
 }
@@ -667,10 +771,7 @@ pub(crate) fn shown_rows(rows: &[Row], only_differences: Option<u32>, limit: usi
     };
     let forced = only_differences.is_none() && rows.len() > limit;
     let Some(extra) = only_differences.or(forced.then_some(DEFAULT_EXTRA_LINES)) else {
-        return ShownRows {
-            rows: rows.iter().map(row).collect(),
-            ..ShownRows::default()
-        };
+        return ShownRows::new(rows.iter().map(row).collect(), false, false);
     };
     let keep = kept_rows(rows.iter().map(|row| row.differs), rows.len(), extra);
     let mut shown = Vec::new();
@@ -716,11 +817,7 @@ pub(crate) fn shown_rows(rows: &[Row], only_differences: Option<u32>, limit: usi
         });
         (next_left, next_right) = (left_end, right_end);
     }
-    ShownRows {
-        rows: shown,
-        forced,
-        truncated,
-    }
+    ShownRows::new(shown, forced, truncated)
 }
 
 /// The rows of a Hex comparison that show, as [`shown_rows`] decides them
@@ -743,12 +840,10 @@ pub(crate) fn hex_shown_rows(
     let mut differing = differing.iter().copied().peekable();
     let forced = only_differences.is_none() && total > limit as u64;
     let Some(extra) = only_differences.or(forced.then_some(DEFAULT_EXTRA_LINES)) else {
-        return ShownRows {
-            rows: (0..total)
-                .map(|k| row(k, differing.next_if_eq(&k).is_some()))
-                .collect(),
-            ..ShownRows::default()
-        };
+        let rows = (0..total)
+            .map(|k| row(k, differing.next_if_eq(&k).is_some()))
+            .collect();
+        return ShownRows::new(rows, false, false);
     };
     let extra = u64::from(extra);
     let mut shown = Vec::new();
@@ -781,11 +876,7 @@ pub(crate) fn hex_shown_rows(
             k = end;
         }
     }
-    ShownRows {
-        rows: shown,
-        forced,
-        truncated,
-    }
+    ShownRows::new(shown, forced, truncated)
 }
 
 /// For each of `count` rows, whether it lies within `extra` rows of a row
@@ -803,41 +894,6 @@ fn kept_rows(differs: impl Iterator<Item = bool>, count: usize, extra: u32) -> V
         kept = end;
     }
     keep
-}
-
-/// The row of `rows` that starts the difference after the one with `row`,
-/// or after `row`.
-pub(crate) fn next_difference(rows: &[Shown], row: usize) -> Option<usize> {
-    let starts = |k: usize| rows[k].differs() && (k == 0 || !rows[k - 1].differs());
-    (row + 1..rows.len()).find(|&k| starts(k))
-}
-
-/// The row of `rows` that starts the difference before the one with `row`,
-/// or before `row`.
-pub(crate) fn previous_difference(rows: &[Shown], row: usize) -> Option<usize> {
-    let starts = |k: usize| rows[k].differs() && (k == 0 || !rows[k - 1].differs());
-    let mut current = row.min(rows.len());
-    while current > 0 && current < rows.len() && rows[current].differs() && !starts(current) {
-        current -= 1;
-    }
-    (0..current).rev().find(|&k| starts(k))
-}
-
-/// The rows of the difference with `row`, or `row` alone when it does not
-/// differ.
-pub(crate) fn difference_at(rows: &[Shown], row: usize) -> Range<usize> {
-    if row >= rows.len() || !rows[row].differs() {
-        return row..row + 1;
-    }
-    let mut start = row;
-    while start > 0 && rows[start - 1].differs() {
-        start -= 1;
-    }
-    let mut end = row + 1;
-    while end < rows.len() && rows[end].differs() {
-        end += 1;
-    }
-    start..end
 }
 
 /// A change to one side's lines: `removed` at `at` became `inserted`.
@@ -1319,7 +1375,9 @@ mod tests {
         ignore_spaces: false,
     };
 
-    /// The four rules of Total Commander, folders left out.
+    /// The four rules of Total Commander, folders left out. One file found,
+    /// or a file of the same name that is not there, keeps the one file,
+    /// which the window shows while the person chooses the other.
     #[test]
     fn two_files_come_from_the_selection_or_the_same_name() {
         let entry = |path: &str, is_folder| Selected {
@@ -1331,8 +1389,9 @@ mod tests {
         let b = entry(r"C:\x\b.txt", false);
         let folder = entry(r"C:\x\sub", true);
         let other = entry(r"D:\y\c.txt", false);
+        let there = |_: &[u16]| true;
         let pick = |source: &[Selected], selected, target: &[Selected]| {
-            choose_files(source, selected, target, Some(r"D:\y"))
+            choose_files(source, selected, target, Some(r"D:\y"), &there)
         };
         assert_eq!(
             pick(
@@ -1340,19 +1399,36 @@ mod tests {
                 true,
                 std::slice::from_ref(&other)
             ),
-            Some([wide(r"C:\x\a.txt"), wide(r"C:\x\b.txt")])
+            Chosen::Both([wide(r"C:\x\a.txt"), wide(r"C:\x\b.txt")])
         );
         let one = std::slice::from_ref(&a);
         assert_eq!(
             pick(one, true, std::slice::from_ref(&other)),
-            Some([wide(r"C:\x\a.txt"), wide(r"D:\y\c.txt")])
+            Chosen::Both([wide(r"C:\x\a.txt"), wide(r"D:\y\c.txt")])
         );
         assert_eq!(
             pick(one, false, &[]),
-            Some([wide(r"C:\x\a.txt"), wide(r"D:\y\a.txt")])
+            Chosen::Both([wide(r"C:\x\a.txt"), wide(r"D:\y\a.txt")])
         );
-        assert_eq!(pick(&[folder], true, &[]), None);
-        assert_eq!(choose_files(one, false, &[], Some(r"C:\x")), None);
+        assert_eq!(pick(&[folder], true, &[]), Chosen::Neither);
+        let first = Chosen::First(wide(r"C:\x\a.txt"));
+        assert_eq!(choose_files(one, false, &[], Some(r"C:\x"), &there), first);
+        let missing = |_: &[u16]| false;
+        assert_eq!(
+            choose_files(one, false, &[], Some(r"D:\y"), &missing),
+            first
+        );
+    }
+
+    /// A save that the code page refuses names the first character it
+    /// cannot hold and its line.
+    #[test]
+    fn the_first_character_a_code_page_cannot_hold_is_found() {
+        let lines = strings(&["plain", "caf\u{E9}", "a \u{20AC} b"]);
+        assert_eq!(
+            first_unencodable(&lines, CodePage::Ansi, &latin1_bytes),
+            Some((2, '\u{20AC}'))
+        );
     }
 
     /// Save writes what the file held: its encoding, byte order mark,
@@ -1474,9 +1550,31 @@ mod tests {
         let few = shown_rows(&rows, Some(9), 3);
         assert!(few.truncated);
         assert_eq!(few.rows.len(), 3);
-        assert_eq!(next_difference(&shown.rows, 0), Some(2));
-        assert_eq!(previous_difference(&shown.rows, 4), Some(2));
-        assert_eq!(difference_at(&shown.rows, 2), 2..3);
+        assert_eq!(shown.next_difference(0), Some(2));
+        assert_eq!(shown.previous_difference(4), Some(2));
+        assert_eq!(shown.difference_at(2), 2..3);
+    }
+
+    /// Next and Previous difference and "Difference 2 of 3" search the
+    /// runs that differ: from inside a run they skip its own start, and
+    /// past the first and the last run they find none, which disables
+    /// them.
+    #[test]
+    fn differences_are_found_from_before_inside_and_after_a_run() {
+        let shown = hex_shown_rows([10, 10], &[0, 1, 5, 9], true, None, SHOWN_LIMIT);
+        assert_eq!(shown.differences(), [0..2, 5..6, 9..10]);
+        assert_eq!(shown.difference_index(1), Some(0));
+        assert_eq!(shown.difference_index(3), None);
+        assert_eq!(shown.difference_index(9), Some(2));
+        assert_eq!(shown.next_difference(0), Some(5));
+        assert_eq!(shown.next_difference(3), Some(5));
+        assert_eq!(shown.next_difference(9), None);
+        assert_eq!(shown.previous_difference(1), None);
+        assert_eq!(shown.previous_difference(5), Some(0));
+        assert_eq!(shown.previous_difference(7), Some(5));
+        assert_eq!(shown.previous_difference(9), Some(5));
+        assert_eq!(shown.difference_at(1), 0..2);
+        assert_eq!(shown.difference_at(3), 3..4);
     }
 
     /// Hex rows fold as lines do, and the rows past the shorter file show

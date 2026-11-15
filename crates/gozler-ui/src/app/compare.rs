@@ -9,27 +9,28 @@
 use super::dialogs::ViewerFind;
 pub(super) use super::work::compare::Source;
 use super::work::compare::{Job, Look, Options, Outcome, Progress, Saved, retire};
-use crate::core::captions::DialogCaptions;
+use crate::core::captions::{DialogCaptions, button_glyph};
 use crate::core::clipboard::folder_of;
 use crate::core::compare::rtf::{Rtf, Style};
-use crate::core::compare::{self, Matching};
+use crate::core::compare::{self, Chosen, Matching};
 use crate::core::compare_window::session::{
     Answer, Caret, Effect, Event, Fresh, Request, RowOptions, SaveFile, SavedFile, Session, Settled,
 };
 use crate::core::compare_window::{
     CompareCommand, CompareKey, CompareSizes, DEFAULT_ZOOM, KeyFocus, MenuState, Note, compare_key,
-    compare_layout, context_menu, differences_text, menu_bar, menu_states, note_text, title,
-    zoomed,
+    compare_layout, context_menu, differences_text, encoding_text, menu_bar, menu_states,
+    note_text, title, zoomed,
 };
 use crate::core::ids::{ControlId, DialogId, IconId};
 use crate::core::layout::{Px, Size, WHEEL_DELTA, image_button_width, status_last_part};
 use crate::core::panel::Side;
 use crate::core::settings::{CompareState, Placement};
-use crate::core::text::{self, Strings};
+use crate::core::text::{self, Numbers as _, Strings};
+use crate::core::viewer::Encoding;
 use crate::core::viewer::Mode;
 use crate::core::viewer::find::Query;
 use crate::win::compare::{RichText, SIDE_SCROLLED, palette, rtf_font};
-use crate::win::controls::{Button, CheckBox, Edit, ProgressBar, StatusBar};
+use crate::win::controls::{Button, CheckBox, Edit, Label, ProgressBar, StatusBar, Tooltip};
 use crate::win::dialog::{DialogEnd, choose, error_box, info_box, run_modal};
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::locale::{WindowsNumbers, code_page_encoded};
@@ -57,6 +58,8 @@ const REALIGN_TIMER: usize = 3;
 const REALIGN_DELAY: u32 = 300;
 /// The rows above a difference that going to it keeps in view.
 const CONTEXT_ROWS: usize = 3;
+/// The digits of the extra lines box: those of [`compare::MAX_EXTRA_LINES`].
+const EXTRA_DIGITS: usize = compare::MAX_EXTRA_LINES.ilog10() as usize + 1;
 
 /// The open compare windows, as the main window or the process of
 /// `--compare` holds them, and what they remember in `ui.json`.
@@ -239,11 +242,11 @@ impl CompareWindows {
         }
     }
 
-    /// Shows or hides the icons of every window's menus.
+    /// Shows or hides the icons of every window's menus and buttons.
     pub(super) fn apply_glyphs(&self) {
         for comparison in self.opened() {
             if let Some(hwnd) = comparison.hwnd.get() {
-                comparison.apply_menus(hwnd);
+                comparison.apply_glyphs(hwnd);
             }
         }
     }
@@ -409,6 +412,43 @@ fn name_of(path: &[u16]) -> String {
     text::name_of(&String::from_utf16_lossy(path)).to_owned()
 }
 
+/// What a path box holds: its text without the spaces around it, and
+/// without the quotes that File Explorer's Copy as path puts around it.
+fn box_path(text: &str) -> &str {
+    let text = text.trim();
+    (text.strip_prefix('"'))
+        .and_then(|text| text.strip_suffix('"'))
+        .unwrap_or(text)
+}
+
+/// What the window says in the sides' place while no comparison shows; in
+/// the status bar, while rows show, why they could not be built again.
+enum Notice {
+    /// `name`, on `side`, could not be read, for Windows' `reason`.
+    Failed {
+        side: Side,
+        name: String,
+        reason: String,
+    },
+    Cancelled,
+    /// One file was found, `name`, and the person chooses the other.
+    ChooseSecond {
+        name: String,
+    },
+}
+
+impl Notice {
+    fn text(&self, strings: &Strings) -> String {
+        match self {
+            Notice::Failed { name, reason, .. } => {
+                strings.format("viewer.cannot_read", &[name, reason])
+            }
+            Notice::Cancelled => strings.text("work.cancelled").to_owned(),
+            Notice::ChooseSecond { name } => strings.format("compare.choose_second", &[name]),
+        }
+    }
+}
+
 /// Where the caret goes after the rows show again.
 enum Place {
     FirstDifference,
@@ -426,35 +466,53 @@ enum Place {
 
 /// A window's controls, created in Tab order.
 struct Controls {
+    /// Left: and Right:, each made just before its path box, which Windows
+    /// names after it for screen readers.
+    labels: [Label; 2],
     paths: [Edit; 2],
     browse: [Button; 2],
     compare: Button,
+    next: Button,
+    previous: Button,
+    edit_mode: CheckBox,
     /// Case sensitive, Ignore repeated spaces and Show only differences.
     checks: [CheckBox; 3],
+    extra_label: Label,
     extra: Edit,
     cancel: Button,
     progress: ProgressBar,
+    /// Why no comparison shows, in the sides' place.
+    message: Label,
     sides: [RichText; 2],
     numbers: [RichText; 2],
     list: RichText,
     status: StatusBar,
+    /// The tooltips of Next and Previous, which name their keys.
+    tips: Tooltip,
 }
 
 impl Controls {
     fn create(hwnd: Hwnd) -> windows::core::Result<Controls> {
+        let left_label = Label::create(hwnd, ControlId::CompareLeftLabel.id())?;
         let left_path = Edit::create(hwnd, ControlId::CompareLeftPath.id())?;
         let left_browse = Button::create(hwnd, ControlId::CompareLeftBrowse.id())?;
+        let right_label = Label::create(hwnd, ControlId::CompareRightLabel.id())?;
         let right_path = Edit::create(hwnd, ControlId::CompareRightPath.id())?;
         let right_browse = Button::create(hwnd, ControlId::CompareRightBrowse.id())?;
         let compare = Button::create(hwnd, ControlId::CompareRun.id())?;
+        let next = Button::create(hwnd, ControlId::CompareNext.id())?;
+        let previous = Button::create(hwnd, ControlId::ComparePrevious.id())?;
+        let edit_mode = CheckBox::create(hwnd, ControlId::CompareEditMode.id())?;
         let checks = [
             CheckBox::create(hwnd, ControlId::CompareCase.id())?,
             CheckBox::create(hwnd, ControlId::CompareSpaces.id())?,
             CheckBox::create(hwnd, ControlId::CompareOnly.id())?,
         ];
-        let extra = Edit::create(hwnd, ControlId::CompareExtra.id())?;
+        let extra_label = Label::create(hwnd, ControlId::CompareExtraLabel.id())?;
+        let extra = Edit::create_number(hwnd, ControlId::CompareExtra.id(), EXTRA_DIGITS)?;
         let cancel = Button::create(hwnd, ControlId::CompareCancel.id())?;
         let progress = ProgressBar::create(hwnd, ControlId::CompareProgress.id())?;
+        let message = Label::create_centred(hwnd, ControlId::CompareMessage.id())?;
         let sides = [
             RichText::create_side(hwnd, ControlId::CompareLeft.id())?,
             RichText::create_side(hwnd, ControlId::CompareRight.id())?,
@@ -465,19 +523,42 @@ impl Controls {
         ];
         let list = RichText::create_list(hwnd, ControlId::CompareList.id())?;
         let status = StatusBar::create(hwnd, ControlId::CompareStatus.id(), true)?;
+        let tips = Tooltip::create(hwnd, &[next.hwnd(), previous.hwnd()])?;
         Ok(Controls {
+            labels: [left_label, right_label],
             paths: [left_path, right_path],
             browse: [left_browse, right_browse],
             compare,
+            next,
+            previous,
+            edit_mode,
             checks,
+            extra_label,
             extra,
             cancel,
             progress,
+            message,
             sides,
             numbers,
             list,
             status,
+            tips,
         })
+    }
+
+    /// The labels, the check boxes and the message, which show on the
+    /// window's background.
+    fn on_background(&self) -> [Hwnd; 8] {
+        [
+            self.labels[0].hwnd(),
+            self.labels[1].hwnd(),
+            self.edit_mode.hwnd(),
+            self.checks[0].hwnd(),
+            self.checks[1].hwnd(),
+            self.checks[2].hwnd(),
+            self.extra_label.hwnd(),
+            self.message.hwnd(),
+        ]
     }
 
     fn rich(&self) -> [RichText; 5] {
@@ -526,14 +607,12 @@ struct CompareWindow {
     /// effects run dialogs whose loops pass the window more events.
     session: RefCell<Session>,
     stage: Cell<Stage>,
-    /// The panels' entries of the window's first comparison, which its
-    /// worker chooses the files from, until the worker takes them.
-    chosen: RefCell<Option<Source>>,
-    /// Why no comparison shows.
-    failure: RefCell<Option<String>>,
+    notice: RefCell<Option<Notice>>,
     /// The progress bar and Cancel show, as they do while a comparison
     /// runs.
     progress_shown: Cell<bool>,
+    /// The notice shows in the sides' place, because no comparison shows.
+    message_shown: Cell<bool>,
     /// Where the last question about changes left the window.
     settled: Cell<Option<Settled>>,
     /// Each side's last scroll position, which tells which one moved.
@@ -570,9 +649,9 @@ impl CompareWindow {
             state: Cell::new(state),
             session: RefCell::new(session),
             stage: Cell::new(Stage::First),
-            chosen: RefCell::new(None),
-            failure: RefCell::new(None),
+            notice: RefCell::new(None),
             progress_shown: Cell::new(false),
+            message_shown: Cell::new(false),
             settled: Cell::new(None),
             scroll: Cell::new([(0, 0); 2]),
             zoom_wheel: Cell::new(0),
@@ -601,14 +680,10 @@ impl CompareWindow {
                 self.start_job(Job::Tool { source, command });
             }
             None => {
-                let event = match source {
-                    Source::Files(paths) => Event::Compare(paths),
-                    chosen @ Source::Chosen { .. } => {
-                        self.chosen.replace(Some(chosen));
-                        Event::Choose
-                    }
-                };
-                self.send(hwnd, event);
+                match source {
+                    Source::Files(paths) => self.send(hwnd, Event::Compare(paths)),
+                    chosen @ Source::Chosen { .. } => self.start_job(Job::Choose(chosen)),
+                }
                 hwnd.set_timer(SHOW_TIMER, SHOW_DELAY);
             }
         }
@@ -689,11 +764,10 @@ impl CompareWindow {
                 }
                 Effect::Renamed(side) => {
                     let path = (self.session.borrow().showing())
-                        .map(|showing| String::from_utf16_lossy(&showing.paths()[side.index()]));
-                    if let (Some(path), Some(c)) = (path, self.controls()) {
-                        c.paths[side.index()].hwnd().set_text(&path);
+                        .map(|showing| showing.paths()[side.index()].clone());
+                    if let Some(path) = path {
+                        self.set_path(side, &path);
                     }
-                    self.apply_title(hwnd);
                 }
                 Effect::OnlyDifferences(only) => {
                     self.save_state(|state| {
@@ -726,21 +800,124 @@ impl CompareWindow {
         }
     }
 
-    /// The parts of the window that follow the session: the progress, the
-    /// sides that take typing and the status bar.
+    /// The parts of the window that follow the session and the saved
+    /// state: the progress, the message, the sides that take typing, the
+    /// controls and the menus' commands, the title and the status bar.
     fn refresh(&self, hwnd: Hwnd) {
         if self.hwnd.get() != Some(hwnd) {
             return;
         }
-        let comparing = self.session.borrow().comparing();
-        if self.progress_shown.replace(comparing) != comparing {
-            if !comparing {
-                hwnd.kill_timer(PROGRESS_TIMER);
-            }
+        let (comparing, shows) = {
+            let session = self.session.borrow();
+            (session.comparing(), session.showing().is_some())
+        };
+        let message = !shows && self.notice.borrow().is_some();
+        let progress_changed = self.progress_shown.replace(comparing) != comparing;
+        if progress_changed && !comparing {
+            hwnd.kill_timer(PROGRESS_TIMER);
+        }
+        let message_changed = self.message_shown.replace(message) != message;
+        self.show_message();
+        if progress_changed || message_changed {
             self.layout(hwnd);
         }
         self.apply_read_only();
+        self.apply_controls();
+        self.apply_title(hwnd);
         self.show_status();
+    }
+
+    /// The controls that show the session and the saved state: Edit mode,
+    /// the extra lines, which apply while Show only differences is on, and
+    /// the commands.
+    fn apply_controls(&self) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let (editing, can_edit) = {
+            let session = self.session.borrow();
+            (session.editing(), session.can_edit())
+        };
+        // Windows checks the box at the click, before the session decides.
+        c.edit_mode.set_checked(editing);
+        c.edit_mode.hwnd().set_enabled(can_edit);
+        let only = self.state.get().only_differences;
+        c.extra_label.hwnd().set_enabled(only);
+        c.extra.hwnd().set_enabled(only);
+        self.apply_commands();
+    }
+
+    /// Compare, Next and Previous, as their menu items are.
+    fn apply_commands(&self) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let state = self.menu_state();
+        let shown = state.shown.is_some();
+        c.compare.hwnd().set_enabled(state.can_compare);
+        c.next.hwnd().set_enabled(shown && state.next);
+        c.previous.hwnd().set_enabled(shown && state.previous);
+        // A disabled button takes no keys, so the focus goes on in the side.
+        let focused = Hwnd::focused();
+        if [c.next.hwnd(), c.previous.hwnd()]
+            .into_iter()
+            .any(|button| Some(button) == focused && !button.is_enabled())
+            && let Some(target) = self.focus_target()
+        {
+            target.focus();
+        }
+    }
+
+    /// Where the focus goes when the window shows or is activated: the side
+    /// the person works in while a comparison shows; else the path box of
+    /// the file that could not be read, or the first empty one.
+    fn focus_target(&self) -> Option<Hwnd> {
+        let c = self.controls()?;
+        if self.session.borrow().showing().is_some() {
+            return Some(c.sides[self.active.get().index()].hwnd());
+        }
+        let side = match self.notice.borrow().as_ref() {
+            Some(Notice::Failed { side, .. }) => *side,
+            _ => Side::BOTH
+                .into_iter()
+                .find(|side| box_path(&c.paths[side.index()].text()).is_empty())
+                .unwrap_or(Side::Left),
+        };
+        Some(c.paths[side.index()].hwnd())
+    }
+
+    /// The message in the sides' place, while no comparison shows.
+    fn show_message(&self) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let text = (self.notice.borrow().as_ref())
+            .map(|notice| notice.text(&self.strings.borrow()))
+            .unwrap_or_default();
+        c.message.hwnd().set_text(&text);
+    }
+
+    /// Puts `path` in `side`'s path box, scrolled to its end, so the box
+    /// shows the file's name.
+    fn set_path(&self, side: Side, path: &[u16]) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let path_box = c.paths[side.index()];
+        path_box.hwnd().set_text(&String::from_utf16_lossy(path));
+        path_box.select(path.len(), path.len());
+    }
+
+    /// The two files that the path boxes name, or `None` while one is
+    /// empty.
+    fn box_paths(&self) -> Option<[Vec<u16>; 2]> {
+        let c = self.controls()?;
+        let paths = c.paths.map(|path_box| {
+            box_path(&path_box.text())
+                .encode_utf16()
+                .collect::<Vec<u16>>()
+        });
+        paths.iter().all(|path| !path.is_empty()).then_some(paths)
     }
 
     /// Asks Save's question for `event`, Close or Exit; where it left the
@@ -768,26 +945,15 @@ impl CompareWindow {
 
     /// Reads and compares the files of `request`, with the progress.
     fn start_compare(&self, hwnd: Hwnd, request: Request) {
-        let source = match request.paths {
-            Some(paths) => {
-                // A comparison that fails still shows which files it read,
-                // so Compare can try them again.
-                if let Some(c) = self.controls() {
-                    for (path_box, path) in c.paths.iter().zip(&paths) {
-                        path_box.hwnd().set_text(&String::from_utf16_lossy(path));
-                    }
-                }
-                Source::Files(paths)
-            }
-            None => match self.chosen.take() {
-                Some(chosen) => chosen,
-                None => return,
-            },
-        };
+        // A comparison that fails or is cancelled still shows which files
+        // it read, so Compare can try them again.
+        for side in Side::BOTH {
+            self.set_path(side, &request.paths[side.index()]);
+        }
         let progress = Arc::new(Progress::default());
         self.progress.replace(Arc::clone(&progress));
         self.start_job(Job::Compare {
-            source,
+            paths: request.paths,
             hex: request.hex,
             encodings: request.encodings,
             options: self.options(request.rows),
@@ -798,18 +964,22 @@ impl CompareWindow {
 
     /// Esc: stops the comparison that runs; `false` when none runs.
     fn cancel_compare(&self, hwnd: Hwnd) -> bool {
-        let (comparing, showing) = {
-            let session = self.session.borrow();
-            (session.comparing(), session.showing().is_some())
-        };
-        if !comparing {
+        if !self.session.borrow().comparing() {
             return false;
         }
         // The window stays, so a later Compare of identical files keeps it.
         self.stage.set(Stage::Shown);
-        if !showing {
-            let cancelled = self.strings.borrow().text("work.cancelled").to_owned();
-            self.failure.replace(Some(cancelled));
+        let shown = (self.session.borrow().showing()).map(|showing| showing.paths().clone());
+        match shown {
+            // The window returns to the files that show.
+            Some(paths) => {
+                for side in Side::BOTH {
+                    self.set_path(side, &paths[side.index()]);
+                }
+            }
+            None => {
+                self.notice.replace(Some(Notice::Cancelled));
+            }
         }
         self.send(hwnd, Event::Cancel);
         true
@@ -823,8 +993,33 @@ impl CompareWindow {
         }
         window::show(hwnd, self.placement.get());
         self.layout(hwnd);
+        self.scroll_paths(Side::BOTH);
+        if let Some(target) = self.focus_target() {
+            target.focus();
+        }
+    }
+
+    /// Scrolls `sides`' path boxes back to their carets, which show the
+    /// file's name after a path that the window put there. A text box that
+    /// was hidden or changed size shows the start of its text.
+    fn scroll_paths(&self, sides: impl IntoIterator<Item = Side>) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        for side in sides {
+            let path_box = c.paths[side.index()];
+            let (start, end) = path_box.selection();
+            path_box.select(start, end);
+        }
+    }
+
+    /// Puts the focus in `side`'s path box with its text selected, so the
+    /// person can correct the file that could not be read.
+    fn select_box(&self, side: Side) {
         if let Some(c) = self.controls() {
-            c.sides[0].hwnd().focus();
+            let path_box = c.paths[side.index()];
+            path_box.hwnd().focus();
+            path_box.select_to_end();
         }
     }
 
@@ -859,23 +1054,61 @@ impl CompareWindow {
                 error_box(self.main.or(Some(hwnd)), &text, &title);
                 hwnd.destroy();
             }
-            Outcome::Unchosen => {
-                let text = self.strings.borrow().text("compare.choose_two").to_owned();
-                if self.stage.get() != Stage::Shown {
+            Outcome::Chosen(chosen) => match (chosen, self.stage.get()) {
+                (Chosen::Both(paths), Stage::First) => self.send(hwnd, Event::Compare(paths)),
+                // The window keeps the one file while the person chooses
+                // the other.
+                (Chosen::First(path), Stage::First) => {
+                    self.stage.set(Stage::Shown);
+                    self.set_path(Side::Left, &path);
+                    let name = name_of(&path);
+                    self.notice.replace(Some(Notice::ChooseSecond { name }));
+                    self.refresh(hwnd);
+                    self.show_window(hwnd);
+                }
+                // The comparison tool needs two files.
+                _ => {
+                    let text = self.strings.borrow().text("compare.choose_two").to_owned();
                     hwnd.kill_timer(SHOW_TIMER);
                     info_box(hwnd, &text, &title);
                     hwnd.destroy();
-                } else {
-                    self.fail(hwnd, text);
                 }
-            }
+            },
             Outcome::Failed { path, error } => {
-                let path = String::from_utf16_lossy(&path);
-                let text = self
-                    .strings
-                    .borrow()
-                    .format("viewer.cannot_read", &[&path, &win::error_text(&error)]);
-                self.fail(hwnd, text);
+                let (comparing, shows) = {
+                    let session = self.session.borrow();
+                    (session.comparing(), session.showing().is_some())
+                };
+                let side = self.controls().and_then(|c| {
+                    Side::BOTH.into_iter().find(|side| {
+                        let text = c.paths[side.index()].text();
+                        box_path(&text).encode_utf16().eq(path.iter().copied())
+                    })
+                });
+                let notice = Notice::Failed {
+                    side: side.unwrap_or(Side::Left),
+                    name: name_of(&path),
+                    reason: win::error_text(&error),
+                };
+                // The window stays, so a later Compare of identical files
+                // keeps it.
+                self.stage.set(Stage::Shown);
+                if comparing && shows {
+                    // The person stays with the comparison that shows, and
+                    // is told why.
+                    let text = notice.text(&self.strings.borrow());
+                    self.send(hwnd, Event::Failed);
+                    error_box(Some(hwnd), &text, &title);
+                } else {
+                    // No comparison shows, or rows of the one that shows
+                    // could not be built again, which the status bar says.
+                    self.notice.replace(Some(notice));
+                    self.send(hwnd, Event::Failed);
+                    self.show_window(hwnd);
+                }
+                if comparing && let Some(side) = side {
+                    self.select_box(side);
+                }
             }
             // Only a job that was cancelled or replaced returns it, and the
             // worker drops the outcome of such a job.
@@ -892,30 +1125,20 @@ impl CompareWindow {
                     hwnd.destroy();
                     return;
                 }
-                if let Some(c) = self.controls() {
-                    for (path_box, path) in c.paths.iter().zip(&compared.paths) {
-                        path_box.hwnd().set_text(&String::from_utf16_lossy(path));
-                    }
+                for side in Side::BOTH {
+                    self.set_path(side, &compared.paths[side.index()]);
                 }
-                self.failure.replace(None);
+                self.notice.replace(None);
                 self.send(hwnd, Event::Compared(compared));
                 self.show_window(hwnd);
             }
             Outcome::Realigned { generation, view } => {
                 // Rows built again replace a rebuild that failed before.
-                self.failure.replace(None);
+                self.notice.replace(None);
                 let place = self.capture_place();
                 self.send_at(hwnd, Event::Realigned { generation, view }, place);
             }
         }
-    }
-
-    /// Shows why the files were not compared, in the window.
-    fn fail(&self, hwnd: Hwnd, text: String) {
-        self.stage.set(Stage::Shown);
-        self.failure.replace(Some(text));
-        self.send(hwnd, Event::Failed);
-        self.show_window(hwnd);
     }
 
     /// Gives the controls the comparison's RTF and places the caret.
@@ -936,7 +1159,6 @@ impl CompareWindow {
         }
         self.layout(hwnd);
         self.place(place);
-        self.apply_title(hwnd);
         self.show_list();
     }
 
@@ -966,15 +1188,10 @@ impl CompareWindow {
         };
         match place {
             Place::FirstDifference => {
-                let first = {
-                    let session = self.session.borrow();
-                    let rows = (session.showing())
-                        .map_or(&[][..], |showing| showing.view().rows.rows.as_slice());
-                    match rows.first() {
-                        Some(row) if row.differs() => Some(0),
-                        _ => compare::next_difference(rows, 0),
-                    }
-                };
+                let first = (self.session.borrow().showing()).and_then(|showing| {
+                    let differences = showing.view().rows.differences();
+                    differences.first().map(|difference| difference.start)
+                });
                 self.go_to_row(first.unwrap_or(0));
             }
             Place::Line {
@@ -1079,14 +1296,13 @@ impl CompareWindow {
             c.browse[0].hwnd(),
             c.browse[1].hwnd(),
             c.compare.hwnd(),
-            c.checks[0].hwnd(),
-            c.checks[1].hwnd(),
-            c.checks[2].hwnd(),
+            c.next.hwnd(),
+            c.previous.hwnd(),
             c.extra.hwnd(),
             c.cancel.hwnd(),
             c.status.hwnd(),
         ];
-        for control in controls {
+        for control in controls.into_iter().chain(c.on_background()) {
             control.set_font(&ui);
         }
         // Consolas at the height of the message font, as the sides show
@@ -1130,58 +1346,93 @@ impl CompareWindow {
         {
             let strings = self.strings.borrow();
             let captions = [
+                (c.labels[0].hwnd(), "compare.left_label"),
+                (c.labels[1].hwnd(), "compare.right_label"),
                 (c.browse[0].hwnd(), "compare.browse"),
                 (c.browse[1].hwnd(), "compare.browse_right"),
                 (c.compare.hwnd(), "compare.compare"),
+                (c.next.hwnd(), "compare.next"),
+                (c.previous.hwnd(), "compare.previous"),
+                (c.edit_mode.hwnd(), "compare.edit_mode_box"),
                 (c.checks[0].hwnd(), "compare.case_sensitive"),
                 (c.checks[1].hwnd(), "compare.ignore_spaces"),
                 (c.checks[2].hwnd(), "compare.only_differences"),
+                (c.extra_label.hwnd(), "compare.extra_lines"),
                 (c.cancel.hwnd(), "button.cancel"),
             ];
             for (control, key) in captions {
                 control.set_text(strings.text(key));
             }
+            c.tips
+                .set(c.next.hwnd(), &CompareCommand::NextDifference.tip(&strings));
+            c.tips.set(
+                c.previous.hwnd(),
+                &CompareCommand::PreviousDifference.tip(&strings),
+            );
         }
-        self.apply_menus(hwnd);
+        self.apply_glyphs(hwnd);
         self.apply_title(hwnd);
+        self.show_message();
         self.show_status();
         self.layout(hwnd);
     }
 
-    /// The menu bar, at the window's DPI and with icons while they show.
-    fn apply_menus(&self, hwnd: Hwnd) {
+    /// The menu bar and the buttons' icons, at the window's DPI, in the
+    /// system colours of now and only while icons show.
+    fn apply_glyphs(&self, hwnd: Hwnd) {
         let _ = replace_menu_bar(hwnd, &menu_bar(&self.strings.borrow()));
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let buttons = [
+            (c.browse[0], "compare.browse"),
+            (c.browse[1], "compare.browse_right"),
+            (c.compare, "compare.compare"),
+            (c.next, "compare.next"),
+            (c.previous, "compare.previous"),
+            (c.cancel, "button.cancel"),
+        ];
+        for (button, key) in buttons {
+            button.set_glyph(button_glyph(key));
+        }
     }
 
     fn title_text(&self) -> String {
-        let names = match self.session.borrow().showing() {
+        let session = self.session.borrow();
+        let names = match session.showing() {
             Some(showing) => Side::BOTH.map(|side| showing.name(side)),
             None => [String::new(), String::new()],
         };
-        title(&self.strings.borrow(), [&names[0], &names[1]])
+        let changed = Side::BOTH.map(|side| session.changed(side));
+        title(&self.strings.borrow(), [&names[0], &names[1]], changed)
     }
 
     fn apply_title(&self, hwnd: Hwnd) {
         hwnd.set_text(&self.title_text());
     }
 
-    /// The status bar: what runs, or why nothing shows, or the differences
-    /// with the notes, then each side's encoding.
+    /// The status bar: what runs, or why the rows that show could not be
+    /// built again, or the differences, the caret's among them, with the
+    /// notes, then each side's encoding. While no comparison shows, the
+    /// message in the sides' place says why.
     fn show_status(&self) {
         let Some(c) = self.controls() else {
             return;
         };
+        let caret = self.caret_row();
         let strings = self.strings.borrow();
         let numbers = self.numbers.borrow();
         let session = self.session.borrow();
         let mut parts = [String::new(), String::new(), String::new()];
         if session.comparing() {
             parts[0] = strings.text("compare.comparing").to_owned();
-        } else if let Some(failure) = self.failure.borrow().as_ref() {
-            parts[0] = failure.clone();
         } else if let Some(showing) = session.showing() {
             let view = showing.view();
-            let mut texts = vec![differences_text(&strings, &*numbers, view.differences)];
+            let index = view.rows.difference_index(caret);
+            let mut texts = vec![match self.notice.borrow().as_ref() {
+                Some(notice) => notice.text(&strings),
+                None => differences_text(&strings, &*numbers, index, view.differences),
+            }];
             let notes = [
                 showing.note(),
                 view.rows.forced.then_some(Note::OnlyDifferences),
@@ -1201,9 +1452,9 @@ impl CompareWindow {
             );
             parts[0] = texts.join(" · ");
             let hex = text::without_access_key(strings.text("viewer.hex"));
-            for (side, encoding) in showing.encodings().into_iter().enumerate() {
-                parts[side + 1] =
-                    encoding.map_or_else(|| hex.clone(), |encoding| encoding.name().to_owned());
+            for (side, encoding) in Side::BOTH.into_iter().zip(showing.encodings()) {
+                let name = encoding.map_or(hex.as_str(), |encoding| encoding.name());
+                parts[side.index() + 1] = encoding_text(&strings, side, name);
             }
         }
         for (index, part) in parts.iter().enumerate() {
@@ -1284,15 +1535,26 @@ impl CompareWindow {
         let chars = |count: usize| Px(fonts.char_width.0 * i32::try_from(count).unwrap_or(0));
         Some(CompareSizes {
             line: Px(meter.height().0 * 3 / 2 + 2),
+            text: meter.height(),
+            labels: [
+                caption("compare.left_label"),
+                caption("compare.right_label"),
+            ],
             browse: button("compare.browse").max(button("compare.browse_right")),
-            compare: button("compare.compare"),
+            buttons: [
+                button("compare.compare"),
+                button("compare.next"),
+                button("compare.previous"),
+            ],
             cancel: button("button.cancel"),
             checks: [
+                caption("compare.edit_mode_box"),
                 caption("compare.case_sensitive"),
                 caption("compare.ignore_spaces"),
                 caption("compare.only_differences"),
             ],
-            extra: meter.width("999"),
+            extra_label: caption("compare.extra_lines"),
+            extra: meter.width(&"9".repeat(EXTRA_DIGITS)),
             row: fonts.row_height,
             numbers: digits.map(chars),
         })
@@ -1328,19 +1590,31 @@ impl CompareWindow {
             dpi,
         );
         let running = self.session.borrow().comparing();
+        let message = self.message_shown.get();
+        let resized = Side::BOTH.map(|side| {
+            let path_box = c.paths[side.index()].hwnd();
+            path_box.rect_in(hwnd).width != layout.paths[side.index()].width
+        });
         win::place_children(
             &[
+                (c.labels[0].hwnd(), layout.labels[0]),
                 (c.paths[0].hwnd(), layout.paths[0]),
                 (c.browse[0].hwnd(), layout.browse[0]),
+                (c.labels[1].hwnd(), layout.labels[1]),
                 (c.paths[1].hwnd(), layout.paths[1]),
                 (c.browse[1].hwnd(), layout.browse[1]),
-                (c.compare.hwnd(), layout.compare),
-                (c.checks[0].hwnd(), layout.checks[0]),
-                (c.checks[1].hwnd(), layout.checks[1]),
-                (c.checks[2].hwnd(), layout.checks[2]),
+                (c.compare.hwnd(), layout.buttons[0]),
+                (c.next.hwnd(), layout.buttons[1]),
+                (c.previous.hwnd(), layout.buttons[2]),
+                (c.edit_mode.hwnd(), layout.checks[0]),
+                (c.checks[0].hwnd(), layout.checks[1]),
+                (c.checks[1].hwnd(), layout.checks[2]),
+                (c.checks[2].hwnd(), layout.checks[3]),
+                (c.extra_label.hwnd(), layout.extra_label),
                 (c.extra.hwnd(), layout.extra),
                 (c.progress.hwnd(), layout.progress),
                 (c.cancel.hwnd(), layout.cancel),
+                (c.message.hwnd(), layout.message),
                 (c.sides[0].hwnd(), layout.sides[0]),
                 (c.sides[1].hwnd(), layout.sides[1]),
                 (c.numbers[0].hwnd(), layout.numbers[0]),
@@ -1350,14 +1624,32 @@ impl CompareWindow {
             &[
                 (c.progress.hwnd(), running),
                 (c.cancel.hwnd(), running),
-                (c.list.hwnd(), state.two_line_list),
+                (c.message.hwnd(), message),
+                (c.sides[0].hwnd(), !message),
+                (c.sides[1].hwnd(), !message),
+                (c.numbers[0].hwnd(), !message),
+                (c.numbers[1].hwnd(), !message),
+                (c.list.hwnd(), state.two_line_list && !message),
             ],
         );
+        self.scroll_paths(Side::BOTH.into_iter().filter(|side| resized[side.index()]));
+        // A control that the message hid had the focus.
+        if let Some(focused) = Hwnd::focused()
+            && hwnd.is_parent_of(focused)
+            && !focused.is_visible()
+            && let Some(target) = self.focus_target()
+        {
+            target.focus();
+        }
         let encoding = {
             let fonts = self.fonts.borrow();
+            let strings = self.strings.borrow();
             fonts.as_ref().map_or(Px(0), |fonts| {
                 let meter = TextMeter::new(&fonts.ui);
-                status_last_part(meter.width("Windows-1252 UTF-16 LE"), dpi)
+                let widest = Side::BOTH.map(|side| {
+                    meter.width(&encoding_text(&strings, side, "Windows-1252 UTF-16 LE"))
+                });
+                status_last_part(widest[0].max(widest[1]), dpi)
             })
         };
         let width = size.width;
@@ -1421,10 +1713,9 @@ impl CompareWindow {
         let selection = control.selection();
         let first = control.row_of(selection.start);
         let rows = if selection.is_empty() {
-            let session = self.session.borrow();
-            let shown =
-                (session.showing()).map_or(&[][..], |showing| showing.view().rows.rows.as_slice());
-            compare::difference_at(shown, first)
+            (self.session.borrow().showing()).map_or(first..first + 1, |showing| {
+                showing.view().rows.difference_at(first)
+            })
         } else {
             first..control.row_of(selection.end - 1).max(first) + 1
         };
@@ -1443,26 +1734,27 @@ impl CompareWindow {
 
     /// Next and Previous difference.
     fn go_to_difference(&self, forward: bool) {
-        let Some(c) = self.controls() else {
-            return;
-        };
-        let control = c.sides[self.active.get().index()];
-        let row = control.row_of(control.selection().start);
-        let target = {
-            let session = self.session.borrow();
-            let Some(showing) = session.showing() else {
-                return;
-            };
-            let rows = &showing.view().rows.rows;
+        let row = self.caret_row();
+        let target = (self.session.borrow().showing()).and_then(|showing| {
+            let rows = &showing.view().rows;
             if forward {
-                compare::next_difference(rows, row)
+                rows.next_difference(row)
             } else {
-                compare::previous_difference(rows, row)
+                rows.previous_difference(row)
             }
-        };
+        });
         if let Some(target) = target {
             self.go_to_row(target);
         }
+    }
+
+    /// The row of the caret in the side the person works in.
+    fn caret_row(&self) -> usize {
+        let Some(c) = self.controls() else {
+            return 0;
+        };
+        let control = c.sides[self.active.get().index()];
+        control.row_of(control.selection().start)
     }
 
     /// `F2` and `Shift+F2`: the next or previous marked part of the
@@ -1679,33 +1971,12 @@ impl CompareWindow {
     }
 
     /// Compare, or `Enter` in a box: compares the files that the path boxes
-    /// name, after asking about changes.
+    /// name, after asking about changes. Compare is disabled, and `Enter`
+    /// does nothing, while a box is empty.
     fn compare_boxes(&self, hwnd: Hwnd) {
-        let Some(c) = self.controls() else {
-            return;
-        };
-        // File Explorer's Copy as path puts the path in quotes, so a pasted
-        // one opens too.
-        let paths = c.paths.map(|path| {
-            let text = path.text();
-            let text = text.trim();
-            let text = (text.strip_prefix('"'))
-                .and_then(|text| text.strip_suffix('"'))
-                .unwrap_or(text);
-            text.encode_utf16().collect::<Vec<u16>>()
-        });
-        if paths.iter().any(Vec::is_empty) {
-            let (text, title) = {
-                let strings = self.strings.borrow();
-                (
-                    strings.text("compare.choose_two").to_owned(),
-                    strings.text("compare.window").to_owned(),
-                )
-            };
-            info_box(hwnd, &text, &title);
-            return;
+        if let Some(paths) = self.box_paths() {
+            self.send(hwnd, Event::Compare(paths));
         }
-        self.send(hwnd, Event::Compare(paths));
     }
 
     /// The check boxes and the extra lines, as the state holds them.
@@ -1750,9 +2021,11 @@ impl CompareWindow {
             return;
         };
         self.active.set(self.active.get().other());
-        let texts = c.paths.map(|path| path.text());
-        for side in 0..2 {
-            c.paths[side].hwnd().set_text(&texts[1 - side]);
+        let texts = c
+            .paths
+            .map(|path| path.text().encode_utf16().collect::<Vec<u16>>());
+        for side in Side::BOTH {
+            self.set_path(side, &texts[side.other().index()]);
         }
     }
 
@@ -1865,10 +2138,27 @@ impl CompareWindow {
             return Err(String::new());
         };
         compare::encoded(&text.lines, text.form, &code_page_encoded).ok_or_else(|| {
-            self.strings.borrow().format(
-                "compare.cannot_encode",
-                &[&showing.name(side), text.form.encoding.name()],
-            )
+            let strings = self.strings.borrow();
+            let (name, encoding) = (showing.name(side), text.form.encoding.name());
+            // Only a code page can lack a character.
+            let first = match text.form.encoding {
+                Encoding::CodePage(page) => {
+                    compare::first_unencodable(&text.lines, page, &code_page_encoded)
+                }
+                _ => None,
+            };
+            match first {
+                Some((line, character)) => strings.format(
+                    "compare.cannot_encode_character",
+                    &[
+                        &name,
+                        encoding,
+                        &character.to_string(),
+                        &self.numbers.borrow().integer(line as u64 + 1),
+                    ],
+                ),
+                None => strings.format("compare.cannot_encode", &[&name, encoding]),
+            }
         })
     }
 
@@ -1905,7 +2195,7 @@ impl CompareWindow {
             .map(|(side, path, result)| {
                 let written = result.is_ok();
                 if let Err(failure) = result {
-                    failures.push((path.clone(), failure));
+                    failures.push((side, path.clone(), failure));
                 }
                 SavedFile {
                     side,
@@ -1922,20 +2212,26 @@ impl CompareWindow {
             return;
         }
         let title = text::without_access_key(self.strings.borrow().text("compare.save"));
-        for (path, failure) in failures {
+        for (side, path, failure) in failures {
             let text = {
                 let strings = self.strings.borrow();
                 let text = strings.format(
                     "compare.save_failed",
                     &[&name_of(&path), &win::error_text(&failure.error)],
                 );
-                match failure.kept.as_ref().and_then(|kept| kept.file_name()) {
-                    Some(kept) => format!(
-                        "{text} {}",
-                        strings.format("compare.save_kept", &[&kept.to_string_lossy()])
-                    ),
-                    None => text,
-                }
+                let next = match failure.kept.as_ref().and_then(|kept| kept.file_name()) {
+                    Some(kept) => strings.format("compare.save_kept", &[&kept.to_string_lossy()]),
+                    // Save's question offers Save as… for the side.
+                    None => {
+                        let save_as = match side {
+                            Side::Left => "compare.save_left_as",
+                            Side::Right => "compare.save_right_as",
+                        };
+                        let choice = text::without_access_key(strings.text(save_as));
+                        strings.format("compare.save_elsewhere", &[&choice])
+                    }
+                };
+                format!("{text} {next}")
             };
             error_box(Some(hwnd), &text, &title);
         }
@@ -2017,11 +2313,17 @@ impl CompareWindow {
                     .into_iter()
                     .any(|edit| Some(edit.hwnd()) == focused && edit.has_selected_text())
             });
+        let can_compare = self.box_paths().is_some();
+        let caret = self.caret_row();
         let session = self.session.borrow();
         let showing = session.showing();
+        let rows = showing.map(|showing| &showing.view().rows);
         let state = self.state.get();
         MenuState {
+            can_compare,
             shown: showing.map(|showing| (showing.mode(), showing.encodings())),
+            next: rows.is_some_and(|rows| rows.next_difference(caret).is_some()),
+            previous: rows.is_some_and(|rows| rows.previous_difference(caret).is_some()),
             note: showing.and_then(|showing| showing.note()),
             editing: session.editing(),
             can_edit: session.can_edit(),
@@ -2079,36 +2381,38 @@ impl CompareWindow {
         }
     }
 
-    /// A file or two that File Explorer dropped: one sets the path of the
-    /// side it fell on, two set both.
+    /// A file or two that File Explorer dropped: one fills the path box
+    /// that is empty while the other is not, or else that of the side it
+    /// fell on; two fill both.
     fn drop_files(&self, hwnd: Hwnd, files: Vec<Vec<u16>>, point: (i32, i32)) {
         let Some(c) = self.controls() else {
             return;
         };
         let right = c.sides[1].hwnd().rect_in(hwnd);
-        let side = if self.state.get().above_each_other {
-            if point.1 >= right.y.0 { 1 } else { 0 }
-        } else if point.0 >= right.x.0 {
-            1
+        let fell_right = if self.state.get().above_each_other {
+            point.1 >= right.y.0
         } else {
-            0
+            point.0 >= right.x.0
+        };
+        let empty = Side::BOTH.map(|side| box_path(&c.paths[side.index()].text()).is_empty());
+        let side = match empty {
+            [true, false] => Side::Left,
+            [false, true] => Side::Right,
+            _ if fell_right => Side::Right,
+            _ => Side::Left,
         };
         match files.as_slice() {
             [] => {}
-            [one] => c.paths[side]
-                .hwnd()
-                .set_text(&String::from_utf16_lossy(one)),
+            [one] => self.set_path(side, one),
             [first, second, ..] => {
-                c.paths[0].hwnd().set_text(&String::from_utf16_lossy(first));
-                c.paths[1]
-                    .hwnd()
-                    .set_text(&String::from_utf16_lossy(second));
+                self.set_path(Side::Left, first);
+                self.set_path(Side::Right, second);
             }
         }
     }
 
     /// Browse…: the file the person chose goes in the side's path box.
-    fn browse(&self, hwnd: Hwnd, side: usize) {
+    fn browse(&self, hwnd: Hwnd, side: Side) {
         let (title, all) = {
             let strings = self.strings.borrow();
             (
@@ -2116,10 +2420,8 @@ impl CompareWindow {
                 strings.text("compare.all_files").to_owned(),
             )
         };
-        if let Some(path) = pick_file(hwnd, &title, &all, "*.*")
-            && let Some(c) = self.controls()
-        {
-            c.paths[side].hwnd().set_text(&path);
+        if let Some(path) = pick_file(hwnd, &title, &all, "*.*") {
+            self.set_path(side, &path.encode_utf16().collect::<Vec<u16>>());
         }
     }
 
@@ -2133,11 +2435,20 @@ impl CompareWindow {
                 return self.on_edited(hwnd, side);
             }
             if c.browse[side.index()].clicked(event) {
-                return self.browse(hwnd, side.index());
+                return self.browse(hwnd, side);
+            }
+            if c.paths[side.index()].changed(event) {
+                return self.apply_commands();
             }
         }
         if c.compare.clicked(event) {
             self.compare_boxes(hwnd);
+        } else if c.next.clicked(event) {
+            self.on_command(hwnd, CompareCommand::NextDifference);
+        } else if c.previous.clicked(event) {
+            self.on_command(hwnd, CompareCommand::PreviousDifference);
+        } else if c.edit_mode.clicked(event) {
+            self.on_command(hwnd, CompareCommand::EditMode);
         } else if c.cancel.clicked(event) {
             self.cancel_compare(hwnd);
         } else if c.checks[0].clicked(event) {
@@ -2168,7 +2479,7 @@ impl CompareWindow {
     /// The colours of the marks follow the system's, so the rows show
     /// again in the new ones.
     fn apply_colors(&self, hwnd: Hwnd) {
-        self.apply_menus(hwnd);
+        self.apply_glyphs(hwnd);
         self.show_list();
         self.send(hwnd, Event::Colours);
     }
@@ -2201,7 +2512,7 @@ impl WindowProc for CompareWindow {
             Message::DpiChanged { suggested, .. } => {
                 hwnd.set_rect(suggested);
                 self.apply_fonts(hwnd);
-                self.apply_menus(hwnd);
+                self.apply_glyphs(hwnd);
                 self.layout(hwnd);
                 Some(LRESULT(0))
             }
@@ -2216,7 +2527,15 @@ impl WindowProc for CompareWindow {
                     .find(|side| c.sides[side.index()].selection_changed(&notification))?;
                 self.active.set(side);
                 self.show_list();
+                // "Difference 2 of 3", Next and Previous follow the caret.
+                self.show_status();
+                self.apply_commands();
                 Some(LRESULT(0))
+            }
+            Message::CtlColorStatic { colors, control }
+                if self.controls()?.on_background().contains(&control) =>
+            {
+                Some(colors.window_background())
             }
             Message::Wake => {
                 if let Some(waker) = self.waker.get() {
@@ -2307,12 +2626,9 @@ impl WindowProc for CompareWindow {
                 None
             }
             Message::Activate { .. } => {
-                let side = self.controls()?.sides[self.active.get().index()].hwnd();
-                let focus = self
-                    .focused
-                    .take()
+                let focus = (self.focused.take())
                     .filter(|focused| focused.is_visible())
-                    .unwrap_or(side);
+                    .or_else(|| self.focus_target())?;
                 focus.focus();
                 Some(LRESULT(0))
             }

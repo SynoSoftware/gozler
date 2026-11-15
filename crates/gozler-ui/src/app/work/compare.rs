@@ -4,7 +4,7 @@
 //! thread never reads a file.
 
 use crate::core::compare::rtf::{Font, Palette, Rtf, Style};
-use crate::core::compare::{self, LINES_LIMIT, Matching, SHOWN_LIMIT, Shown};
+use crate::core::compare::{self, Chosen, LINES_LIMIT, Matching, SHOWN_LIMIT, Shown};
 use crate::core::compare_window::session::{
     AlignInput, Compared, Content, HexFound, SaveFile, View,
 };
@@ -14,7 +14,7 @@ use crate::core::panel::Side;
 use crate::core::text::Strings;
 use crate::core::viewer::{Encoding, HEX_ROW_BYTES, Mode, choose_mode, hex_row, offset_digits};
 use crate::core::work::{Replacement, Retirement};
-use crate::win::compare::{SaveFailure, open_shared, save_file};
+use crate::win::compare::{SaveFailure, exists, open_shared, save_file};
 use crate::win::locale::{WindowsNumbers, code_page_encoded, code_page_text};
 use crate::win::shell::Session;
 use crate::win::wake::OpenWaker;
@@ -44,9 +44,9 @@ pub(in crate::app) enum Source {
 }
 
 impl Source {
-    fn files(self) -> Option<[Vec<u16>; 2]> {
+    fn chosen(self, worker: &OffThread) -> Chosen {
         match self {
-            Source::Files(files) => Some(files),
+            Source::Files(files) => Chosen::Both(files),
             Source::Chosen {
                 source,
                 selected,
@@ -57,6 +57,7 @@ impl Source {
                 selected,
                 &target.map(Entries::resolve).unwrap_or_default(),
                 folder.as_deref(),
+                &|path| exists(path, worker),
             ),
         }
     }
@@ -109,10 +110,13 @@ impl Progress {
 pub(in crate::app) enum Job {
     /// Runs the comparison tool `command` for the two files.
     Tool { source: Source, command: String },
+    /// Chooses the files of a window's first comparison from the panels'
+    /// selections, which the window then compares.
+    Choose(Source),
     /// Reads the two files and compares them, as Hex with `hex`, each side
     /// in its chosen encoding or, with `None`, the one it detects.
     Compare {
-        source: Source,
+        paths: [Vec<u16>; 2],
         hex: bool,
         encodings: [Option<Encoding>; 2],
         options: Options,
@@ -134,8 +138,9 @@ pub(in crate::app) enum Outcome {
         program: String,
         error: io::Error,
     },
-    /// Fewer than two files are chosen.
-    Unchosen,
+    /// The files that [`Job::Choose`] chose; for [`Job::Tool`], only when
+    /// it found fewer than two.
+    Chosen(Chosen),
     Failed {
         path: Vec<u16>,
         error: io::Error,
@@ -215,8 +220,9 @@ pub(in crate::app) fn retire(retired: Retirement) {
 fn run(job: Job, session: &Session, worker: &OffThread, cancel: &CancelToken) -> Outcome {
     match job {
         Job::Tool { source, command } => {
-            let Some(files) = source.files() else {
-                return Outcome::Unchosen;
+            let files = match source.chosen(worker) {
+                Chosen::Both(files) => files,
+                fewer => return Outcome::Chosen(fewer),
             };
             let [first, second] = files.map(|path| String::from_utf16_lossy(&path));
             let Some(line) = compare_command(&command, [&first, &second]) else {
@@ -230,18 +236,14 @@ fn run(job: Job, session: &Session, worker: &OffThread, cancel: &CancelToken) ->
                 },
             }
         }
+        Job::Choose(source) => Outcome::Chosen(source.chosen(worker)),
         Job::Compare {
-            source,
+            paths,
             hex,
             encodings,
             options,
             progress,
-        } => match source.files() {
-            Some(paths) => {
-                compare_files(paths, hex, encodings, &options, &progress, worker, cancel)
-            }
-            None => Outcome::Unchosen,
-        },
+        } => compare_files(paths, hex, encodings, &options, &progress, worker, cancel),
         Job::Align {
             generation,
             input: AlignInput::Text { texts, anchors },

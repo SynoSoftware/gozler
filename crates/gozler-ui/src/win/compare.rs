@@ -647,6 +647,11 @@ pub(crate) fn open_shared(path: &[u16], _worker: &OffThread) -> io::Result<File>
         .open(PathBuf::from(OsString::from_wide(path)))
 }
 
+/// Whether `path` names a file or folder that is there.
+pub(crate) fn exists(path: &[u16], _worker: &OffThread) -> bool {
+    std::fs::metadata(PathBuf::from(OsString::from_wide(path))).is_ok()
+}
+
 /// Why Save failed.
 pub(crate) struct SaveFailure {
     pub(crate) error: io::Error,

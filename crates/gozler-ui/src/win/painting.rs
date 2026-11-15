@@ -258,8 +258,8 @@ const PRESENTING: &[&str] = &[
 fn presents(call: &str, file: &str, function: &str) -> bool {
     match call {
         // The presenter's one paint pass when an update ends, the cover's
-        // own paint while it is cloaked, and a list's scroll, which copies
-        // its rows on the screen at once.
+        // own paint while it is cloaked, and a list's or a text box's
+        // scroll, which copies its pixels on the screen at once.
         "RDW_UPDATENOW" | "UpdateWindow(" => matches!(
             (file, function),
             ("win/present.rs", "publish" | "raise_cover" | "scroll_now")
@@ -291,7 +291,7 @@ fn presents(call: &str, file: &str, function: &str) -> bool {
                     "set_enabled"
                         | "select_all"
                         | "set_text_caret_at_end"
-                        | "select_to_end"
+                        | "select_and_scroll"
                         | "select"
                         | "show_file_icon"
                         | "show_glyph"

@@ -52,9 +52,7 @@ impl RowOptions {
 /// What a comparison reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Request {
-    /// The two files; `None` while the worker chooses them from the
-    /// panels' selections, as a window's first comparison does.
-    pub(crate) paths: Option<[Vec<u16>; 2]>,
+    pub(crate) paths: [Vec<u16>; 2],
     /// View > Hex.
     pub(crate) hex: bool,
     /// The encodings that the person chose; `None` detects one.
@@ -378,10 +376,8 @@ pub(crate) enum Effect {
 /// What happened to the window.
 #[derive(Debug)]
 pub(crate) enum Event {
-    /// The window's first comparison, of the files that the panels'
-    /// selections choose.
-    Choose,
-    /// Compare, or `Enter` in a path box.
+    /// Compare, `Enter` in a path box, or the files that the panels'
+    /// selections chose for the window's first comparison.
     Compare([Vec<u16>; 2]),
     /// View > Text or Hex.
     View {
@@ -586,6 +582,11 @@ impl Session {
         !self.history.is_empty()
     }
 
+    /// Whether `side` has changes that no save has written yet.
+    pub(crate) fn changed(&self, side: Side) -> bool {
+        self.history.changed_after(side, None)
+    }
+
     pub(crate) fn can_undo(&self) -> bool {
         self.can_change() && self.history.can_take_last(self.saves.writing())
     }
@@ -599,23 +600,14 @@ impl Session {
     pub(crate) fn on(&mut self, event: Event) -> Vec<Effect> {
         let mut effects = Vec::new();
         match event {
-            Event::Choose => {
-                let request = Request {
-                    paths: None,
-                    hex: false,
-                    encodings: [None, None],
-                    rows: self.rows,
-                };
-                self.start_compare(request, &mut effects);
-            }
             Event::Compare(paths) => {
                 let base = self.request();
                 let encodings = match &base {
-                    Some(base) if base.paths.as_ref() == Some(&paths) => base.encodings,
+                    Some(base) if base.paths == paths => base.encodings,
                     _ => [None, None],
                 };
                 let request = Request {
-                    paths: Some(paths),
+                    paths,
                     hex: base.is_some_and(|base| base.hex),
                     encodings,
                     rows: self.rows,
@@ -761,13 +753,11 @@ impl Session {
     /// The comparison that the person sees: the one that runs, or else the
     /// one that shows.
     fn request(&self) -> Option<Request> {
-        if let Job::Comparing(request) = &self.job
-            && request.paths.is_some()
-        {
+        if let Job::Comparing(request) = &self.job {
             return Some(request.clone());
         }
         self.showing.as_ref().map(|showing| Request {
-            paths: Some(showing.paths.clone()),
+            paths: showing.paths.clone(),
             hex: showing.hex,
             encodings: showing.chosen,
             rows: self.rows,
@@ -920,11 +910,8 @@ impl Session {
         // The comparison that runs replaces the rows; Swap swaps the files
         // it reads when none show yet.
         if let Job::Comparing(request) = &mut self.job {
-            if command == CompareCommand::Swap
-                && self.showing.is_none()
-                && let Some(paths) = &mut request.paths
-            {
-                paths.swap(0, 1);
+            if command == CompareCommand::Swap && self.showing.is_none() {
+                request.paths.swap(0, 1);
                 request.encodings.swap(0, 1);
                 effects.push(Effect::Compare(request.clone()));
                 effects.push(Effect::Swapped);
@@ -1007,10 +994,8 @@ impl Session {
         self.saves.swap();
         self.generation += 1;
         showing.generation = self.generation;
-        if let Job::Comparing(request) = &mut self.job
-            && let Some(paths) = &mut request.paths
-        {
-            paths.swap(0, 1);
+        if let Job::Comparing(request) = &mut self.job {
+            request.paths.swap(0, 1);
             request.encodings.swap(0, 1);
             effects.push(Effect::Compare(request.clone()));
         }
@@ -1256,8 +1241,8 @@ impl Session {
 mod tests {
     use super::*;
     use crate::core::compare::{
-        Form, LineEnd, SHOWN_LIMIT, Shown, count_differences, difference_at, hex_shown_rows,
-        match_lines, shown_rows,
+        Form, LineEnd, SHOWN_LIMIT, Shown, count_differences, hex_shown_rows, match_lines,
+        shown_rows,
     };
     use proptest::prelude::*;
     use std::collections::HashMap;
@@ -1439,7 +1424,7 @@ mod tests {
                 closed: false,
                 named: 0,
             };
-            world.send(Event::Choose);
+            world.send(Event::Compare([wide("A"), wide("B")]));
             world
         }
 
@@ -1524,9 +1509,9 @@ mod tests {
                 );
             }
             let carets = (self.controls.each_ref()).map(|text| row_at(text, self.caret));
-            let rows = (self.session.showing())
-                .map_or(&[][..], |showing| showing.view().rows.rows.as_slice());
-            let difference = difference_at(rows, carets[0]);
+            let difference = (self.session.showing()).map_or(carets[0]..carets[0] + 1, |showing| {
+                showing.view().rows.difference_at(carets[0])
+            });
             let event = match command {
                 CompareCommand::CopyToRight => Event::Copy {
                     fresh,
@@ -1550,7 +1535,7 @@ mod tests {
         }
 
         fn compared(&self, request: &Request) -> Compared {
-            let paths = (request.paths.clone()).unwrap_or_else(|| [wide("A"), wide("B")]);
+            let paths = request.paths.clone();
             let lines = paths
                 .each_ref()
                 .map(|path| self.disk.get(path).cloned().unwrap_or_default());
