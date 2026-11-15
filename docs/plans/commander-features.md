@@ -10,8 +10,9 @@ native control choices and maintenance stages here belong to gozler.
 
 ## Schedule
 
-**Scheduled:** the command bar is the next feature. The remaining entries
-are a proposed backlog in priority order, not work already started. Do the
+**Scheduled:** [Multi-Rename](multi-rename.md) (entry 12) is the next
+feature, and the command bar follows it. The remaining entries are a
+proposed backlog in priority order, not work already started. Do the
 small command-metadata preparation in
 [maintainability stage 5](maintainability.md#stage-5-one-row-for-each-command)
 as its own change before adding the commands. The other maintenance stages
@@ -119,7 +120,7 @@ extension of this roadmap.
 | 9 | Unpack a download or send a bundle | Extract ZIP to a chosen folder and create a ZIP from selected entries | Windows ZIP workflow; TC pack/unpack commands |
 | 10 | Arrange the two working folders | Swap panels and show the active folder in the other panel | `cm_Exchange`, `cm_MatchSrc` |
 | 11 | Select a related group | Invert selection and select/unselect by the focused file's extension | `cm_ExchangeSelection`, `cm_SelectCurrentExtension` |
-| 12 | Rename many files | Preview changes and collisions, then submit through the file-operation engine | `cm_MultiRenameFiles` |
+| 12 | Rename many files | Multi-Rename, as [its plan](multi-rename.md) specifies | `cm_MultiRenameFiles` |
 | 13 | Compare two versions | The built-in compare window, with line and word marks, edit mode and Save; a chosen comparison tool runs instead while one is set (DESIGN.md: Compare by content) | `cm_CompareFilesByContent`, `cm_IntCompareFilesByContent` |
 | 14 | Check a download or copied bundle | Create/verify checksum files and report mismatches or unreadable files | `cm_CRCcreate`, `cm_CRCcheck` |
 | 15 | Find descendants in one list | Indexed branch view with truthful completeness | `cm_DirBranch` |
