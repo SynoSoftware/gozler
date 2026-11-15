@@ -502,7 +502,9 @@ impl CompiledQuery {
     /// real folders, and literal and wildcard path tests with a separator
     /// also test the paths that reach an entry through the links. A scope that
     /// holds a link to a folder outside it becomes a path test of that kind,
-    /// and the search reads every volume.
+    /// and the search reads every volume, unless a lone `parent:` of the
+    /// scope keeps it to the scope's real folder: a link below that folder
+    /// adds nothing directly in it.
     pub fn with_links(
         parsed: &ParsedQuery,
         links: &Links,
@@ -515,7 +517,26 @@ impl CompiledQuery {
             }
         }
         let mut query = Self::new(&parsed)?;
-        let reads = links.search_scope(scope);
+        let real = scope.map(|scope| links.real_path(scope));
+        let parent_of_scope = real.as_deref().is_some_and(|real| {
+            let real = real.trim_end_matches(['\\', '/']);
+            parsed
+                .clauses
+                .iter()
+                .any(|clause| match clause.terms.as_slice() {
+                    [term] => {
+                        !term.negated
+                            && matches!(&term.test, Test::Parent(parent)
+                            if parent.trim_end_matches(['\\', '/']) == real)
+                    }
+                    _ => false,
+                })
+        });
+        let reads = if parent_of_scope {
+            real
+        } else {
+            links.search_scope(scope)
+        };
         if reads.is_none()
             && let Some(scope) = scope
         {
@@ -1936,6 +1957,19 @@ fn scan_with<'q, 'i>(
     if query.root_fails(&root) {
         return scan;
     }
+    // `parent:` of the scope folder matches only the folder's children, so
+    // the walk visits those alone, also for the volume root.
+    if let Some(root) = scope
+        && scan.finds_only_children_of(root)
+    {
+        scan.scope = (root != index.root()).then_some(root);
+        for idx in index.children(root) {
+            if !index.is_synthetic(idx) {
+                scan.visit(idx, None);
+            }
+        }
+        return scan;
+    }
     // The volume root (`-path C:\`) holds the whole volume, so it is no scope;
     // as one it would walk the capped subtree and then pay an ancestry walk
     // per match for nothing.
@@ -2226,6 +2260,27 @@ impl<'q, 'i> Scan<'q, 'i> {
     /// every candidate.
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Whether a clause of the query is a lone `parent:` for `folder`, so
+    /// every match is directly in it.
+    fn finds_only_children_of(&mut self, folder: EntryIdx) -> bool {
+        let Some(paths) = &mut self.query_paths else {
+            return false;
+        };
+        if paths
+            .folder_path_into(self.index, folder, &mut self.path)
+            .is_none()
+        {
+            return false;
+        }
+        self.query.clauses.iter().any(|clause| {
+            matches!(
+                clause.terms.as_slice(),
+                [CompiledTerm { negated: false, check: Check::Parent(parent), .. }]
+                    if *parent == self.path
+            )
+        })
     }
 
     /// Keeps entry `idx` as a candidate if it passes every clause, unless
@@ -3436,8 +3491,9 @@ mod tests {
     }
 
     /// `parent:` finds the entries directly in a folder, on the full scan,
-    /// the folded-arena scan and the scoped walk, in either case form. A
-    /// trailing separator, a root's included, is ignored.
+    /// the folded-arena scan, the walk of the scope's children and the
+    /// scoped walk, in either case form. A trailing separator, a root's
+    /// included, is ignored.
     #[test]
     fn parent_finds_the_entries_directly_in_a_folder() {
         let idx = docs_index();
@@ -3446,6 +3502,25 @@ mod tests {
         assert_eq!(
             paths_under(&idx, r"C:\", r"parent:c:\REPO\", Some(r"C:\repo")),
             repo
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"parent:C:\", Some(r"C:\")),
+            [r"C:\docs", r"C:\repo"]
+        );
+        // Only a lone positive `parent:` of the scope itself walks its
+        // children alone.
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"parent:C:\repo\docs", Some(r"C:\repo")),
+            [r"C:\repo\docs\guide.MD", r"C:\repo\docs\readme.md"]
+        );
+        assert_eq!(
+            paths_under(&idx, r"C:\", r"!parent:C:\repo", Some(r"C:\repo")),
+            [
+                r"C:\repo\docs\guide.MD",
+                r"C:\repo\docs\readme.md",
+                r"C:\repo\src\main.cs",
+                r"C:\repo\src\readme.md"
+            ]
         );
         assert_eq!(
             paths_under(&idx, r"C:\", r"parent:C:\repo readme", None),
@@ -3460,6 +3535,29 @@ mod tests {
             repo
         );
         assert!(paths_under(&idx, r"C:\", r"parent:C:\Repo case:", None).is_empty());
+    }
+
+    /// A scope that holds a link out of it reads every volume, but `parent:`
+    /// of that scope reads only its folder, because the link adds nothing
+    /// directly in it, and finds the same rows.
+    #[test]
+    fn parent_of_a_scope_with_a_link_out_reads_only_that_folder() {
+        let idx = docs_index();
+        let links = Links::new(vec![crate::links::FolderLink {
+            link: r"C:\docs\out".into(),
+            target: r"C:\repo".into(),
+        }]);
+        let scope = Some(r"C:\docs");
+        let compiled =
+            |query: &str| CompiledQuery::with_links(&parse_query(query).unwrap(), &links, scope);
+        assert_eq!(compiled("readme").unwrap().search_scope(scope), None);
+        let parent = compiled(r"parent:C:\docs").unwrap();
+        assert_eq!(parent.search_scope(scope).as_deref(), Some(r"C:\docs"));
+        let sort = SortSpec::default_for(SortKey::Path);
+        assert_eq!(
+            texts(&run_query(&idx, r"C:\", &parent, scope, sort, None)),
+            [r"C:\docs\readme.md"]
+        );
     }
 
     // -- whole words and regular expressions --------------------------------
