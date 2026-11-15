@@ -4,6 +4,7 @@
 use super::{Column, DaemonFailure, ExportError, Fetch, FixWork, List, PathBuf, Purpose, Side};
 use crate::core::fetch::ChunkAsk;
 use crate::core::inspector::AgeTimer;
+use crate::core::layout::column_sizing::NewRows;
 use crate::core::search_list::Deselect;
 use gozler_fileops::OperationId;
 use std::ops::{BitOr, BitOrAssign, Range};
@@ -114,7 +115,7 @@ pub(crate) enum Effect {
     },
     ReleaseOperations,
     FetchVisible(List),
-    FillFirstRows(List),
+    NewRows(List, NewRows),
     EnterFirst(ChunkAsk),
     ReadMemory,
     PostSettings,

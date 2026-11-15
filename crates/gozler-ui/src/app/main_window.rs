@@ -51,7 +51,7 @@ use crate::core::include::{
     AfterOk, IncludeDrive, SummaryRow, connected_drives, connected_volumes, include_drives,
     preview, summary_rows,
 };
-use crate::core::layout::column_sizing::{ColumnFit, ColumnSizing};
+use crate::core::layout::column_sizing::{ColumnFit, ColumnSizing, FILL_DELAY_MS, Fill};
 use crate::core::layout::{
     self, Body, CaptionWidths, ControlSizes, Dpi, FilterLayout, InspectorLayout, Layout,
     MessageArea, Px, Rect, ScrollRequest, Size, StatusLayout, ToolHeights,
@@ -177,7 +177,8 @@ struct Controls {
 }
 
 impl Controls {
-    fn create(parent: Hwnd) -> windows::core::Result<Controls> {
+    /// With the results list's Auto fit `auto_fit`.
+    fn create(parent: Hwnd, auto_fit: bool) -> windows::core::Result<Controls> {
         let message_buttons = [
             Button::create(parent, ControlId::MessageButton1.id())?,
             Button::create(parent, ControlId::MessageButton2.id())?,
@@ -187,7 +188,7 @@ impl Controls {
         let row = SearchRow::create(parent)?;
         let filters = FilterPane::create(parent, show_filters)?;
         let controls = Controls {
-            search: Search::create(parent, row, message_buttons)?,
+            search: Search::create(parent, row, message_buttons, auto_fit)?,
             filters,
             inspector: Inspector::create(parent)?,
             panels: Panels::create(parent)?,
@@ -845,7 +846,8 @@ impl MainWindow {
 
     fn on_create(&self, hwnd: Hwnd) -> bool {
         let dpi = hwnd.dpi();
-        let (Ok(controls), Ok(fonts)) = (Controls::create(hwnd), Fonts::new(dpi)) else {
+        let auto_fit = self.model.borrow().auto_fit();
+        let (Ok(controls), Ok(fonts)) = (Controls::create(hwnd, auto_fit), Fonts::new(dpi)) else {
             return false;
         };
         controls.apply_fonts(&fonts);
@@ -1746,16 +1748,7 @@ impl MainWindow {
                         (!narrows || actual != planned).then_some(actual)
                     }
                 });
-                // Border drags keep the existing fits of the other columns.
-                if controls.search.column_sizing.borrow().is_dragging() {
-                    for (side, width) in Side::BOTH.into_iter().zip(widths) {
-                        if let Some(width) = width {
-                            controls.panels.fill_name_column_at(side, width);
-                        }
-                    }
-                } else {
-                    controls.panels.fill_panel_columns_at(self, widths);
-                }
+                controls.panels.fill_panel_columns_at(self, widths);
             }
         };
         // Fit shrinking columns before the move can introduce a horizontal
@@ -1799,11 +1792,14 @@ impl MainWindow {
         controls.apply_fonts(&fonts);
         drop(created.fonts.replace(fonts));
         self.apply_glyphs(dpi);
-        self.controls()
-            .search
-            .column_sizing
-            .borrow_mut()
-            .dpi_changed();
+        let before = created.metrics.get().dpi;
+        for list in List::ALL {
+            let widths = self.column_widths(list);
+            let kept = (self.column_sizing(list).borrow_mut()).dpi_changed(&widths, before, dpi);
+            if let Some(kept) = kept {
+                (self.list_control(list)).set_column_widths(kept.into_iter().enumerate());
+            }
+        }
         let captions = self.captions();
         let _ = win::menu::replace_menu_bar(hwnd, &captions.menu_bar);
         self.measure(&captions, dpi);
@@ -2155,19 +2151,25 @@ impl MainWindow {
                 return;
             }
             MenuItem::FitColumns => {
-                for (index, fit) in self
-                    .controls()
-                    .search
-                    .column_fits(self)
-                    .into_iter()
-                    .enumerate()
-                {
-                    self.controls()
-                        .search
-                        .list
-                        .set_column_width(index, fit.widest);
+                let count = self.model.borrow().columns().len();
+                for index in 0..count {
+                    self.controls().search.fit_column(self, index);
                 }
                 return;
+            }
+            MenuItem::AutoFit => {
+                let accepted = self.model.borrow_mut().toggle_auto_fit();
+                let automatic = self.model.borrow().auto_fit();
+                let search = &self.controls().search;
+                let widths = (search.column_sizing.borrow_mut()).set_automatic(
+                    automatic,
+                    search.fill_width(),
+                    || search.column_fits(self),
+                );
+                if let Some(widths) = widths {
+                    (search.list).set_column_widths(widths.into_iter().enumerate());
+                }
+                accepted
             }
             MenuItem::SortKey(key) if mode == Mode::Commander => {
                 return self.controls().panels.change_panel_sort(
@@ -2340,36 +2342,84 @@ impl MainWindow {
         }
     }
 
-    fn grow_extension(&self, list: List) {
-        let columns: Vec<_> = match list {
-            List::Search => self.model.borrow().columns().to_vec(),
-            List::Panel(side) => self
-                .panel(side)
-                .columns()
-                .iter()
-                .map(|column| column.search_column())
-                .collect(),
-        };
-        let Some(index) = columns
-            .iter()
-            .position(|column| *column == Column::Extension)
-        else {
-            return;
-        };
-        let fits = match list {
-            List::Search => self.controls().search.fits_of(self, index..index + 1),
-            List::Panel(side) => self
-                .controls()
-                .panels
-                .panel_fits_of(self, side, index..index + 1),
+    /// When `list`'s columns fill (DESIGN.md: Results list).
+    fn column_sizing(&self, list: List) -> &RefCell<ColumnSizing> {
+        match list {
+            List::Search => &self.controls().search.column_sizing,
+            List::Panel(side) => &self.panel(side).column_sizing,
+        }
+    }
+
+    /// The width of each of `list`'s columns.
+    fn column_widths(&self, list: List) -> Vec<Px> {
+        let count = match list {
+            List::Search => self.model.borrow().columns().len(),
+            List::Panel(side) => self.panel(side).columns().len(),
         };
         let control = self.list_control(list);
-        let widths: Vec<_> = (0..columns.len())
+        (0..count)
             .map(|index| control.column_width(index))
-            .collect();
-        if let Some(widths) =
-            crate::core::layout::column_sizing::grow_extension(&columns, &widths, fits[0].widest)
-        {
+            .collect()
+    }
+
+    /// The fit of each of `list`'s columns.
+    fn column_fits(&self, list: List) -> Vec<ColumnFit> {
+        match list {
+            List::Search => self.controls().search.column_fits(self),
+            List::Panel(side) => self.controls().panels.panel_fits(self, side),
+        }
+    }
+
+    /// The rows `list` shows arrived or changed their values: its columns
+    /// fill now, after [`FILL_DELAY_MS`], or not, as
+    /// [`ColumnSizing::rows_shown`] decides.
+    fn rows_shown(&self, list: List) {
+        let control = self.list_control(list);
+        let fill = (self.column_sizing(list).borrow_mut())
+            .rows_shown(control.fill_width(), || self.column_fits(list));
+        match fill {
+            Fill::Keep => {}
+            Fill::Widths(widths) => control.set_column_widths(widths.into_iter().enumerate()),
+            Fill::Wait => self.wait_to_fill(list),
+        }
+    }
+
+    /// `list` asked for the rows it draws next: rows that scrolled into
+    /// view start the wait, as [`ColumnSizing::drawn_from`] decides.
+    fn rows_drawn(&self, list: List) {
+        let top = self.list_control(list).visible_rows().start;
+        if self.column_sizing(list).borrow_mut().drawn_from(top) {
+            self.wait_to_fill(list);
+        }
+    }
+
+    /// Starts the wait of [`FILL_DELAY_MS`] for `list` again, after which
+    /// [`Self::fill_after_wait`] runs.
+    fn wait_to_fill(&self, list: List) {
+        let window = self.list_control(list).hwnd().parent();
+        window.set_timer(Timer::ColumnFill(list).id(), FILL_DELAY_MS);
+    }
+
+    /// The person ended a drag of the window's border or title bar
+    /// ([`ColumnSizing::drag_ended`]).
+    fn end_sizing(&self, list: List) {
+        let control = self.list_control(list);
+        let widths = (self.column_sizing(list).borrow_mut())
+            .drag_ended(control.fill_width(), || self.column_fits(list));
+        if let Some(widths) = widths {
+            control.set_column_widths(widths.into_iter().enumerate());
+        }
+    }
+
+    /// The wait that [`Self::rows_shown`] started for `list` ended.
+    fn fill_after_wait(&self, hwnd: Hwnd, list: List) {
+        hwnd.kill_timer(Timer::ColumnFill(list).id());
+        let control = self.list_control(list);
+        let current = self.column_widths(list);
+        let widths =
+            (self.column_sizing(list).borrow_mut())
+                .waited(&current, control.fill_width(), || self.column_fits(list));
+        if let Some(widths) = widths {
             control.set_column_widths(widths.into_iter().enumerate());
         }
     }
@@ -4702,10 +4752,7 @@ impl MainWindow {
         // and a hidden window shows at the width it had, which no resize
         // fills. Filling before it shows draws it once.
         if !hwnd.is_visible() {
-            let width = self.controls().search.fill_width();
-            let widths = (self.controls().search.column_sizing.borrow_mut())
-                .window_shown(width, || self.controls().search.column_fits(self));
-            (self.controls().search.list).set_column_widths(widths.into_iter().enumerate());
+            self.controls().search.fill(self);
         }
         if self.tray.unshown.replace(false) {
             let placement = self.model.borrow().placement();
@@ -4974,6 +5021,7 @@ impl MainWindow {
             Timer::Search(list) => self.search(hwnd, list),
             Timer::Searching(list) => self.name_search(hwnd, list),
             Timer::Selection(list) => self.fetch_selection(hwnd, list),
+            Timer::ColumnFill(list) => self.fill_after_wait(hwnd, list),
             Timer::PanelSettle(side) => self.controls().panels.on_panel_settled(self, hwnd, side),
             Timer::PanelReading(side) => self.controls().panels.on_panel_reading(self, hwnd, side),
             Timer::PanelAgain(side) => {
@@ -5137,17 +5185,14 @@ impl WindowProc for MainWindow {
                 Some(LRESULT(0))
             }
             Message::EnterSizeMove => {
-                self.controls()
-                    .search
-                    .column_sizing
-                    .borrow_mut()
-                    .drag_started();
+                for list in List::ALL {
+                    self.column_sizing(list).borrow_mut().drag_started();
+                }
                 None
             }
             Message::ExitSizeMove => {
-                self.controls().search.end_sizing(self);
-                if self.model.borrow().mode() == Mode::Commander {
-                    self.controls().panels.fill_panel_columns(self);
+                for list in List::ALL {
+                    self.end_sizing(list);
                 }
                 None
             }

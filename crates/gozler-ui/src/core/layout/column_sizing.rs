@@ -1,9 +1,8 @@
 //! Column widths: how a column fits its header and cells, how the fits
-//! fill the list's width, and when a fill of Search's list happens
-//! (DESIGN.md: Results list, A panel). The rules are TableView's, so a
-//! column's width comes only from what it shows. The window measures the
-//! texts and sets the widths that [`ColumnSizing`] and [`fill_widths`]
-//! answer with.
+//! fill the list's width, and when a list's columns fill (DESIGN.md:
+//! Results list, A panel). The rules are TableView's, so a column's width
+//! comes only from what it shows. The window measures the texts and sets
+//! the widths that [`ColumnSizing`] and [`fill_widths`] answer with.
 
 use super::{Dip, Dpi, Px, cell_text_inset};
 use crate::core::model::Column;
@@ -11,16 +10,29 @@ use crate::core::model::Column;
 /// The space a header leaves on each side of its text.
 const HEADER_TEXT_MARGIN: Dip = Dip(6);
 
+/// The width a fill leaves a column with content when its fit is wider,
+/// TableView's default column width, so a narrow list does not cut a name
+/// to its first letter.
+const KEPT_WIDTH: Dip = Dip(150);
+
+/// How long a new search's results, or a cut value, show before the
+/// columns fill, so the results a person passes through while typing, and
+/// a burst of updates, fill once.
+pub(crate) const FILL_DELAY_MS: u32 = 300;
+
 /// What a column's header and the cells a fit measured ask of a fill
 /// (DESIGN.md: Results list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ColumnFit {
+    pub(crate) column: Column,
     /// The width that shows the header and every measured cell whole.
     pub(crate) widest: Px,
     /// No measured cell shows anything, so `widest` is the header's.
     pub(crate) empty: bool,
-    /// Whether a fill may make the column narrower than `widest`.
-    pub(crate) shrinks: bool,
+    /// The narrowest a fill makes the column: `widest` when it cannot
+    /// shrink, nothing when it is empty, and otherwise [`KEPT_WIDTH`], or
+    /// `widest` when that is narrower.
+    pub(crate) least: Px,
     /// Whether a fill may make the column wider than `widest`.
     pub(crate) grows: bool,
 }
@@ -46,10 +58,18 @@ impl ColumnFit {
             empty = false;
         }
         let row = column.row();
+        let least = if !row.can_shrink {
+            widest
+        } else if empty {
+            Px(0)
+        } else {
+            widest.min(KEPT_WIDTH.to_px(dpi))
+        };
         ColumnFit {
+            column,
             widest,
             empty,
-            shrinks: row.can_shrink,
+            least,
             grows: row.can_grow,
         }
     }
@@ -71,8 +91,8 @@ pub(crate) fn cell_width(text: Px, label: Px, first: bool, dpi: Dpi) -> Px {
 /// header hides less than a cut value. When no column is empty, or every
 /// column is, they all take part at once. A column that cannot grow keeps
 /// its fit, so when no column that takes part can grow, the columns end
-/// before the edge; when even the columns that cannot shrink do not fit,
-/// they run past it.
+/// before the edge; when even their least widths do not fit, they run
+/// past it.
 pub(crate) fn fill_widths(fits: &[ColumnFit], width: Px) -> Vec<Px> {
     let mut widths: Vec<f64> = fits.iter().map(|fit| f64::from(fit.widest.0)).collect();
     let mut change = f64::from(width.0) - widths.iter().sum::<f64>();
@@ -92,45 +112,16 @@ pub(crate) fn fill_widths(fits: &[ColumnFit], width: Px) -> Vec<Px> {
     whole_pixels(&widths)
 }
 
-/// Widens Extension for the rows now visible. Name and Path give up the
-/// needed room in their current proportions; the other columns stay put.
-pub(crate) fn grow_extension(columns: &[Column], widths: &[Px], needed: Px) -> Option<Vec<Px>> {
-    let extension = columns
-        .iter()
-        .position(|&column| column == Column::Extension)?;
-    if needed <= widths[extension] {
-        return None;
-    }
-    let fits: Vec<_> = columns
-        .iter()
-        .zip(widths)
-        .map(|(&column, &width)| ColumnFit {
-            widest: if column == Column::Extension {
-                needed
-            } else {
-                width
-            },
-            empty: false,
-            shrinks: matches!(column, Column::Name | Column::Path),
-            grows: false,
-        })
-        .collect();
-    Some(fill_widths(
-        &fits,
-        widths.iter().copied().fold(Px(0), |sum, width| sum + width),
-    ))
-}
-
 /// Changes the widths of the columns at `step` by `change` in all, by one
 /// factor, so the widest columns keep the most room and a resize makes no
-/// column jump. A column that the factor would take below its fit when it
-/// cannot shrink, below nothing, or past its fit when it cannot grow,
-/// stays at that bound, and the others share what is left. Answers the
-/// part of `change` that the columns could not take.
+/// column jump. A column that the factor would take below its least width,
+/// or past its fit when it cannot grow, stays at that bound, and the
+/// others share what is left. Answers the part of `change` that the
+/// columns could not take.
 fn scale(widths: &mut [f64], fits: &[ColumnFit], step: &[usize], change: f64) -> f64 {
     let bounds = |i: usize| {
         let fit = f64::from(fits[i].widest.0);
-        let least = if fits[i].shrinks { 0.0 } else { fit };
+        let least = f64::from(fits[i].least.0);
         let most = if fits[i].grows { f64::INFINITY } else { fit };
         (least, most)
     };
@@ -184,12 +175,51 @@ fn whole_pixels(widths: &[f64]) -> Vec<Px> {
     pixels
 }
 
-/// When Search's columns fill the list's width, and the widths that
-/// change between fills (DESIGN.md: Results list). Each event that fills
-/// the columns measures their fits with the `measure` it is given and
-/// answers with the widths.
-#[derive(Debug, Default)]
+/// Rows that replace those a list shows, which decide when its columns
+/// fill (DESIGN.md: Results list).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NewRows {
+    /// A different list, such as a new search's results or another folder
+    /// in a panel: the columns fill once the list has shown it for
+    /// [`FILL_DELAY_MS`], so the lists a person passes through while typing
+    /// or moving between folders show at once and do not move the columns.
+    Different,
+    /// A sort's first order: the columns fill as the rows show, so the
+    /// person sees one change.
+    Order,
+}
+
+/// What [`ColumnSizing::rows_shown`] asks of the columns.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Fill {
+    Keep,
+    /// The columns take these widths now.
+    Widths(Vec<Px>),
+    /// The wait of [`FILL_DELAY_MS`] starts again from now, and
+    /// [`ColumnSizing::waited`] follows it.
+    Wait,
+}
+
+/// What the columns do when the wait of [`FILL_DELAY_MS`] ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AfterWait {
+    /// A different list showed: the columns fill.
+    Fill,
+    /// Rows arrived, scrolled into view or changed their values: the
+    /// columns fill when a value is cut off.
+    FillIfCut,
+}
+
+/// When one list's columns fill its width, and the widths that change
+/// between fills (DESIGN.md: Results list). Each event that fills the
+/// columns measures their fits with the `measure` it is given and answers
+/// with the widths.
+#[derive(Debug)]
 pub(crate) struct ColumnSizing {
+    /// Whether the columns fill by themselves: Auto fit in the header's
+    /// menu. While it is off, only the person and Fit column change a
+    /// width.
+    automatic: bool,
     /// The width the columns last filled, so a layout that keeps it fills
     /// nothing.
     filled_width: Option<Px>,
@@ -199,22 +229,44 @@ pub(crate) struct ColumnSizing {
     /// The width each column had when the person hid it, at the DPI then,
     /// which it gets again when shown, for the window's life.
     hidden: Vec<(Column, Px, Dpi)>,
-    /// Whether the columns have filled the list around rows; until then
-    /// they fit their headers.
-    filled_around_rows: bool,
+    /// Each column's fit at the last fill or Fit column, which a cut value
+    /// compares the column's width with.
+    fits: Vec<ColumnFit>,
+    /// Whether a fill has measured rows. Until one has, the columns fit
+    /// the headers alone, so the list's first rows fill as they show.
+    rows_fitted: bool,
+    /// What the rows that show next replace.
+    new_rows: Option<NewRows>,
+    /// The wait of [`FILL_DELAY_MS`] that runs; a fill before it ends
+    /// serves the rows on screen too.
+    waiting: Option<AfterWait>,
+    /// The row the list last drew from, so a draw from another row tells
+    /// that rows scrolled into view.
+    top_row: Option<u64>,
 }
 
 #[derive(Debug, Default)]
 struct Drag {
-    /// The fits that each fill of the drag scales, once a fill of the
-    /// drag measured them, so the widths follow the pointer without
+    /// A fill of the drag measured [`ColumnSizing::fits`], which the
+    /// drag's next fills scale, so the widths follow the pointer without
     /// measuring every time.
-    fits: Option<Vec<ColumnFit>>,
+    measured: bool,
 }
 
 impl ColumnSizing {
-    pub(crate) fn is_dragging(&self) -> bool {
-        self.drag.is_some()
+    /// With Auto fit `automatic`.
+    pub(crate) fn new(automatic: bool) -> ColumnSizing {
+        ColumnSizing {
+            automatic,
+            filled_width: None,
+            drag: None,
+            hidden: Vec::new(),
+            fits: Vec::new(),
+            rows_fitted: false,
+            new_rows: None,
+            waiting: None,
+            top_row: None,
+        }
     }
 
     /// The list is `width` wide after a layout: when the window shows, is
@@ -227,13 +279,18 @@ impl ColumnSizing {
         width: Px,
         measure: impl FnOnce() -> Vec<ColumnFit>,
     ) -> Option<Vec<Px>> {
-        if self.filled_width.replace(width) == Some(width) {
+        if !self.automatic || self.filled_width == Some(width) {
             return None;
         }
-        Some(match &mut self.drag {
-            None => fill_widths(&measure(), width),
-            Some(drag) => fill_widths(drag.fits.get_or_insert_with(measure), width),
-        })
+        let fits = match &mut self.drag {
+            Some(drag) if drag.measured => self.fits.clone(),
+            Some(drag) => {
+                drag.measured = true;
+                measure()
+            }
+            None => measure(),
+        };
+        Some(self.fill_with(width, fits))
     }
 
     pub(crate) fn drag_started(&mut self) {
@@ -248,41 +305,159 @@ impl ColumnSizing {
         width: Px,
         measure: impl FnOnce() -> Vec<ColumnFit>,
     ) -> Option<Vec<Px>> {
-        self.drag.take()?.fits?;
-        Some(self.fill(width, measure))
+        if !self.drag.take()?.measured {
+            return None;
+        }
+        self.fill(width, measure)
     }
 
-    /// The window moved to a monitor of another DPI: the widths and the
-    /// drag's fits are in the old DPI's pixels, so the next layout fills
-    /// afresh.
-    pub(crate) fn dpi_changed(&mut self) {
+    /// The window moved from a monitor of `from` DPI to one of `to`, with
+    /// the columns `widths` wide: the widths and fits are in the old DPI's
+    /// pixels, so the next layout fills afresh. While Auto fit is off,
+    /// the answer is the widths the person kept, at the new DPI.
+    pub(crate) fn dpi_changed(&mut self, widths: &[Px], from: Dpi, to: Dpi) -> Option<Vec<Px>> {
         self.forget_drag_fits();
         self.filled_width = None;
+        (!self.automatic).then(|| widths.iter().map(|width| width.rescale(from, to)).collect())
     }
 
-    /// The rows the list shows first arrived, with the list `width` wide:
-    /// the widths that fit them, once, because the window shows before any
-    /// row, when the columns fit only their headers.
-    pub(crate) fn rows_arrived(
+    /// The rows that the list shows next replace its rows; the list then
+    /// tells [`Self::rows_shown`].
+    pub(crate) fn new_rows(&mut self, rows: NewRows) {
+        // A new order fills at once, also when a new search brings it.
+        if self.new_rows != Some(NewRows::Order) {
+            self.new_rows = Some(rows);
+        }
+    }
+
+    /// The list, whose columns fill `width`, shows rows that arrived or
+    /// changed their values, or those [`Self::new_rows`] announced; rows
+    /// that scroll into view tell [`Self::drawn_from`]. A sort's first
+    /// order, and the list's first rows, fill at once. Everything else
+    /// waits for [`FILL_DELAY_MS`] and measures nothing now, because each
+    /// measure formats and measures every cell on screen, so a person who
+    /// moves through lists or folders, and a burst of updates, never wait
+    /// for one ([`Self::waited`]).
+    pub(crate) fn rows_shown(
+        &mut self,
+        width: Px,
+        measure: impl FnOnce() -> Vec<ColumnFit>,
+    ) -> Fill {
+        let new_rows = self.new_rows.take();
+        if !self.automatic {
+            return Fill::Keep;
+        }
+        if new_rows == Some(NewRows::Order) {
+            return Fill::Widths(self.fill_with(width, measure()));
+        }
+        if !self.rows_fitted {
+            let fits = measure();
+            return if fits.iter().all(|fit| fit.empty) {
+                Fill::Keep
+            } else {
+                Fill::Widths(self.fill_with(width, fits))
+            };
+        }
+        match (new_rows, self.waiting) {
+            // Each different list starts the wait again.
+            (Some(NewRows::Different), _) => {
+                self.waiting = Some(AfterWait::Fill);
+                Fill::Wait
+            }
+            // The wait that runs checks these rows too, so a burst of
+            // updates measures once.
+            (_, Some(_)) => Fill::Keep,
+            _ => {
+                self.waiting = Some(AfterWait::FillIfCut);
+                Fill::Wait
+            }
+        }
+    }
+
+    /// The list draws its rows from row `top` on. A `top` other than at
+    /// the last draw means that a key, the wheel, the scroll bar or a jump
+    /// brought other rows into view, and then the answer is whether the
+    /// wait of [`FILL_DELAY_MS`] starts again, so a person who scrolls
+    /// costs one measure, after they stop. It measures nothing, because
+    /// the list is drawing.
+    pub(crate) fn drawn_from(&mut self, top: u64) -> bool {
+        if self.top_row.replace(top) == Some(top) || !self.automatic || !self.rows_fitted {
+            return false;
+        }
+        self.waiting.get_or_insert(AfterWait::FillIfCut);
+        true
+    }
+
+    /// The wait that [`Fill::Wait`] asked for ended, with the columns
+    /// `current` wide: the widths that fill the list, unless a fill came
+    /// first. A list that shows nothing, such as an empty folder or a
+    /// panel that shows reading, keeps the widths, because the next rows
+    /// would otherwise show in widths that fit the headers alone. After
+    /// rows that changed, the columns fill only when a value is cut off in
+    /// a column at least as wide as its last fit, because a column that a
+    /// fill or the person made narrower would only be narrowed again or
+    /// lose the person's width.
+    pub(crate) fn waited(
+        &mut self,
+        current: &[Px],
+        width: Px,
+        measure: impl FnOnce() -> Vec<ColumnFit>,
+    ) -> Option<Vec<Px>> {
+        let after = self.waiting.take()?;
+        if !self.automatic {
+            return None;
+        }
+        let fits = measure();
+        if fits.iter().all(|fit| fit.empty) {
+            return None;
+        }
+        let fill = match after {
+            AfterWait::Fill => true,
+            AfterWait::FillIfCut => fits.iter().zip(current).any(|(fit, &shown)| {
+                fit.widest > shown
+                    && (self.fits.iter())
+                        .any(|last| last.column == fit.column && shown >= last.widest)
+            }),
+        };
+        fill.then(|| self.fill_with(width, fits))
+    }
+
+    /// The widths that fill the list now: when the window shows, because a
+    /// hidden window shows at the width it had, which no resize fills;
+    /// when every Size cell changes its unit; and when a panel's columns
+    /// change. `None` while Auto fit is off.
+    pub(crate) fn fill(
         &mut self,
         width: Px,
         measure: impl FnOnce() -> Vec<ColumnFit>,
     ) -> Option<Vec<Px>> {
-        if std::mem::replace(&mut self.filled_around_rows, true) {
+        if !self.automatic {
             return None;
         }
-        Some(self.fill(width, measure))
+        Some(self.fill_with(width, measure()))
     }
 
-    /// The window shows `width` wide: the widths that fit the rows it
-    /// shows, because a hidden window shows at the width it had, which no
-    /// resize fills.
-    pub(crate) fn window_shown(
+    /// The person switched Auto fit: switched on, the columns fill at
+    /// once, because the person who asked for fitted columns looks at
+    /// them.
+    pub(crate) fn set_automatic(
         &mut self,
+        automatic: bool,
         width: Px,
         measure: impl FnOnce() -> Vec<ColumnFit>,
-    ) -> Vec<Px> {
+    ) -> Option<Vec<Px>> {
+        self.automatic = automatic;
         self.fill(width, measure)
+    }
+
+    /// Fit column gave `fit`'s column its width, which a cut value
+    /// compares the column's width with from now on.
+    pub(crate) fn column_fitted(&mut self, fit: ColumnFit) {
+        // In place, because a drag scales the fits in the columns' order.
+        match self.fits.iter_mut().find(|last| last.column == fit.column) {
+            Some(last) => *last = fit,
+            None => self.fits.push(fit),
+        }
     }
 
     /// The person hid `column`, which was `width` wide on a monitor of
@@ -303,16 +478,25 @@ impl ColumnSizing {
             .map(|(_, width, then)| width.rescale(*then, dpi))
     }
 
-    fn fill(&mut self, width: Px, measure: impl FnOnce() -> Vec<ColumnFit>) -> Vec<Px> {
-        // A drag that follows measures these rows, not the earlier ones.
-        self.forget_drag_fits();
+    /// Fills `width` from `fits`, which a drag that follows scales,
+    /// because they are the fits of the rows on screen.
+    fn fill_with(&mut self, width: Px, fits: Vec<ColumnFit>) -> Vec<Px> {
+        if let Some(drag) = &mut self.drag {
+            drag.measured = true;
+        }
         self.filled_width = Some(width);
-        fill_widths(&measure(), width)
+        self.waiting = None;
+        self.rows_fitted |= fits.iter().any(|fit| !fit.empty);
+        let widths = fill_widths(&fits, width);
+        self.fits = fits;
+        widths
     }
 
+    /// The fits no longer match the columns or the DPI, so the drag's next
+    /// fill measures.
     fn forget_drag_fits(&mut self) {
         if let Some(drag) = &mut self.drag {
-            drag.fits = None;
+            drag.measured = false;
         }
     }
 }
@@ -326,33 +510,23 @@ mod tests {
         Dpi::new(dpi).expect("not zero")
     }
 
+    /// A Name column with content, whose least width is [`KEPT_WIDTH`] at
+    /// 96 DPI, or its fit when narrower.
     fn fit(widest: i32) -> ColumnFit {
         ColumnFit {
+            column: Column::Name,
             widest: Px(widest),
             empty: false,
-            shrinks: true,
+            least: Px(widest.min(150)),
             grows: true,
         }
-    }
-
-    #[test]
-    fn newly_visible_extensions_grow_without_refitting_other_values() {
-        let columns = [
-            Column::Name,
-            Column::Extension,
-            Column::Size,
-            Column::DateModified,
-        ];
-        let widths = [Px(300), Px(25), Px(70), Px(150)];
-        let grown = grow_extension(&columns, &widths, Px(65)).unwrap();
-        assert_eq!(grown, [Px(260), Px(65), Px(70), Px(150)]);
-        assert_eq!(grow_extension(&columns, &grown, Px(25)), None);
     }
 
     /// A column that a fill neither shrinks nor grows, such as Size.
     fn whole(widest: i32) -> ColumnFit {
         ColumnFit {
-            shrinks: false,
+            column: Column::Size,
+            least: Px(widest),
             grows: false,
             ..fit(widest)
         }
@@ -361,7 +535,9 @@ mod tests {
     /// A column whose measured rows show nothing, so its fit is its header.
     fn empty(header: i32) -> ColumnFit {
         ColumnFit {
+            column: Column::Path,
             empty: true,
+            least: Px(0),
             ..fit(header)
         }
     }
@@ -371,7 +547,13 @@ mod tests {
     fn measure(calls: &Cell<u32>) -> impl Fn() -> Vec<ColumnFit> + '_ {
         || {
             calls.set(calls.get() + 1);
-            vec![fit(100), fit(300)]
+            vec![
+                fit(100),
+                ColumnFit {
+                    column: Column::Path,
+                    ..fit(300)
+                },
+            ]
         }
     }
 
@@ -401,12 +583,12 @@ mod tests {
         assert_eq!(fill_widths(&fits, Px(450)), [Px(300), Px(50), Px(100)]);
     }
 
-    /// When even the columns that cannot shrink do not fit, the columns
-    /// run past the edge.
+    /// A name keeps 150 DIP, so the rows stay apart, and when even that
+    /// does not fit, the columns run past the edge.
     #[test]
-    fn columns_that_cannot_shrink_run_past_the_edge() {
+    fn a_name_keeps_its_least_width_past_the_edge() {
         let fits = [fit(300), whole(70), whole(120)];
-        assert_eq!(fill_widths(&fits, Px(100)), [Px(0), Px(70), Px(120)]);
+        assert_eq!(fill_widths(&fits, Px(100)), [Px(150), Px(70), Px(120)]);
     }
 
     /// Each fill measures every shown cell and sets every width, so a
@@ -415,7 +597,7 @@ mod tests {
     #[test]
     fn a_layout_at_the_width_filled_last_fills_nothing() {
         let calls = Cell::new(0);
-        let mut sizing = ColumnSizing::default();
+        let mut sizing = ColumnSizing::new(true);
         assert_eq!(
             sizing.resized(Px(800), measure(&calls)),
             Some(vec![Px(200), Px(600)])
@@ -430,7 +612,7 @@ mod tests {
     #[test]
     fn a_drag_measures_once_and_again_at_its_end() {
         let calls = Cell::new(0);
-        let mut sizing = ColumnSizing::default();
+        let mut sizing = ColumnSizing::new(true);
         sizing.drag_started();
         assert_eq!(sizing.drag_ended(Px(800), measure(&calls)), None);
         sizing.drag_started();
@@ -442,38 +624,153 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert!(sizing.drag_ended(Px(400), measure(&calls)).is_some());
         assert_eq!(calls.get(), 2);
-        assert!(!sizing.is_dragging());
     }
 
     /// The widths are in the old DPI's pixels, so the same width in pixels
-    /// on the new monitor fills again.
+    /// on the new monitor fills again; with Auto fit off, the person's
+    /// widths keep their size.
     #[test]
-    fn a_dpi_change_fills_the_same_width_again() {
+    fn a_dpi_change_fills_again_or_scales_the_kept_widths() {
         let calls = Cell::new(0);
-        let mut sizing = ColumnSizing::default();
+        let mut sizing = ColumnSizing::new(true);
         sizing.resized(Px(800), measure(&calls));
-        sizing.dpi_changed();
+        assert_eq!(sizing.dpi_changed(&[Px(90)], dpi(96), dpi(144)), None);
         assert!(sizing.resized(Px(800), measure(&calls)).is_some());
+
+        let mut kept = ColumnSizing::new(false);
+        assert_eq!(
+            kept.dpi_changed(&[Px(90)], dpi(96), dpi(144)),
+            Some(vec![Px(135)])
+        );
     }
 
-    /// The first rows fill the columns once, and a drag that follows
-    /// measures them rather than scaling fits of the headers alone.
+    /// Before any fill measured rows, the first rows fill at once, and a
+    /// drag that follows scales their fits, not those of the headers
+    /// alone.
     #[test]
-    fn the_first_rows_fill_once_and_a_drag_measures_them() {
+    fn the_first_rows_fill_once_and_a_drag_scales_their_fits() {
         let calls = Cell::new(0);
-        let mut sizing = ColumnSizing::default();
+        let mut sizing = ColumnSizing::new(true);
         sizing.drag_started();
+        sizing.resized(Px(800), || vec![empty(100)]);
+        assert!(matches!(
+            sizing.rows_shown(Px(800), measure(&calls)),
+            Fill::Widths(_)
+        ));
+        assert_eq!(sizing.rows_shown(Px(800), measure(&calls)), Fill::Wait);
+        assert_eq!(
+            sizing.resized(Px(700), measure(&calls)),
+            Some(vec![Px(175), Px(525)])
+        );
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// A different list shows without a measure and fills after the wait,
+    /// so a person who moves through folders or types never waits for a
+    /// fill, and a sort's first order fills at once.
+    #[test]
+    fn a_different_list_waits_and_a_new_order_fills_at_once() {
+        let calls = Cell::new(0);
+        let mut sizing = ColumnSizing::new(true);
         sizing.resized(Px(800), measure(&calls));
-        assert!(sizing.rows_arrived(Px(800), measure(&calls)).is_some());
-        assert_eq!(sizing.rows_arrived(Px(800), measure(&calls)), None);
-        sizing.resized(Px(700), measure(&calls));
-        assert_eq!(calls.get(), 3);
+        let current = [Px(200), Px(600)];
+        sizing.new_rows(NewRows::Different);
+        assert_eq!(sizing.rows_shown(Px(800), measure(&calls)), Fill::Wait);
+        assert_eq!(calls.get(), 1);
+        assert!(sizing.waited(&current, Px(800), measure(&calls)).is_some());
+        assert_eq!(sizing.waited(&current, Px(800), measure(&calls)), None);
+        sizing.new_rows(NewRows::Order);
+        sizing.new_rows(NewRows::Different);
+        assert!(matches!(
+            sizing.rows_shown(Px(800), measure(&calls)),
+            Fill::Widths(_)
+        ));
+    }
+
+    /// A list that shows nothing, such as an empty folder, keeps the widths
+    /// when its wait ends, and the list after it waits as any different
+    /// list does, also after a resize while the empty one showed, so
+    /// leaving an empty folder never measures in the frame that shows the
+    /// next one.
+    #[test]
+    fn a_list_after_an_empty_one_waits() {
+        let calls = Cell::new(0);
+        let mut sizing = ColumnSizing::new(true);
+        sizing.resized(Px(800), measure(&calls));
+        let nothing = || vec![empty(100), empty(100)];
+        sizing.new_rows(NewRows::Different);
+        assert_eq!(sizing.rows_shown(Px(800), nothing), Fill::Wait);
+        assert_eq!(sizing.waited(&[Px(200), Px(600)], Px(800), nothing), None);
+        assert!(sizing.resized(Px(700), nothing).is_some());
+        sizing.new_rows(NewRows::Different);
+        assert_eq!(sizing.rows_shown(Px(700), measure(&calls)), Fill::Wait);
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// Rows that change measure nothing; the wait that the first of them
+    /// starts measures once for the whole burst, and fills only for a cut
+    /// value.
+    #[test]
+    fn a_burst_of_updates_measures_once_after_the_wait() {
+        let calls = Cell::new(0);
+        let mut sizing = ColumnSizing::new(true);
+        sizing.resized(Px(800), measure(&calls));
+        assert_eq!(sizing.rows_shown(Px(800), measure(&calls)), Fill::Wait);
+        assert_eq!(sizing.rows_shown(Px(800), measure(&calls)), Fill::Keep);
+        assert_eq!(calls.get(), 1);
+        let current = [Px(200), Px(600)];
+        assert_eq!(sizing.waited(&current, Px(800), measure(&calls)), None);
+        assert_eq!(calls.get(), 2);
+    }
+
+    /// Each new top row, which a key such as Page Down also brings, starts
+    /// the wait again, and a draw from the same row starts nothing, so
+    /// drawing a row again never measures.
+    #[test]
+    fn a_scroll_starts_the_wait_again_at_each_new_top_row() {
+        let calls = Cell::new(0);
+        let mut sizing = ColumnSizing::new(true);
+        sizing.resized(Px(800), measure(&calls));
+        sizing.drawn_from(0);
+        assert!(!sizing.drawn_from(0));
+        assert!(sizing.drawn_from(36));
+        assert!(sizing.drawn_from(72));
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// A longer value fills a column at its fit after the wait; one that
+    /// the person dragged narrower than its fit keeps its width.
+    #[test]
+    fn a_cut_value_fills_only_a_column_as_wide_as_its_fit() {
+        let mut sizing = ColumnSizing::new(true);
+        sizing.resized(Px(370), || vec![fit(300), whole(70)]);
+        let longer = || vec![fit(300), whole(90)];
+        sizing.rows_shown(Px(370), longer);
+        assert!(sizing.waited(&[Px(300), Px(70)], Px(370), longer).is_some());
+        sizing.rows_shown(Px(370), longer);
+        assert_eq!(sizing.waited(&[Px(300), Px(60)], Px(370), longer), None);
+    }
+
+    /// With Auto fit off nothing fills by itself; switching it on fills.
+    #[test]
+    fn auto_fit_off_keeps_every_width_until_switched_on() {
+        let calls = Cell::new(0);
+        let mut sizing = ColumnSizing::new(false);
+        assert_eq!(sizing.resized(Px(800), measure(&calls)), None);
+        sizing.new_rows(NewRows::Order);
+        assert_eq!(sizing.rows_shown(Px(800), measure(&calls)), Fill::Keep);
+        assert_eq!(calls.get(), 0);
+        assert!(
+            sizing
+                .set_automatic(true, Px(800), measure(&calls))
+                .is_some()
+        );
     }
 
     /// A column shown again gets the width it had, at the DPI of now.
     #[test]
     fn a_column_shown_again_gets_its_width_back() {
-        let mut sizing = ColumnSizing::default();
+        let mut sizing = ColumnSizing::new(true);
         sizing.column_hidden(Column::Size, Px(90), dpi(96));
         assert_eq!(sizing.column_shown(Column::Size, dpi(192)), Some(Px(180)));
         assert_eq!(sizing.column_shown(Column::Path, dpi(96)), None);

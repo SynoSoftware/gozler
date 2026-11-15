@@ -296,10 +296,7 @@ impl SettingsBridge {
             window.dates.borrow_mut().format = edited.date_format;
             window.follow_dates(hwnd);
             if edited.size_format != last.size_format {
-                let width = window.controls().search.fill_width();
-                let widths = (window.controls().search.column_sizing.borrow_mut())
-                    .window_shown(width, || window.controls().search.column_fits(window));
-                (window.controls().search.list).set_column_widths(widths.into_iter().enumerate());
+                window.controls().search.fill(window);
             }
             window.controls().panels.fill_panel_columns(window);
             window.controls().search.list.redraw_visible();

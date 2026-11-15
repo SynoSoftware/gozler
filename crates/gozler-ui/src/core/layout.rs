@@ -160,7 +160,7 @@ const SCROLL_BAR: Dip = Dip(17);
 /// The lines one notch of the mouse wheel scrolls, as Windows' default.
 const WHEEL_LINES: i32 = 3;
 /// One notch of the mouse wheel, `WHEEL_DELTA`.
-const WHEEL_DELTA: i32 = 120;
+pub(crate) const WHEEL_DELTA: i32 = 120;
 const LIST_MIN_WIDTH: Dip = Dip(300);
 /// A list row is this much taller than its font, as File Explorer's.
 const ROW_PADDING: Dip = Dip(7);

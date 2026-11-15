@@ -78,7 +78,8 @@
     "extension": "&Extension",
     "attributes": "&Attributes",
     "fit": "&Fit column “{0}”",
-    "fit_columns": "Fit &columns"
+    "fit_columns": "Fit &columns",
+    "auto_fit": "A&uto fit"
   },
   "header": {
     "name": "Name",

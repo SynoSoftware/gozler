@@ -78,7 +78,8 @@
     "extension": "&Uzantı",
     "attributes": "Ö&znitelikler",
     "fit": "\"{0}\" sütununu sığdı&r",
-    "fit_columns": "&Sütunları sığdır"
+    "fit_columns": "&Sütunları sığdır",
+    "auto_fit": "O&tomatik sığdır"
   },
   "header": {
     "name": "Ad",

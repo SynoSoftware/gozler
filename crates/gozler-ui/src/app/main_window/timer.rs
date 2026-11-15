@@ -20,6 +20,8 @@ pub(super) enum Timer {
     NativeSelection,
     OperationDelivery,
     StatusNotice,
+    /// A list's columns fill when it runs out (DESIGN.md: Results list).
+    ColumnFill(List),
 }
 
 const IDS: &[(Timer, usize)] = &[
@@ -49,6 +51,9 @@ const IDS: &[(Timer, usize)] = &[
     (Timer::PanelReading(Side::Left), 26),
     (Timer::PanelReading(Side::Right), 27),
     (Timer::StatusNotice, 28),
+    (Timer::ColumnFill(List::Search), 29),
+    (Timer::ColumnFill(List::Panel(Side::Left)), 30),
+    (Timer::ColumnFill(List::Panel(Side::Right)), 31),
 ];
 
 impl Timer {

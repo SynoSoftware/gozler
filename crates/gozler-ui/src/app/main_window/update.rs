@@ -288,11 +288,13 @@ impl MainWindow {
             Effect::RunSetup(setup) => self.run_setup(setup),
             Effect::ShowColumn { index, column } => {
                 let header = captions::header(self.model.borrow().strings(), column);
-                let width = (controls.search.column_sizing.borrow_mut())
-                    .column_shown(column, hwnd.dpi())
+                let shown_before =
+                    (controls.search.column_sizing.borrow_mut()).column_shown(column, hwnd.dpi());
+                let width = shown_before
                     .or_else(|| {
-                        let fit = controls.search.fits_of(self, index..index + 1);
-                        fit.first().map(|fit| fit.widest)
+                        let fit = *controls.search.fits_of(self, index..index + 1).first()?;
+                        (controls.search.column_sizing.borrow_mut()).column_fitted(fit);
+                        Some(fit.widest)
                     })
                     .unwrap_or_default();
                 controls.search.list.insert_column(
@@ -329,9 +331,13 @@ impl MainWindow {
                 } else {
                     control.set_count(count);
                 }
-                self.grow_extension(list);
+                self.rows_shown(list);
             }
-            Effect::Redraw { list, rows } => self.list_control(list).redraw_rows(rows),
+            Effect::Redraw { list, rows } => {
+                self.list_control(list).redraw_rows(rows);
+                // Bold matches and refreshed values can be wider.
+                self.rows_shown(list);
+            }
             Effect::Deselect { list, rows } => self.show_list_taken(list, rows),
             Effect::PreparePanel(side) => self.controls().panels.show_panel_kind(self, side),
             Effect::Layout => self.layout(hwnd),
@@ -351,10 +357,10 @@ impl MainWindow {
             }
             Effect::ReleaseOperations => self.release_operations(),
             Effect::FetchVisible(list) => self.fetch_visible(list),
-            Effect::FillFirstRows(list) => match list {
-                List::Search => controls.search.fill_around_first_rows(self),
-                List::Panel(side) => controls.panels.fill_panel(self, side),
-            },
+            Effect::NewRows(list, rows) => {
+                self.column_sizing(list).borrow_mut().new_rows(rows);
+                self.rows_shown(list);
+            }
             Effect::EnterFirst(ask) => self.defer(hwnd, ModalStep::EnterFirst(ask)),
             Effect::ReadMemory => {
                 let accepted = self.read_app_memory();

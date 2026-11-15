@@ -24,6 +24,7 @@ impl Search {
         parent: Hwnd,
         row: SearchRow,
         message_buttons: [Button; 2],
+        auto_fit: bool,
     ) -> windows::core::Result<Self> {
         Ok(Self {
             row,
@@ -34,7 +35,7 @@ impl Search {
             list: ListView::create(parent, ControlId::List.id())?,
             select_on_click: Cell::new(false),
             column_dragged: Cell::new(false),
-            column_sizing: RefCell::default(),
+            column_sizing: RefCell::new(ColumnSizing::new(auto_fit)),
             selection_pending: Cell::new(false),
         })
     }
@@ -199,34 +200,10 @@ impl Search {
         }
     }
 
-    /// The person ended a drag of the window's border or title bar
-    /// ([`ColumnSizing::drag_ended`]).
-    pub(super) fn end_sizing(&self, window: &MainWindow) {
+    /// Fills the list's width now ([`ColumnSizing::fill`]).
+    pub(super) fn fill(&self, window: &MainWindow) {
         let width = self.fill_width();
-        let widths =
-            (self.column_sizing.borrow_mut()).drag_ended(width, || self.column_fits(window));
-        if let Some(widths) = widths {
-            self.list.set_column_widths(widths.into_iter().enumerate());
-        }
-    }
-
-    /// Fills the list's width once the first rows on screen arrive
-    /// ([`ColumnSizing::rows_arrived`]).
-    pub(super) fn fill_around_first_rows(&self, window: &MainWindow) {
-        let first = self.list.visible_rows().start;
-        if window
-            .model
-            .borrow()
-            .search_list()
-            .results()
-            .row(first)
-            .is_none()
-        {
-            return;
-        }
-        let width = self.fill_width();
-        let widths =
-            (self.column_sizing.borrow_mut()).rows_arrived(width, || self.column_fits(window));
+        let widths = (self.column_sizing.borrow_mut()).fill(width, || self.column_fits(window));
         if let Some(widths) = widths {
             self.list.set_column_widths(widths.into_iter().enumerate());
         }
@@ -241,12 +218,9 @@ impl Search {
     /// a double-click on its divider and Fit column do; the others keep
     /// their widths.
     pub(super) fn fit_column(&self, window: &MainWindow, index: usize) {
-        if let Some(fit) = self.fits_of(window, index..index + 1).first() {
-            window
-                .controls()
-                .search
-                .list
-                .set_column_width(index, fit.widest);
+        if let Some(&fit) = self.fits_of(window, index..index + 1).first() {
+            self.list.set_column_width(index, fit.widest);
+            self.column_sizing.borrow_mut().column_fitted(fit);
         }
     }
 
@@ -361,10 +335,7 @@ impl Search {
                 if let Some(fetch) = fetch {
                     window.start(fetch);
                 }
-                Some(LRESULT(0))
-            }
-            ListNotify::ScrollEnded => {
-                window.grow_extension(List::Search);
+                window.rows_drawn(List::Search);
                 Some(LRESULT(0))
             }
             ListNotify::ColumnClick(index) => {

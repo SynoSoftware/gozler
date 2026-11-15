@@ -11,7 +11,7 @@ use crate::core::commands::{self, CommandId, Mark, MenuItem, MenuNode, PanelActi
 use crate::core::fetch::{List, Purpose};
 use crate::core::ids::ControlId;
 use crate::core::ids::DialogId;
-use crate::core::layout::column_sizing::{self, ColumnFit};
+use crate::core::layout::column_sizing::{ColumnFit, ColumnSizing, NewRows};
 use crate::core::layout::{Body, PanelLayout, Px, Rect};
 use crate::core::model::{Accepted, Areas, Effect, Navigation, TakenShown};
 use crate::core::open::{Entries, EntryAction};
@@ -88,6 +88,9 @@ pub(super) struct PanelControls {
     /// panel: which controls show, the list's columns, and the status
     /// line's parts ([`Panels::show_panel_kind`]).
     pub(super) kind: Cell<Option<LookIn>>,
+    /// When the list's columns fill. A panel has no header menu, so Auto
+    /// fit stays on.
+    pub(super) column_sizing: std::cell::RefCell<ColumnSizing>,
 }
 
 impl PanelControls {
@@ -157,6 +160,7 @@ impl PanelControls {
             free: Label::create_right_heading(parent, free)?,
             folder: Label::create_right_path(parent, folder)?,
             kind: Cell::new(None),
+            column_sizing: std::cell::RefCell::new(ColumnSizing::new(true)),
         };
         controls.list.focus_on_click()?;
         // The panel's fills give the widths.
@@ -767,51 +771,39 @@ impl Panels {
         controls.key_bar.set_captions(captions);
     }
 
-    /// Fills each panel's list with its columns (DESIGN.md: A panel).
+    /// Fills each panel's list with its columns now, as when the panel's
+    /// columns or the size unit change ([`ColumnSizing::fill`]).
     pub(super) fn fill_panel_columns(&self, window: &MainWindow) {
-        self.fill_panel_columns_at(
-            window,
-            Side::BOTH.map(|side| Some(self.panel(side).list.fill_width())),
-        );
-    }
-
-    pub(super) fn fill_panel_columns_at(&self, window: &MainWindow, available: [Option<Px>; 2]) {
-        for (side, available) in Side::BOTH.into_iter().zip(available) {
-            if let Some(available) = available {
-                self.fill_panel_at(window, side, available);
+        for side in Side::BOTH {
+            let c = self.panel(side);
+            let widths = (c.column_sizing.borrow_mut())
+                .fill(c.list.fill_width(), || self.panel_fits(window, side));
+            if let Some(widths) = widths {
+                c.list.set_column_widths(widths.into_iter().enumerate());
             }
         }
     }
 
-    /// Fills `side`'s list with its columns when its rows changed.
-    pub(super) fn fill_panel(&self, window: &MainWindow, side: Side) {
-        self.fill_panel_at(window, side, self.panel(side).list.fill_width());
-    }
-
-    /// Fills `available`, the list's [`ListView::fill_width`], with `side`'s
-    /// columns as Search fills its list ([`column_sizing::fill_widths`]),
-    /// so the rows reach the divider and a folder whose rows bring the
-    /// vertical scroll bar brings no horizontal one.
-    fn fill_panel_at(&self, window: &MainWindow, side: Side, available: Px) {
-        let widths = column_sizing::fill_widths(&self.panel_fits(window, side), available);
-        self.panel(side)
-            .list
-            .set_column_widths(widths.into_iter().enumerate());
+    /// Fills each panel whose list's [`ListView::fill_width`] is now
+    /// `available` ([`ColumnSizing::resized`]), so the rows reach the
+    /// divider and a folder whose rows bring the vertical scroll bar
+    /// brings no horizontal one.
+    pub(super) fn fill_panel_columns_at(&self, window: &MainWindow, available: [Option<Px>; 2]) {
+        for (side, available) in Side::BOTH.into_iter().zip(available) {
+            let Some(available) = available else { continue };
+            let c = self.panel(side);
+            let widths =
+                (c.column_sizing.borrow_mut()).resized(available, || self.panel_fits(window, side));
+            if let Some(widths) = widths {
+                c.list.set_column_widths(widths.into_iter().enumerate());
+            }
+        }
     }
 
     /// The fits of `side`'s columns: each fits its header and its cells in
     /// [`ListView::fit_rows`], within the limits of Search's column of the
     /// same kind, as Search's columns do.
-    fn panel_fits(&self, window: &MainWindow, side: Side) -> Vec<ColumnFit> {
-        self.panel_fits_of(window, side, 0..self.panel(side).columns().len())
-    }
-
-    pub(super) fn panel_fits_of(
-        &self,
-        window: &MainWindow,
-        side: Side,
-        indexes: std::ops::Range<usize>,
-    ) -> Vec<ColumnFit> {
+    pub(super) fn panel_fits(&self, window: &MainWindow, side: Side) -> Vec<ColumnFit> {
         let c = self.panel(side);
         let (rows, label) = c.list.fit_rows();
         // The model is borrowed while the texts are formatted, and the
@@ -825,7 +817,6 @@ impl Panels {
             let panels = model.panels();
             let panel = panels.panel(side);
             (c.columns().iter().enumerate())
-                .filter(|(index, _)| indexes.contains(index))
                 .map(|(index, &column)| MeasuredColumn {
                     column: column.search_column(),
                     first: index == 0,
@@ -843,32 +834,6 @@ impl Panels {
                 .collect::<Vec<_>>()
         };
         measure_fits(window, measured, label)
-    }
-
-    /// Gives Name the room the other columns leave in `side`'s list,
-    /// `width` wide, while the person drags the window's border, because
-    /// the rows the list shows change with its height and fits measured on
-    /// them would move every column. A search panel's Name and Folder
-    /// share the room as they shared it before.
-    pub(super) fn fill_name_column_at(&self, side: Side, width: Px) {
-        let c = self.panel(side);
-        let shared =
-            |column: &PanelColumn| matches!(column, PanelColumn::Name | PanelColumn::Folder);
-        let others = (c.columns().iter().enumerate())
-            .filter(|(_, column)| !shared(column))
-            .fold(Px(0), |sum, (index, _)| sum + c.list.column_width(index));
-        let room = (width - others).max(Px(0));
-        let widths = match c.columns().iter().position(|c| *c == PanelColumn::Folder) {
-            Some(folder) => {
-                let (name, path) = (c.list.column_width(0), c.list.column_width(folder));
-                let name =
-                    i64::from(room.0) * i64::from(name.0) / i64::from((name + path).0.max(1));
-                let name = Px(i32::try_from(name).expect("a part of the room fits in i32"));
-                vec![(0, name), (folder, room - name)]
-            }
-            None => vec![(0, room)],
-        };
-        c.list.set_column_widths(widths);
     }
 
     /// Starts reading both panels' folders, or a search panel's search,
@@ -1130,6 +1095,12 @@ impl Panels {
             return;
         }
         let shown = &update.before;
+        // Another folder, or the same folder in the new order that
+        // `sort_panel` announced, shows once the native selection shows its
+        // rows.
+        if matches!(update.kind, UpdatedKind::Listed { again: false }) {
+            (self.panel(side).column_sizing.borrow_mut()).new_rows(NewRows::Different);
+        }
         let listed = matches!(update.kind, UpdatedKind::Listed { .. });
         if listed {
             let list = List::Panel(side);
@@ -1442,7 +1413,7 @@ impl Panels {
             let hwnd = window.controls().search.row.input.hwnd().parent();
             self.apply_panel_update(window, hwnd, side, update);
         } else {
-            self.fill_panel(window, side);
+            window.rows_shown(List::Panel(side));
             self.show_panel(window, side);
         }
         window.start_list_passes();
@@ -1452,6 +1423,9 @@ impl Panels {
     /// rows follow when the reading thread has listed them in that order,
     /// or when gozlerd has sorted a search panel's search again.
     pub(super) fn sort_panel(&self, window: &MainWindow, hwnd: Hwnd, side: Side, sort: SortSpec) {
+        if sort != window.model.borrow().panels().panel(side).sort() {
+            (self.panel(side).column_sizing.borrow_mut()).new_rows(NewRows::Order);
+        }
         let ask = window.model.borrow_mut().panels_mut().sort(side, sort);
         let searches = window.model.borrow().panels().search(side).is_some();
         match ask {
@@ -1947,10 +1921,7 @@ impl Panels {
             // it shows.
             ListNotify::CacheHint(_) => {
                 window.fetch_visible(List::Panel(side));
-                Some(LRESULT(0))
-            }
-            ListNotify::ScrollEnded => {
-                self.fill_panel(window, side);
+                window.rows_drawn(List::Panel(side));
                 Some(LRESULT(0))
             }
             ListNotify::ColumnClick(index) => {

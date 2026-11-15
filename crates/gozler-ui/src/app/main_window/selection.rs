@@ -1143,7 +1143,7 @@ impl MainWindow {
         self.retire_selection(update);
         control.redraw_visible();
         if let List::Panel(side) = list {
-            self.controls().panels.fill_panel(self, side);
+            self.rows_shown(list);
             self.controls().panels.show_panel(self, side);
         }
         self.controls().key_bar.update_key_bar(self);

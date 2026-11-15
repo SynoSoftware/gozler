@@ -78,7 +78,8 @@
     "extension": "&Extensie",
     "attributes": "&Kenmerken",
     "fit": "Kolom ‘{0}’ passend &maken",
-    "fit_columns": "Kolommen passend m&aken"
+    "fit_columns": "Kolommen passend m&aken",
+    "auto_fit": "A&utomatisch passend maken"
   },
   "header": {
     "name": "Naam",

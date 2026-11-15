@@ -16,6 +16,7 @@ use super::fetch::{
 use super::file_operations::{self, StatusOperation};
 use super::fixer::{FixEvent, FixWork, Fixer, SetupEvent, SetupFix, SetupResult};
 pub(crate) use super::inspector::AgeTimer;
+use super::layout::column_sizing::NewRows;
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
 use super::operations::{OperationSteps, QueueStep, Source};
@@ -1427,6 +1428,21 @@ impl Model {
         }
     }
 
+    pub(crate) fn auto_fit(&self) -> bool {
+        self.settings.window.auto_fit
+    }
+
+    /// Switches Auto fit of the results list's header menu (DESIGN.md:
+    /// Results list).
+    pub(crate) fn toggle_auto_fit(&mut self) -> Accepted {
+        let window = &mut self.settings.window;
+        window.auto_fit = !window.auto_fit;
+        Accepted {
+            touched: Areas::NONE,
+            effects: vec![Effect::NoteSavedState],
+        }
+    }
+
     /// Shows or hides the filter pane (DESIGN.md: C13).
     pub(crate) fn toggle_filter_pane(&mut self) -> Accepted {
         let window = &mut self.settings.window;
@@ -2769,9 +2785,20 @@ impl Model {
                 let shown = self
                     .list_mut(list)
                     .expect("accept checked that the list waits");
+                let sort = shown.results.shown_ask().map(|ask| ask.sort);
                 let mut accepted = match shown.results.accept(generation, chunk) {
                     RowsChange::Stale => Accepted::default(),
                     RowsChange::NewSearch { count } => {
+                        // The person's sort orders the same files anew, so
+                        // the columns fill at once (DESIGN.md: Results list).
+                        let new_rows = match sort {
+                            Some(sort)
+                                if Some(sort) != shown.results.shown_ask().map(|a| a.sort) =>
+                            {
+                                NewRows::Order
+                            }
+                            _ => NewRows::Different,
+                        };
                         // A new search's rows are other files (DESIGN.md: T2),
                         // and the disk as it is now.
                         shown.set_selection(Selection::None);
@@ -2789,7 +2816,7 @@ impl Model {
                                     Effect::Cancel(Purpose::Selection(list)),
                                     Effect::ReleaseOperations,
                                     Effect::FetchVisible(list),
-                                    Effect::FillFirstRows(list),
+                                    Effect::NewRows(list, new_rows),
                                     Effect::InspectAge,
                                 ],
                             };
@@ -2812,7 +2839,6 @@ impl Model {
                         effects: vec![
                             Effect::Rows { list, rows, count },
                             Effect::FetchVisible(list),
-                            Effect::FillFirstRows(list),
                             Effect::InspectAge,
                         ],
                     },
@@ -4119,7 +4145,7 @@ pub(crate) mod tests {
                     Effect::Cancel(Purpose::Selection(List::Search)),
                     Effect::ReleaseOperations,
                     Effect::FetchVisible(List::Search),
-                    Effect::FillFirstRows(List::Search),
+                    Effect::NewRows(List::Search, NewRows::Different),
                     Effect::InspectAge,
                     Effect::MarkMatches(List::Search),
                     Effect::Polling,
@@ -4144,7 +4170,7 @@ pub(crate) mod tests {
                     Effect::Cancel(Purpose::Selection(List::Panel(Side::Left))),
                     Effect::ReleaseOperations,
                     Effect::FetchVisible(List::Panel(Side::Left)),
-                    Effect::FillFirstRows(List::Panel(Side::Left)),
+                    Effect::NewRows(List::Panel(Side::Left), NewRows::Different),
                     Effect::InspectAge,
                     Effect::MarkMatches(List::Panel(Side::Left)),
                     Effect::Polling,
@@ -4374,7 +4400,7 @@ pub(crate) mod tests {
                     Effect::Cancel(Purpose::Selection(List::Search)),
                     Effect::ReleaseOperations,
                     Effect::FetchVisible(List::Search),
-                    Effect::FillFirstRows(List::Search),
+                    Effect::NewRows(List::Search, NewRows::Different),
                     Effect::InspectAge,
                     Effect::MarkMatches(List::Search),
                     Effect::Polling,
@@ -5425,7 +5451,7 @@ pub(crate) mod tests {
                     Effect::Cancel(Purpose::Selection(List::Search)),
                     Effect::ReleaseOperations,
                     Effect::FetchVisible(List::Search),
-                    Effect::FillFirstRows(List::Search),
+                    Effect::NewRows(List::Search, NewRows::Different),
                     Effect::InspectAge,
                     Effect::MarkMatches(List::Search),
                     Effect::Polling,

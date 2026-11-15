@@ -736,6 +736,10 @@ pub(crate) struct WindowState {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub(crate) columns: Vec<SavedColumn>,
+    /// Whether the results list's columns fill by themselves: Auto fit
+    /// in the header's menu (DESIGN.md: Results list).
+    #[serde(default = "on", deserialize_with = "on_or_default")]
+    pub(crate) auto_fit: bool,
     /// Whether the filter pane shows (DESIGN.md: C13).
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) filter_pane: bool,
@@ -794,6 +798,7 @@ impl Default for WindowState {
             matching: matching(),
             sort: SortSpec::default(),
             columns: Vec::new(),
+            auto_fit: on(),
             filter_pane: on(),
             filters: Filters::default(),
             inspector: on(),
@@ -1418,6 +1423,7 @@ mod tests {
                         column: Column::Name,
                     },
                 ],
+                auto_fit: false,
                 filter_pane: false,
                 filters: Filters {
                     kind: Kind::Documents,

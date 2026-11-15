@@ -1259,6 +1259,9 @@ pub(crate) enum MenuItem {
     FitColumn(Column),
     /// Fits every shown column, of the header's menu.
     FitColumns,
+    /// Switches whether the columns fill by themselves, of the header's
+    /// menu.
+    AutoFit,
     SortKey(SortKey),
     SortDirection(SortDir),
     /// `None` is Windows default, else an index into [`LANGUAGES`].
@@ -1342,6 +1345,7 @@ impl MenuItem {
                 0x600 + index(Column::ALL.iter().position(|c| *c == column))
             }
             MenuItem::FitColumns => 0x700,
+            MenuItem::AutoFit => 0x701,
             MenuItem::Mode(mode) => 0x900 + index(Mode::ALL.iter().position(|m| *m == mode)),
             MenuItem::Panel(action) => {
                 0x800 + index(PanelAction::ALL.iter().position(|a| *a == action))
@@ -1361,6 +1365,7 @@ impl MenuItem {
             0x500 if n <= LANGUAGES.len() => Some(MenuItem::Language(Some(n - 1))),
             0x600 => Column::ALL.get(n).copied().map(MenuItem::FitColumn),
             0x700 if n == 0 => Some(MenuItem::FitColumns),
+            0x700 if n == 1 => Some(MenuItem::AutoFit),
             0x800 => PanelAction::ALL.get(n).copied().map(MenuItem::Panel),
             0x900 => Mode::ALL.get(n).copied().map(MenuItem::Mode),
             _ => None,
@@ -1382,6 +1387,7 @@ impl MenuItem {
                 return strings.format("column.fit", &[strings.text(column.row().header)]);
             }
             MenuItem::FitColumns => "column.fit_columns",
+            MenuItem::AutoFit => "column.auto_fit",
             MenuItem::Panel(_) => return String::new(),
         };
         strings.text(key).to_owned()
@@ -1416,9 +1422,10 @@ impl MenuItem {
             MenuItem::Run(command) => command,
             MenuItem::Mode(Mode::Search) => CommandId::ShowSearch,
             MenuItem::Mode(Mode::Commander) => CommandId::Commander,
-            MenuItem::Column(_) | MenuItem::FitColumn(_) | MenuItem::FitColumns => {
-                CommandId::Columns
-            }
+            MenuItem::Column(_)
+            | MenuItem::FitColumn(_)
+            | MenuItem::FitColumns
+            | MenuItem::AutoFit => CommandId::Columns,
             MenuItem::SortKey(_) | MenuItem::SortDirection(_) => CommandId::SortBy,
             MenuItem::Language(_) => CommandId::Language,
             MenuItem::Panel(_) => CommandId::Commander,
@@ -1452,6 +1459,7 @@ impl MenuItem {
             MenuItem::Column(_)
             | MenuItem::FitColumn(_)
             | MenuItem::FitColumns
+            | MenuItem::AutoFit
             | MenuItem::SortKey(_)
             | MenuItem::SortDirection(_)
             | MenuItem::Language(_)
@@ -1465,7 +1473,7 @@ impl MenuItem {
                 Some(_) => Mark::Check,
                 None => Mark::None,
             },
-            MenuItem::Column(_) => Mark::Check,
+            MenuItem::Column(_) | MenuItem::AutoFit => Mark::Check,
             MenuItem::Mode(_)
             | MenuItem::FitColumn(_)
             | MenuItem::FitColumns
@@ -1482,6 +1490,7 @@ impl MenuItem {
             MenuItem::Run(command) => command.row().checked.is_some_and(|checked| checked(state)),
             MenuItem::Mode(_) => false,
             MenuItem::Column(column) => model.columns.contains(&column),
+            MenuItem::AutoFit => model.settings.window.auto_fit,
             MenuItem::FitColumn(_) | MenuItem::FitColumns | MenuItem::Panel(_) => false,
             MenuItem::SortKey(key) => model.shown_sort().key == key,
             MenuItem::SortDirection(dir) => model.shown_sort().dir == dir,
@@ -1670,14 +1679,14 @@ pub(crate) enum MenuNode {
 }
 
 /// The header's context menu, opened on the header of `column` or on
-/// none (DESIGN.md: Results list): Fit column for that column, then Fit
-/// columns, then View > Columns' items (C15), as TableView's header menu
-/// orders them.
+/// none (DESIGN.md: Results list): Fit column for that column, then Auto
+/// fit and Fit columns, then View > Columns' items (C15), as TableView's
+/// header menu orders them.
 pub(crate) fn header_menu(column: Option<Column>) -> Vec<Vec<MenuItem>> {
     let active: Vec<MenuItem> = column.map(MenuItem::FitColumn).into_iter().collect();
     [
         active,
-        vec![MenuItem::FitColumns],
+        vec![MenuItem::AutoFit, MenuItem::FitColumns],
         Column::ALL.into_iter().map(MenuItem::Column).collect(),
     ]
     .into_iter()
