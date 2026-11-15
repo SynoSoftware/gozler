@@ -523,7 +523,11 @@ pub(super) fn offer_key(window: HWND, target: HWND, key: WPARAM, flags: LPARAM) 
 /// and the caller lets the message go on.
 fn route_other(root: HWND, msg: &MSG) -> bool {
     let own_keys = OWN_KEYS.with_borrow(|windows| windows.contains(&root));
-    if own_keys && msg.message == WM_KEYDOWN && offer_key(root, msg.hwnd, msg.wParam, msg.lParam) {
+    // F10 and the keys with Alt arrive as WM_SYSKEYDOWN.
+    if own_keys
+        && matches!(msg.message, WM_KEYDOWN | WM_SYSKEYDOWN)
+        && offer_key(root, msg.hwnd, msg.wParam, msg.lParam)
+    {
         return true;
     }
     if !own_keys {
@@ -1202,6 +1206,11 @@ pub(crate) fn shift_presses() -> u32 {
 /// Whether Shift was down when the message being handled was read.
 pub(crate) fn shift_held() -> bool {
     held(VK_SHIFT)
+}
+
+/// Whether Ctrl was down when the message being handled was read.
+pub(crate) fn ctrl_held() -> bool {
+    held(VK_CONTROL)
 }
 
 pub(crate) fn only_alt_held() -> bool {

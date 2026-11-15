@@ -1,35 +1,42 @@
-//! The Viewer windows (DESIGN.md: The Viewer): each `F3` on a file in a panel
-//! opens one, a top-level window that no window owns. `core::viewer_window`
-//! decides what a Viewer shows; this module gives it the blocks that the
-//! reader of [`super::work::viewers`] admits, and asks for the next block that the
-//! page or a move waits for, one at a time.
+//! The Viewer windows (DESIGN.md: The Viewer): each `F3` in a panel or in
+//! Search opens one, a top-level window that no window owns, of the focused
+//! file or of the chosen files, which `N` and `P` walk through.
+//! `core::viewer_window` decides what a Viewer shows; this module gives it
+//! the blocks that the reader of [`super::work::viewers`] admits, and asks
+//! for the next block that the page or a move waits for, one at a time.
 
+use super::dialogs::ViewerFind;
 use super::work::viewers::Reader;
-use crate::core::captions;
+use crate::core::captions::{self, DialogCaptions};
 use crate::core::clipboard::Publication;
-use crate::core::ids::{ControlId, IconId};
+use crate::core::commands::Keystroke;
+use crate::core::ids::{ControlId, DialogId, IconId};
 use crate::core::layout::{
-    Px, Rect, Size, image_button_width, status_last_part, viewer_message, viewer_message_width,
+    Px, Rect, Size, WHEEL_DELTA, image_button_width, status_last_part, viewer_message,
+    viewer_message_width,
 };
+use crate::core::open::Entries;
 use crate::core::settings::{Placement, ViewerState};
 use crate::core::text::{self, Strings};
 use crate::core::viewer::Mode;
+use crate::core::viewer::find::Query;
 use crate::core::viewer_window::{
-    Document, ScrollBar, Shown, TextAt, TooLarge, ViewerCommand, ViewerKey, file_text, menu_bar,
-    menu_states, place_samples, text_at, text_inset, text_room, viewer_key, waiting_layout,
+    DEFAULT_ZOOM, Document, MenuState, Reopening, ScrollBar, Shown, TextAt, TooLarge,
+    ViewerCommand, ViewerKey, file_text, menu_bar, menu_states, place_samples, text_at, text_inset,
+    text_room, title, viewer_key, waiting_layout, zoomed,
 };
 use crate::core::work::{Waiting, waiting};
 use crate::win::clipboard;
 use crate::win::controls::{Button, Label, StatusBar};
-use crate::win::dialog::error_box;
+use crate::win::dialog::{DialogEnd, error_box, info_box, run_modal};
 use crate::win::folder::Removal;
 use crate::win::gdi::{Font, TextMeter};
-use crate::win::locale::{WindowsNumbers, ansi_text};
+use crate::win::locale::{WindowsNumbers, code_page_text};
 use crate::win::menu::{Menu, replace_menu_bar};
 use crate::win::notify::Command;
 use crate::win::viewer::{
-    AREA_CLICKED, AREA_DOUBLE_CLICKED, AREA_PAINT, AreaText, ViewerEvent, caption_height,
-    create_area, paint_area, register_area, set_area_scroll,
+    AREA_CLICKED, AREA_DOUBLE_CLICKED, AREA_FOCUSED, AREA_PAINT, AreaText, ViewerEvent,
+    caption_height, create_area, paint_area, register_area, set_area_scroll, set_caret,
 };
 use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
@@ -44,6 +51,19 @@ const READ_TIMER: usize = 1;
 /// Scrolls toward the pointer while a drag holds it outside the area.
 const SCROLL_TIMER: usize = 2;
 
+/// What a Viewer shows.
+pub(super) enum Files {
+    /// One file, at its full path in UTF-16, which holds every name a
+    /// folder can hold.
+    One(Vec<u16>),
+    /// The files among the chosen entries, `focused` first when it is one
+    /// of them, and `focused`, a file, when none is.
+    Chosen {
+        entries: Entries,
+        focused: Option<Vec<u16>>,
+    },
+}
+
 /// The open Viewers, as the main window holds them, and what they remember
 /// in `ui.json`.
 pub(super) struct Viewers {
@@ -52,12 +72,14 @@ pub(super) struct Viewers {
     registered: Cell<bool>,
 }
 
-/// What every Viewer reaches: the open ones, which Exit closes, and the
-/// state the last one left, which the next one opens with.
+/// What every Viewer reaches: the open ones, which Exit closes, the state
+/// the last one left, which the next one opens with, and what Find looked
+/// for last.
 struct Shared {
     open: RefCell<Vec<Rc<Viewer>>>,
     state: Cell<ViewerState>,
     changed: Cell<bool>,
+    query: RefCell<Option<Query>>,
 }
 
 impl Viewers {
@@ -67,17 +89,17 @@ impl Viewers {
                 open: RefCell::new(Vec::new()),
                 state: Cell::new(state),
                 changed: Cell::new(false),
+                query: RefCell::new(None),
             }),
             registered: Cell::new(false),
         }
     }
 
-    /// Opens a Viewer of the file at `path`, a full path in UTF-16, which
-    /// holds every name a folder can hold, in front, worded with `strings`.
-    /// Closing it activates `main`, which opened it, while `main` shows.
+    /// Opens a Viewer of `files` in front, worded with `strings`. Closing
+    /// it activates `main`, which opened it, while `main` shows.
     pub(super) fn open(
         &self,
-        path: Vec<u16>,
+        files: Files,
         strings: Strings,
         main: Hwnd,
     ) -> windows::core::Result<()> {
@@ -95,8 +117,9 @@ impl Viewers {
         let viewer = Rc::new(Viewer {
             hwnd: Cell::new(None),
             shared: Rc::downgrade(&self.shared),
-            name: text::name_of(&String::from_utf16_lossy(&path)).to_owned(),
-            path,
+            files: RefCell::new(Vec::new()),
+            index: Cell::new(0),
+            name: RefCell::new(String::new()),
             main,
             strings: RefCell::new(strings),
             numbers: RefCell::new(WindowsNumbers::new()),
@@ -106,15 +129,18 @@ impl Viewers {
             reader: RefCell::new(None),
             waker: OnceCell::new(),
             resume: Cell::new(None),
-            in_flight: Cell::new(None),
             slow: Cell::new(false),
             read_timer: Cell::new(false),
             wrap: Cell::new(state.wrap),
+            zoom: Cell::new(state.zoom),
+            zoom_wheel: Cell::new(0),
             focused: Cell::new(None),
             dragging: Cell::new(false),
+            pressed: Cell::new(None),
+            asked: RefCell::new(Vec::new()),
         });
         let hwnd = window::create_window(WINDOW_CLASS, Rc::clone(&viewer), placement)?;
-        if let Err(error) = viewer.start(hwnd) {
+        if let Err(error) = viewer.start(hwnd, files) {
             hwnd.destroy();
             return Err(error);
         }
@@ -126,7 +152,7 @@ impl Viewers {
     }
 
     /// The state that `ui.json` saves: the last Viewer's size and place,
-    /// and Wrap long lines.
+    /// Wrap long lines and the text size.
     pub(super) fn state(&self) -> ViewerState {
         self.shared.state.get()
     }
@@ -207,7 +233,8 @@ struct Controls {
 
 struct Fonts {
     ui: Font,
-    /// Consolas, in which the area draws the file.
+    /// Consolas at the Viewer's text size, in which the area draws the
+    /// file.
     text: Font,
     char_width: Px,
     line_height: Px,
@@ -216,8 +243,12 @@ struct Fonts {
 struct Viewer {
     hwnd: Cell<Option<Hwnd>>,
     shared: Weak<Shared>,
-    path: Vec<u16>,
-    name: String,
+    /// The files the Viewer walks through, empty until the reader found
+    /// them among the chosen entries, and the one that shows.
+    files: RefCell<Vec<Vec<u16>>>,
+    index: Cell<usize>,
+    /// The shown file's name.
+    name: RefCell<String>,
     main: Hwnd,
     strings: RefCell<Strings>,
     numbers: RefCell<WindowsNumbers>,
@@ -228,20 +259,40 @@ struct Viewer {
     /// Wakes the window from the reading thread, which outlives it, until
     /// `WM_DESTROY` closes it.
     waker: OnceCell<OpenWaker>,
-    /// The mode and the first shown byte that the next opening of the file
-    /// shows again, after a removal or a failure.
-    resume: Cell<Option<(Mode, u64)>>,
-    /// The block asked for and not yet read, so a fast drag of the scroll
-    /// bar asks for one block at a time.
-    in_flight: Cell<Option<u64>>,
+    /// Where the next opening of the file shows it again, after a removal
+    /// or a failure. Reload shows the place of the page it keeps instead.
+    resume: Cell<Option<Reopening>>,
     slow: Cell<bool>,
     read_timer: Cell<bool>,
     wrap: Cell<bool>,
+    /// The text size in percent.
+    zoom: Cell<u16>,
+    /// The wheel's turn with Ctrl that is less than a notch, which a
+    /// touchpad sends in parts.
+    zoom_wheel: Cell<i32>,
     /// The control that had the focus when the window was deactivated.
     focused: Cell<Option<Hwnd>>,
     /// A drag over the text runs, and the window holds the mouse until the
     /// button goes up.
     dragging: Cell<bool>,
+    /// The key last pressed in this window. A held key's repeats follow
+    /// its first press, which a key held since before the window opened
+    /// did not send here.
+    pressed: Cell<Option<Keystroke>>,
+    /// Copy and Find that wait, in the order asked, until the reader can
+    /// start them: after the file opened, or after the Copy or Find that
+    /// runs. Each reads the page as it shows when it starts.
+    asked: RefCell<Vec<Asked>>,
+}
+
+/// Copy or Find, as the person asked for it.
+enum Asked {
+    Find {
+        query: Query,
+        backward: bool,
+    },
+    /// With the clipboard as it was then.
+    Copy(Publication),
 }
 
 impl Viewer {
@@ -250,8 +301,8 @@ impl Viewer {
     }
 
     /// Everything the new window needs before it shows: its keys, its
-    /// controls, menus and texts, and the reading of its file.
-    fn start(&self, hwnd: Hwnd) -> windows::core::Result<()> {
+    /// controls, menus and texts, and the reading of its files.
+    fn start(&self, hwnd: Hwnd, files: Files) -> windows::core::Result<()> {
         self.hwnd.set(Some(hwnd));
         window::own_keys(hwnd, true);
         let controls = Controls {
@@ -270,37 +321,104 @@ impl Viewer {
                 .expect("start sets the wake endpoint")
                 .clone(),
         )));
-        self.read_file(hwnd);
+        match files {
+            Files::One(path) => {
+                self.files.replace(vec![path]);
+                self.show_file(hwnd);
+            }
+            Files::Chosen { entries, focused } => {
+                if let Some(reader) = self.reader.borrow_mut().as_mut() {
+                    reader.files(entries, focused);
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// The shown file's full path; `None` before the reader found the
+    /// files.
+    fn path(&self) -> Option<Vec<u16>> {
+        self.files.borrow().get(self.index.get()).cloned()
+    }
+
+    /// Opens the file at `index` from its start, as `N` and `P` do.
+    fn show_file(&self, hwnd: Hwnd) {
+        let name = self
+            .path()
+            .map(|path| text::name_of(&String::from_utf16_lossy(&path)).to_owned());
+        self.name.replace(name.unwrap_or_default());
+        self.apply_title(hwnd);
+        self.read_file(hwnd);
     }
 
     /// Opens the file again from its start, or from `resume`.
     fn read_file(&self, hwnd: Hwnd) {
+        let Some(path) = self.path() else {
+            return;
+        };
         if let Some(reader) = self.reader.borrow_mut().as_mut() {
-            reader.open(self.path.clone());
+            reader.open(path);
         } else {
             return;
         }
-        self.in_flight.set(None);
         self.slow.set(false);
         self.set_shown(hwnd, Shown::Reading);
     }
 
+    /// `F2`: opens the file again and shows it where the page shows it once
+    /// it opened, and its new end when the page showed the end. The page
+    /// stays readable until then, and after Cancel, because the reader keeps
+    /// the old file open until the new one opened.
+    fn reload(&self, hwnd: Hwnd) {
+        let shows = self.shown.borrow().document().is_some();
+        match self.path() {
+            Some(path) if shows => {
+                if let Some(reader) = self.reader.borrow_mut().as_mut() {
+                    reader.open(path);
+                }
+            }
+            _ => self.read_file(hwnd),
+        }
+    }
+
+    /// `N` and `P`: shows the next or the previous of the files.
+    fn step_file(&self, hwnd: Hwnd, forward: bool) {
+        let count = self.files.borrow().len();
+        let index = self.index.get();
+        let next = if forward {
+            index + 1
+        } else {
+            let Some(previous) = index.checked_sub(1) else {
+                return;
+            };
+            previous
+        };
+        if next >= count {
+            return;
+        }
+        self.index.set(next);
+        self.resume.set(None);
+        self.show_file(hwnd);
+    }
+
     fn remember_place(&self) {
         if let Some(document) = self.shown.borrow().document() {
-            self.resume
-                .set(Some((document.mode(), document.first_byte())));
+            self.resume.set(Some(document.reopening()));
         }
     }
 
     fn set_shown(&self, hwnd: Hwnd, shown: Shown) {
+        // Copy and Find wait for a file that shows or opens, and no other.
+        if !matches!(shown, Shown::File(_) | Shown::Reading) {
+            self.asked.borrow_mut().clear();
+        }
         self.shown.replace(shown);
         self.show_message();
         self.layout(hwnd);
     }
 
-    /// Creates the fonts for the window's DPI and gives them to the
-    /// controls.
+    /// Creates the fonts for the window's DPI and text size and gives them
+    /// to the controls.
     fn apply_fonts(&self, hwnd: Hwnd) {
         let Some(c) = self.controls.get() else {
             return;
@@ -312,7 +430,9 @@ impl Viewer {
             control.set_font(&ui);
         }
         // At the height of the message font, which the message now has.
-        let Ok(text) = Font::monospace_of(c.message.hwnd()) else {
+        let text =
+            Font::monospace_of(c.message.hwnd()).and_then(|font| font.scaled(self.zoom.get()));
+        let Ok(text) = text else {
             return;
         };
         let (char_width, line_height) = {
@@ -333,13 +453,20 @@ impl Viewer {
         if self.controls.get().is_none() {
             return;
         }
-        {
-            let strings = self.strings.borrow();
-            hwnd.set_text(&strings.format("viewer.title", &[&self.name]));
-        }
+        self.apply_title(hwnd);
         self.apply_glyphs(hwnd);
         self.show_message();
         self.show();
+    }
+
+    fn apply_title(&self, hwnd: Hwnd) {
+        let file = (self.index.get(), self.files.borrow().len());
+        hwnd.set_text(&title(
+            &self.strings.borrow(),
+            &*self.numbers.borrow(),
+            &self.name.borrow(),
+            file,
+        ));
     }
 
     /// Gives the menus and Retry their icons, at the window's DPI, in the
@@ -357,17 +484,12 @@ impl Viewer {
             return;
         };
         let message = if self.slow.get() {
-            Some((
-                waiting(
-                    &self.strings.borrow(),
-                    Some(&String::from_utf16_lossy(&self.path)),
-                ),
-                true,
-            ))
+            let path = self.path().map(|path| String::from_utf16_lossy(&path));
+            Some((waiting(&self.strings.borrow(), path.as_deref()), true))
         } else {
             self.shown
                 .borrow()
-                .message(&self.strings.borrow(), &self.name)
+                .message(&self.strings.borrow(), &self.name.borrow())
         };
         let (text, retry) = message.clone().unwrap_or_default();
         let key = self.message_button();
@@ -473,14 +595,11 @@ impl Viewer {
             .shown
             .borrow_mut()
             .document_mut()
-            .and_then(|document| document.advance(&ansi_text));
+            .and_then(|document| document.advance(&code_page_text));
         if let Some(index) = waits
-            && self.in_flight.get().is_none()
             && let Some(reader) = self.reader.borrow_mut().as_mut()
-            && !reader.copying()
         {
             reader.read(index);
-            self.in_flight.set(Some(index));
         }
         self.show();
         if let Some(hwnd) = self.hwnd.get() {
@@ -512,16 +631,20 @@ impl Viewer {
         }
     }
 
+    /// Cancels the pending read, and Copy and Find that wait for it;
+    /// `false` when none is pending, or while the Viewer looks for its
+    /// files, without which it has nothing to show.
     fn cancel_read(&self, hwnd: Hwnd) -> bool {
-        if !self
-            .reader
-            .borrow_mut()
-            .as_mut()
-            .is_some_and(Reader::cancel)
+        if self.files.borrow().is_empty()
+            || !self
+                .reader
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(Reader::cancel)
         {
             return false;
         }
-        self.in_flight.set(None);
+        self.asked.borrow_mut().clear();
         self.slow.set(false);
         {
             let mut shown = self.shown.borrow_mut();
@@ -536,7 +659,7 @@ impl Viewer {
         true
     }
 
-    /// Shows the page, its scroll bar and the status bar.
+    /// Shows the page, its scroll bar, its caret and the status bar.
     fn show(&self) {
         let Some(c) = self.controls.get() else {
             return;
@@ -545,15 +668,33 @@ impl Viewer {
         let document = shown.document();
         let strings = self.strings.borrow();
         let numbers = self.numbers.borrow();
+        let name = self.name.borrow();
         set_area_scroll(
             c.area,
             document.map_or(ScrollBar::NONE, Document::scroll_bar),
         );
         c.status
-            .set_text(0, &file_text(&strings, &*numbers, &self.name, document));
+            .set_text(0, &file_text(&strings, &*numbers, &name, document));
         let place = document.map(|document| document.place(&strings, &*numbers));
         c.status.set_text(1, &place.unwrap_or_default());
         c.area.invalidate();
+        if let (Some(hwnd), Some(fonts)) = (self.hwnd.get(), self.fonts.borrow().as_ref()) {
+            let (left, top) = text_inset(hwnd.dpi());
+            let at = |count: usize, unit: Px| {
+                Px(i32::try_from(count)
+                    .unwrap_or(i32::MAX)
+                    .saturating_mul(unit.0))
+            };
+            let caret = document
+                .and_then(Document::caret_cell)
+                .map(|(row, column)| {
+                    (
+                        left + at(column, fonts.char_width),
+                        top + at(row, fonts.line_height),
+                    )
+                });
+            set_caret(c.area, caret, fonts.line_height, hwnd.dpi());
+        }
     }
 
     /// Paints the area; `false` before the window has its controls.
@@ -596,36 +737,70 @@ impl Viewer {
         let event = self.reader.borrow_mut().as_mut().and_then(Reader::take);
         if let Some(event) = event {
             let was_slow = self.slow.replace(false);
+            // After Copy or Find, the page asks again for the block whose
+            // read it replaced.
+            let go_on = || {
+                if was_slow {
+                    self.show_message();
+                    self.layout(hwnd);
+                } else {
+                    self.pump();
+                }
+            };
             match event {
+                ViewerEvent::Files { paths, first } => {
+                    let found = !paths.is_empty();
+                    self.files.replace(paths);
+                    self.index.set(first);
+                    if found {
+                        self.show_file(hwnd);
+                    } else {
+                        self.set_shown(hwnd, Shown::NoFiles);
+                    }
+                }
                 ViewerEvent::Opened { len, first } => {
+                    // Only Reload keeps a page while the file opens.
+                    let resume = self.resume.take();
+                    let at = self.shown.borrow().document().map(Document::reopening);
                     let mut document = Document::new(len, first, self.wrap.get());
-                    if let Some((mode, offset)) = self.resume.take() {
-                        document.jump_as(mode, offset);
+                    if let Some(at) = at.or(resume) {
+                        document.reopen(at);
                     }
                     self.set_shown(hwnd, Shown::File(Box::new(document)));
                 }
                 ViewerEvent::Block { index, bytes } => {
-                    self.in_flight.set(None);
                     if let Some(document) = self.shown.borrow_mut().document_mut() {
                         document.receive(index, bytes);
                     }
-                    if was_slow {
-                        self.show_message();
-                        self.layout(hwnd);
-                    } else {
-                        self.pump();
-                    }
+                    go_on();
                 }
                 ViewerEvent::Copied(copied) => {
-                    if was_slow {
-                        self.show_message();
-                        self.layout(hwnd);
-                    } else {
-                        self.pump();
-                    }
+                    go_on();
                     if let Err(failure) = copied {
                         let text = failure.message(&self.strings.borrow());
                         self.error_box(hwnd, &text);
+                    }
+                }
+                ViewerEvent::Found {
+                    encoding,
+                    looked_for,
+                    found,
+                } => {
+                    // An answer of another encoding has other places in the
+                    // text, and says nothing about the text that shows.
+                    let missing = match self.shown.borrow_mut().document_mut() {
+                        Some(document) if document.encoding() == encoding => match found {
+                            Some(found) => {
+                                document.show_found(found);
+                                false
+                            }
+                            None => true,
+                        },
+                        _ => false,
+                    };
+                    go_on();
+                    if missing {
+                        self.not_found(hwnd, &looked_for);
                     }
                 }
                 ViewerEvent::Failed { opened, reason } => {
@@ -633,6 +808,7 @@ impl Viewer {
                     self.set_shown(hwnd, Shown::Failed { opened, reason });
                 }
             }
+            self.start_asked(hwnd);
         }
         self.poll_read(hwnd);
     }
@@ -685,55 +861,75 @@ impl Viewer {
     }
 
     fn on_key(&self, hwnd: Hwnd, key: ViewerKey) {
-        if key == ViewerKey::Cancel {
-            if !self.cancel_read(hwnd) {
-                self.close(hwnd);
+        match key {
+            ViewerKey::Cancel => {
+                if !self.cancel_read(hwnd) {
+                    self.close(hwnd);
+                }
             }
-            return;
+            ViewerKey::Command(command) => self.on_command(hwnd, command),
+            ViewerKey::Move { motion, extend } => {
+                if let Some(document) = self.shown.borrow_mut().document_mut() {
+                    document.resume();
+                    document.go(motion, extend);
+                }
+                self.pump();
+            }
         }
+    }
+
+    fn on_command(&self, hwnd: Hwnd, command: ViewerCommand) {
         if let Some(document) = self.shown.borrow_mut().document_mut() {
             document.resume();
         }
-        match key {
-            ViewerKey::Close => return self.close(hwnd),
-            ViewerKey::SwitchMode => {
-                let mode = self.shown.borrow().document().map(Document::mode);
-                match mode {
-                    Some(Mode::Text) => self.set_mode(Mode::Hex),
-                    Some(Mode::Hex) => self.set_mode(Mode::Text),
-                    None => {}
+        match command {
+            ViewerCommand::NextFile => self.step_file(hwnd, true),
+            ViewerCommand::PreviousFile => self.step_file(hwnd, false),
+            ViewerCommand::Reload => self.reload(hwnd),
+            ViewerCommand::Close => return self.close(hwnd),
+            ViewerCommand::Copy => {
+                let publication = Publication::new(clipboard::sequence());
+                self.ask(hwnd, Asked::Copy(publication));
+            }
+            ViewerCommand::SelectAll => self.change_document(Document::select_all),
+            ViewerCommand::Find => {
+                if let Some(query) = self.ask_query(hwnd) {
+                    let backward = false;
+                    self.ask(hwnd, Asked::Find { query, backward });
                 }
             }
-            ViewerKey::Wrap => self.toggle_wrap(),
-            ViewerKey::Copy => self.copy(hwnd),
-            ViewerKey::SelectAll => self.select_all(),
-            key => {
-                if let Some(document) = self.shown.borrow_mut().document_mut() {
-                    match key {
-                        ViewerKey::LineUp => document.line_up(),
-                        ViewerKey::LineDown => document.line_down(),
-                        ViewerKey::PageUp => document.page_up(),
-                        ViewerKey::PageDown => document.page_down(),
-                        ViewerKey::Home => document.home(),
-                        ViewerKey::End => document.end(),
-                        ViewerKey::Left => document.scroll_left(),
-                        ViewerKey::Right => document.scroll_right(),
-                        ViewerKey::Cancel
-                        | ViewerKey::Close
-                        | ViewerKey::SwitchMode
-                        | ViewerKey::Wrap
-                        | ViewerKey::Copy
-                        | ViewerKey::SelectAll => {}
-                    }
-                }
+            ViewerCommand::FindNext => self.find_again(hwnd, false),
+            ViewerCommand::FindPrevious => self.find_again(hwnd, true),
+            ViewerCommand::Caret => self.change_document(Document::toggle_caret),
+            ViewerCommand::Text => self.change_document(|d| d.set_mode(Mode::Text)),
+            ViewerCommand::Hex => self.change_document(|d| d.set_mode(Mode::Hex)),
+            ViewerCommand::Wrap => self.toggle_wrap(),
+            ViewerCommand::ZoomIn => self.set_zoom(hwnd, zoomed(self.zoom.get(), 1)),
+            ViewerCommand::ZoomOut => self.set_zoom(hwnd, zoomed(self.zoom.get(), -1)),
+            ViewerCommand::ZoomReset => self.set_zoom(hwnd, DEFAULT_ZOOM),
+            ViewerCommand::Encoding(encoding) => {
+                self.change_document(|d| d.choose_encoding(encoding));
             }
         }
         self.pump();
     }
 
-    fn set_mode(&self, mode: Mode) {
+    /// Has `change` change the shown file, while one shows.
+    fn change_document(&self, change: impl FnOnce(&mut Document)) {
         if let Some(document) = self.shown.borrow_mut().document_mut() {
-            document.set_mode(mode);
+            change(document);
+        }
+    }
+
+    /// Keeps a change to the Viewer's state for the next Viewer, which the
+    /// main window saves.
+    fn save_state(&self, change: impl FnOnce(&mut ViewerState)) {
+        if let Some(shared) = self.shared.upgrade() {
+            let mut state = shared.state.get();
+            change(&mut state);
+            shared.state.set(state);
+            shared.changed.set(true);
+            self.main.post_deferred();
         }
     }
 
@@ -746,63 +942,138 @@ impl Viewer {
         }
         let wrap = !self.wrap.get();
         self.wrap.set(wrap);
-        if let Some(document) = self.shown.borrow_mut().document_mut() {
-            document.set_wrap(wrap);
+        self.change_document(|d| d.set_wrap(wrap));
+        self.save_state(|state| state.wrap = wrap);
+    }
+
+    /// Shows the text at `zoom` percent, which the next Viewer opens with.
+    fn set_zoom(&self, hwnd: Hwnd, zoom: u16) {
+        if self.zoom.replace(zoom) == zoom {
+            return;
         }
-        if let Some(shared) = self.shared.upgrade() {
-            shared.state.set(ViewerState {
-                wrap,
-                ..shared.state.get()
-            });
-            shared.changed.set(true);
-            self.main.post_deferred();
+        self.apply_fonts(hwnd);
+        self.layout(hwnd);
+        self.save_state(|state| state.zoom = zoom);
+    }
+
+    /// The Find dialog, which shows what Find looked for last; what the
+    /// person chose, or `None` for Cancel.
+    fn ask_query(&self, hwnd: Hwnd) -> Option<Query> {
+        let shared = self.shared.upgrade()?;
+        let last = shared.query.borrow().clone().unwrap_or_default();
+        let dialog = ViewerFind::new(last);
+        let captions = DialogCaptions::new(DialogId::ViewerFind, &self.strings.borrow());
+        if run_modal(hwnd, DialogId::ViewerFind, &captions, &dialog).ok()? != DialogEnd::Ok {
+            return None;
+        }
+        let query = dialog.chosen();
+        shared.query.replace(Some(query.clone()));
+        Some(query)
+    }
+
+    /// `F3` and `Shift+F3`: looks for what Find looked for last, or asks
+    /// first when it looked for nothing yet.
+    fn find_again(&self, hwnd: Hwnd, backward: bool) {
+        let last = self
+            .shared
+            .upgrade()
+            .and_then(|shared| shared.query.borrow().clone());
+        if let Some(query) = last.or_else(|| self.ask_query(hwnd)) {
+            self.ask(hwnd, Asked::Find { query, backward });
         }
     }
 
-    fn on_command(&self, hwnd: Hwnd, command: ViewerCommand) {
-        if let Some(document) = self.shown.borrow_mut().document_mut() {
-            document.resume();
+    /// Keeps `asked` until the reader can start it, after the Copy and Find
+    /// that wait already; a newer Copy, or a newer Find, replaces one that
+    /// waits.
+    fn ask(&self, hwnd: Hwnd, asked: Asked) {
+        {
+            let mut waiting = self.asked.borrow_mut();
+            let kind = std::mem::discriminant(&asked);
+            waiting.retain(|each| std::mem::discriminant(each) != kind);
+            waiting.push(asked);
         }
-        match command {
-            ViewerCommand::Close => return self.close(hwnd),
-            ViewerCommand::Text => self.set_mode(Mode::Text),
-            ViewerCommand::Hex => self.set_mode(Mode::Hex),
-            ViewerCommand::Wrap => self.toggle_wrap(),
-            ViewerCommand::Copy => self.copy(hwnd),
-            ViewerCommand::SelectAll => self.select_all(),
-        }
-        self.pump();
+        self.start_asked(hwnd);
     }
 
-    fn select_all(&self) {
-        if let Some(document) = self.shown.borrow_mut().document_mut() {
-            document.select_all();
+    /// Starts the Copy and Find that wait, in turn, while the reader can
+    /// start them. One that finds no file, or nothing selected, does
+    /// nothing.
+    fn start_asked(&self, hwnd: Hwnd) {
+        loop {
+            let free = self
+                .reader
+                .borrow()
+                .as_ref()
+                .is_some_and(Reader::can_copy_or_find);
+            if !free {
+                return;
+            }
+            let asked = {
+                let mut waiting = self.asked.borrow_mut();
+                if waiting.is_empty() {
+                    return;
+                }
+                waiting.remove(0)
+            };
+            match asked {
+                Asked::Find { query, backward } => self.find(query, backward),
+                Asked::Copy(publication) => self.copy(hwnd, publication),
+            }
         }
+    }
+
+    /// Has the reader look for `query` from the selected match, or from
+    /// the page. It replaces a block read in flight.
+    fn find(&self, query: Query, backward: bool) {
+        let at = self
+            .shown
+            .borrow()
+            .document()
+            .map(|document| document.find_in(backward));
+        if let (Some(at), Some(reader)) = (at, self.reader.borrow_mut().as_mut()) {
+            reader.find(query, at);
+        }
+    }
+
+    /// Says that the Find that looked for `looked_for` found nothing; a
+    /// newer Find may already have replaced the last query.
+    fn not_found(&self, hwnd: Hwnd, looked_for: &str) {
+        let (text, title) = {
+            let strings = self.strings.borrow();
+            (
+                strings.format("viewer.not_found", &[looked_for]),
+                strings.text("viewer.find_title").to_owned(),
+            )
+        };
+        info_box(hwnd, &text, &title);
     }
 
     /// Puts the selected text on the clipboard. The reader reads the bytes
     /// it needs and publishes the text, so the window never waits for the
-    /// disk or the clipboard (DESIGN.md: The Viewer).
-    fn copy(&self, hwnd: Hwnd) {
+    /// disk or the clipboard (DESIGN.md: The Viewer). `publication` is the
+    /// clipboard as it was when the person asked.
+    fn copy(&self, hwnd: Hwnd, publication: Publication) {
         let Some(copy) = self.shown.borrow().document().and_then(Document::copy) else {
             return;
         };
         match copy {
             Ok(copy) => {
                 if let Some(reader) = self.reader.borrow_mut().as_mut() {
-                    reader.copy(copy, Publication::new(clipboard::sequence()));
+                    reader.copy(copy, publication);
                 }
-                self.in_flight.set(None);
             }
             Err(too_large) => {
                 let text = {
                     let strings = self.strings.borrow();
+                    let name = self.name.borrow();
                     let size = |limit| text::bytes(&strings, &*self.numbers.borrow(), limit);
                     match too_large {
-                        TooLarge::Text(limit) => strings
-                            .format("viewer.copy_too_large_text", &[&self.name, &size(limit)]),
+                        TooLarge::Text(limit) => {
+                            strings.format("viewer.copy_too_large_text", &[&name, &size(limit)])
+                        }
                         TooLarge::Hex(limit) => {
-                            strings.format("viewer.copy_too_large_hex", &[&self.name, &size(limit)])
+                            strings.format("viewer.copy_too_large_hex", &[&name, &size(limit)])
                         }
                         TooLarge::Selection(limit) => {
                             strings.format("viewer.copy_too_large_selection", &[&size(limit)])
@@ -829,7 +1100,7 @@ impl Viewer {
     }
 
     /// Has `select` change the shown file's selection at the pointer, and
-    /// repaints the area when it says the selection changed.
+    /// shows the page again when it says the selection changed.
     fn select(&self, hwnd: Hwnd, select: impl FnOnce(&mut Document, TextAt) -> bool) {
         let Some(at) = self.pointer(hwnd) else {
             return;
@@ -840,7 +1111,7 @@ impl Viewer {
             .document_mut()
             .is_some_and(|document| select(document, at));
         if changed {
-            self.controls().area.invalidate();
+            self.show();
         }
     }
 
@@ -918,19 +1189,13 @@ impl Viewer {
         hwnd.destroy();
     }
 
-    /// Keeps the shown window's size and place for the next Viewer, which
-    /// the main window saves.
+    /// Keeps the shown window's size and place for the next Viewer.
     fn remember_placement(&self, hwnd: Hwnd) {
         if !hwnd.is_visible() {
             return;
         }
-        if let (Some(shared), Some(placement)) = (self.shared.upgrade(), hwnd.placement()) {
-            shared.state.set(ViewerState {
-                placement: Some(placement),
-                ..shared.state.get()
-            });
-            shared.changed.set(true);
-            self.main.post_deferred();
+        if let Some(placement) = hwnd.placement() {
+            self.save_state(|state| state.placement = Some(placement));
         }
     }
 }
@@ -960,6 +1225,11 @@ impl WindowProc for Viewer {
             }
             Message::Other(AREA_DOUBLE_CLICKED) => {
                 self.select_word(hwnd);
+                Some(LRESULT(0))
+            }
+            // The caret shows only while the area has the focus.
+            Message::Other(AREA_FOCUSED) => {
+                self.show();
                 Some(LRESULT(0))
             }
             Message::MouseMove { .. } if self.dragging.get() => {
@@ -1009,12 +1279,33 @@ impl WindowProc for Viewer {
                 keystroke, repeat, ..
             } => {
                 let key = viewer_key(keystroke)?;
-                // A held F3 would otherwise close this Viewer and open it
-                // again from the main window, for as long as it is held.
-                if !(repeat && matches!(key, ViewerKey::Close | ViewerKey::Cancel)) {
+                if !repeat {
+                    self.pressed.set(Some(keystroke));
+                }
+                // A held Esc would otherwise close the Viewers behind this
+                // one too, and a held F3 that opened this Viewer would ask
+                // what to find, or find again, until it is released.
+                let ignored = repeat
+                    && match key {
+                        ViewerKey::Cancel | ViewerKey::Command(ViewerCommand::Close) => true,
+                        ViewerKey::Command(
+                            ViewerCommand::FindNext | ViewerCommand::FindPrevious,
+                        ) => self.pressed.get() != Some(keystroke),
+                        ViewerKey::Command(_) | ViewerKey::Move { .. } => false,
+                    };
+                if !ignored {
                     self.on_key(hwnd, key);
                 }
                 Some(LRESULT(1))
+            }
+            Message::MouseWheel { delta, .. } if window::ctrl_held() => {
+                let turned = self.zoom_wheel.get() + delta;
+                self.zoom_wheel.set(turned % WHEEL_DELTA);
+                let steps = turned / WHEEL_DELTA;
+                if steps != 0 {
+                    self.set_zoom(hwnd, zoomed(self.zoom.get(), steps));
+                }
+                Some(LRESULT(0))
             }
             Message::MouseWheel { delta, .. } => {
                 if let Some(document) = self.shown.borrow_mut().document_mut() {
@@ -1050,16 +1341,21 @@ impl WindowProc for Viewer {
                 notification,
             } => self.removal(hwnd, notification, removal),
             Message::InitMenuPopup => {
-                let (mode, selected) = {
+                let state = {
                     let shown = self.shown.borrow();
                     let document = shown.document();
-                    (
-                        document.map(Document::mode),
-                        document.is_some_and(Document::selected),
-                    )
+                    MenuState {
+                        shown: document.map(|d| (d.mode(), d.encoding())),
+                        wrap: self.wrap.get(),
+                        selected: document.is_some_and(Document::selected),
+                        caret: document.is_some_and(Document::has_caret),
+                        can_toggle_caret: document.is_some_and(Document::can_toggle_caret),
+                        file: (self.index.get(), self.files.borrow().len()),
+                        zoom: self.zoom.get(),
+                    }
                 };
                 if let Some(menu) = Menu::of(hwnd) {
-                    for (id, enabled, checked) in menu_states(mode, self.wrap.get(), selected) {
+                    for (id, enabled, checked) in menu_states(state) {
                         menu.set_state(id, enabled, checked);
                     }
                 }
@@ -1072,10 +1368,10 @@ impl WindowProc for Viewer {
             Message::Command(Command::Control(event)) => {
                 let button = self.controls.get()?.retry;
                 if button.clicked(event) && button.hwnd().is_visible() {
-                    if self.slow.get() {
-                        self.cancel_read(hwnd);
-                    } else {
+                    if !self.slow.get() {
                         self.read_file(hwnd);
+                    } else if !self.cancel_read(hwnd) {
+                        self.close(hwnd);
                     }
                 }
                 Some(LRESULT(0))
@@ -1111,6 +1407,7 @@ impl WindowProc for Viewer {
                 regional_format: true,
             } => {
                 self.numbers.replace(WindowsNumbers::new());
+                self.apply_title(hwnd);
                 self.layout(hwnd);
                 None
             }

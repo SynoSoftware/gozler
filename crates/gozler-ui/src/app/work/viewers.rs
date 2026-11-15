@@ -2,7 +2,9 @@
 //! pending command, so a blocked read cannot leave additional readers behind.
 
 use crate::core::clipboard::Publication;
-use crate::core::viewer_window::CopyText;
+use crate::core::open::Entries;
+use crate::core::viewer::find::Query;
+use crate::core::viewer_window::{CopyText, FindIn};
 use crate::core::work::{Interest, Replacement, Waiting};
 use crate::win::Hwnd;
 use crate::win::folder::Register;
@@ -15,15 +17,19 @@ use std::time::Instant;
 
 #[derive(Clone, Copy)]
 enum Read {
+    Files,
     Open,
     Block,
     Copy,
+    Find,
 }
 
 pub(in crate::app) struct Reader {
     task: Task<Session, ()>,
     mailbox: Arc<Mailbox>,
     generation: u64,
+    /// The command the reading thread runs, and since when, until its
+    /// answer, Cancel or Release ends it.
     pending: Option<(Read, Instant)>,
     vetoed: bool,
 }
@@ -45,27 +51,64 @@ impl Reader {
         }
     }
 
+    /// Finds the files among `entries`, which `F3` acts on, off the
+    /// window's thread, because a panel's selection can hold many entries.
+    pub(in crate::app) fn files(&mut self, entries: Entries, focused: Option<Vec<u16>>) {
+        self.request(Command::Files { entries, focused });
+    }
+
+    /// Opens `path`. The file open before stays open until this one has
+    /// opened, so the page of a Reload stays readable when it is cancelled.
     pub(in crate::app) fn open(&mut self, path: Vec<u16>) {
         self.vetoed = false;
-        self.pending = Some((Read::Open, Instant::now()));
-        self.command(Command::Open(path), true);
+        self.request(Command::Open(path));
     }
 
+    /// Reads the block `index`, once no other command runs.
     pub(in crate::app) fn read(&mut self, index: u64) {
-        self.pending = Some((Read::Block, Instant::now()));
-        self.command(Command::Read(index), false);
+        self.request(Command::Read(index));
     }
 
-    /// Reads the file whole and puts its text on the clipboard. It replaces
-    /// a block read in flight, which the page then asks for again.
+    /// Reads the bytes of `copy` and puts their text on the clipboard, when
+    /// [`Reader::can_copy_or_find`].
     pub(in crate::app) fn copy(&mut self, copy: CopyText, publication: Publication) {
-        self.pending = Some((Read::Copy, Instant::now()));
-        self.command(Command::Copy(copy, publication), false);
+        self.request(Command::Copy(copy, publication));
     }
 
-    /// Whether a copy runs, which a block read would replace.
-    pub(in crate::app) fn copying(&self) -> bool {
-        matches!(self.pending, Some((Read::Copy, _)))
+    /// Looks for `query` in the file from where `at` says, in parts, until
+    /// it finds it or reaches the file's end or start, when
+    /// [`Reader::can_copy_or_find`].
+    pub(in crate::app) fn find(&mut self, query: Query, at: FindIn) {
+        self.request(Command::Find(query, at));
+    }
+
+    /// Whether Copy or Find can start: no file opens, which they read, and
+    /// no Copy or Find runs, which they would end before it answers. A
+    /// block read gives way to them, and the page asks for it again. The
+    /// window keeps Copy and Find until then.
+    pub(in crate::app) fn can_copy_or_find(&self) -> bool {
+        matches!(self.pending, None | Some((Read::Block, _)))
+    }
+
+    /// Posts `command` to the reading thread, as the command that runs
+    /// allows: a block read waits until no command runs, because the page
+    /// asks for it again after each answer, and one block at a time keeps a
+    /// fast drag of the scroll bar from reading every block it passes; Copy
+    /// and Find wait as [`Reader::can_copy_or_find`] says. Any other command
+    /// replaces the one that runs.
+    fn request(&mut self, command: Command) {
+        let (read, interrupt) = match &command {
+            Command::Read(_) if self.pending.is_some() => return,
+            Command::Copy(..) | Command::Find(..) if !self.can_copy_or_find() => return,
+            Command::Files { .. } => (Some(Read::Files), true),
+            Command::Open(_) => (Some(Read::Open), true),
+            Command::Read(_) => (Some(Read::Block), false),
+            Command::Copy(..) => (Some(Read::Copy), false),
+            Command::Find(..) => (Some(Read::Find), false),
+            Command::Cancel | Command::Release { .. } => (None, true),
+        };
+        self.pending = read.map(|read| (read, Instant::now()));
+        self.command(command, interrupt);
     }
 
     pub(in crate::app) fn take(&mut self) -> Option<ViewerEvent> {
@@ -87,17 +130,13 @@ impl Reader {
         Some(Interest::Awaited.after(now.saturating_duration_since(since)))
     }
 
+    /// Cancels the command that runs; `false` when none runs. A cancelled
+    /// open keeps the file open before it.
     pub(in crate::app) fn cancel(&mut self) -> bool {
-        let Some((read, _)) = self.pending.take() else {
+        if self.pending.is_none() {
             return false;
-        };
-        let command = match read {
-            Read::Open => Command::Release {
-                keep_registration: false,
-            },
-            Read::Block | Read::Copy => Command::Cancel,
-        };
-        self.command(command, true);
+        }
+        self.request(Command::Cancel);
         true
     }
 
@@ -106,8 +145,7 @@ impl Reader {
     }
 
     pub(in crate::app) fn release(&mut self, keep_registration: bool) {
-        self.pending = None;
-        self.command(Command::Release { keep_registration }, true);
+        self.request(Command::Release { keep_registration });
     }
 
     pub(in crate::app) fn query_remove(&mut self) -> bool {

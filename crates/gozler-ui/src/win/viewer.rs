@@ -6,8 +6,8 @@ use super::clipboard::CopyFailure;
 use super::gdi::{Font, muted_text, system_color};
 use super::window::offer_key;
 use crate::core::layout::{Dpi, Px};
-use crate::core::viewer::char_offset;
-use crate::core::viewer_window::{ScrollBar, ShownRow};
+use crate::core::viewer::{Encoding, char_offset};
+use crate::core::viewer_window::{Found, ScrollBar, ShownRow};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, ETO_CLIPPED,
@@ -19,19 +19,25 @@ use windows::Win32::UI::Controls::{
     BPBF_COMPATIBLEBITMAP, BeginBufferedPaint, BufferedPaintInit, EndBufferedPaint, SetScrollInfo,
 };
 use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DLGC_WANTARROWS, DLGC_WANTCHARS, DefWindowProcW, GetParent, HMENU,
-    IDC_ARROW, LoadCursorW, RegisterClassExW, SB_VERT, SCROLLINFO, SIF_DISABLENOSCROLL, SIF_PAGE,
-    SIF_POS, SIF_RANGE, SM_CYCAPTION, SendMessageW, WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_PAINT, WM_VSCROLL, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_LEFT, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CS_DBLCLKS, CreateCaret, CreateWindowExW, DLGC_WANTARROWS, DLGC_WANTCHARS, DefWindowProcW,
+    DestroyCaret, GetParent, HMENU, IDC_ARROW, LoadCursorW, RegisterClassExW, SB_VERT, SCROLLINFO,
+    SIF_DISABLENOSCROLL, SIF_PAGE, SIF_POS, SIF_RANGE, SM_CYCAPTION, SPI_GETCARETWIDTH,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetCaretPos, ShowCaret,
+    SystemParametersInfoW, WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_PAINT, WM_SETFOCUS, WM_VSCROLL, WNDCLASSEXW, WS_CHILD,
+    WS_CLIPSIBLINGS, WS_EX_LEFT, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, w};
 
 pub(crate) mod work;
 
 const AREA_CLASS: PCWSTR = w!("gozler.ui.viewer_area");
+
+/// The private message with which the area tells its Viewer that it got
+/// the focus, so the Viewer shows the caret again.
+pub(crate) const AREA_FOCUSED: u32 = super::wake::WAKE + 13;
 
 /// The private message with which the area asks its Viewer to paint it;
 /// the Viewer answers 1 when it painted.
@@ -144,6 +150,17 @@ unsafe extern "system" fn area_procedure(
             to_parent(AREA_DOUBLE_CLICKED, WPARAM(0));
             LRESULT(0)
         }
+        WM_SETFOCUS => {
+            to_parent(AREA_FOCUSED, WPARAM(0));
+            LRESULT(0)
+        }
+        // The caret belongs to the window that has the focus.
+        WM_KILLFOCUS => {
+            // SAFETY: plain values; the thread's caret is the area's own
+            // while the area has the focus, which it is losing.
+            let _ = unsafe { DestroyCaret() };
+            LRESULT(0)
+        }
         // SAFETY: the parameters are the ones Windows passed.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
@@ -245,7 +262,7 @@ pub(crate) fn paint_area(area: Hwnd, text: &AreaText) {
                 rest.len() as u32,
                 None,
             );
-            if !selected.is_empty() {
+            for selected in selected.iter().filter(|selected| !selected.is_empty()) {
                 // The selected characters again, on the selection colour
                 // over their cells, as an edit control shows a selection;
                 // the opaque cell after the text shows the line end it holds.
@@ -281,6 +298,38 @@ pub(crate) fn paint_area(area: Hwnd, text: &AreaText) {
     }
 }
 
+/// Shows Windows' caret in `area` with its top left corner at `at`, in the
+/// area's client coordinates, `height` tall and as wide as Windows' caret
+/// width setting at `dpi`, or hides it for `None`. Only while the area has
+/// the focus, because a thread has one caret, which belongs to the focused
+/// window, such as an edit box of the main window.
+pub(crate) fn set_caret(area: Hwnd, at: Option<(Px, Px)>, height: Px, dpi: Dpi) {
+    // SAFETY: plain values and a local the call writes; the caret is the
+    // area's own while the area has the focus.
+    unsafe {
+        if GetFocus() != area.0 {
+            return;
+        }
+        let _ = DestroyCaret();
+        let Some((x, y)) = at else {
+            return;
+        };
+        let mut width = 1u32;
+        let _ = SystemParametersInfoW(
+            SPI_GETCARETWIDTH,
+            0,
+            Some((&raw mut width).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        let width = Px(i32::try_from(width).unwrap_or(1).max(1))
+            .rescale(Dpi::new(96).expect("96 is not zero"), dpi);
+        if CreateCaret(area.0, None, width.0.max(1), height.0).is_ok() {
+            let _ = SetCaretPos(x.0, y.0);
+            let _ = ShowCaret(Some(area.0));
+        }
+    }
+}
+
 /// The height of a window's caption at `dpi`, by which a Viewer opens
 /// below and to the right of the one opened before it.
 pub(crate) fn caption_height(dpi: Dpi) -> Px {
@@ -310,12 +359,23 @@ pub(crate) fn set_area_scroll(area: Hwnd, bar: ScrollBar) {
 
 /// What the reading thread found.
 pub(crate) enum ViewerEvent {
+    /// The files among the entries that `F3` acts on, and which of them
+    /// shows first.
+    Files { paths: Vec<Vec<u16>>, first: usize },
     /// The file opened: its length, and its first block.
     Opened { len: u64, first: Vec<u8> },
     /// The block `index`, fewer bytes than asked when the file shrank.
     Block { index: u64, bytes: Vec<u8> },
     /// Copy put the file's text on the clipboard, or why it did not.
     Copied(Result<(), CopyFailure>),
+    /// Find's match, or `None` when the text does not occur there.
+    Found {
+        /// The encoding the search read the file in.
+        encoding: Encoding,
+        /// What the search looked for, which "Couldn't find" names.
+        looked_for: String,
+        found: Option<Found>,
+    },
     /// Windows could not open the file, or, when `opened`, read it.
     Failed { opened: bool, reason: String },
 }

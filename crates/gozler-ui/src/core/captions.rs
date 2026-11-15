@@ -310,6 +310,16 @@ impl CaptionTable {
                 keyed: &[(Control(C::SelectFilesLabel), "select_files.mask")],
                 plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
             },
+            DialogId::ViewerFind => CaptionTable {
+                title: "viewer.find_title",
+                keyed: &[
+                    (Control(C::ViewerFindLabel), "viewer.find_what"),
+                    (Control(C::ViewerFindCase), "viewer.match_case"),
+                    (Control(C::ViewerFindWords), "viewer.whole_words"),
+                    (Control(C::ViewerFindHex), "viewer.hex_bytes"),
+                ],
+                plain: &[(Ok, "viewer.find_title"), (Cancel, "button.cancel")],
+            },
             DialogId::Synchronize => CaptionTable {
                 title: "sync.title",
                 keyed: &[
@@ -409,6 +419,10 @@ impl CaptionTable {
                         Control(C::ContextMenuOpenLocationLabel),
                         "settings_context_menu.open_file_location",
                     ),
+                    (
+                        Control(C::ContextMenuExternalViewerLabel),
+                        "settings_context_menu.external_viewer",
+                    ),
                     (Control(C::ContextMenuRestore), "settings.reset"),
                 ],
                 plain: &[
@@ -417,7 +431,7 @@ impl CaptionTable {
                         Control(C::ContextMenuOpenGroup),
                         "settings_context_menu.open_with",
                     ),
-                    // One letter cannot name three buttons (DESIGN.md: The
+                    // One letter cannot name four buttons (DESIGN.md: The
                     // Context menu page).
                     (
                         Control(C::ContextMenuOpenFoldersBrowse),
@@ -429,6 +443,10 @@ impl CaptionTable {
                     ),
                     (
                         Control(C::ContextMenuOpenLocationBrowse),
+                        "settings_context_menu.browse",
+                    ),
+                    (
+                        Control(C::ContextMenuExternalViewerBrowse),
                         "settings_context_menu.browse",
                     ),
                     (
@@ -729,6 +747,7 @@ impl CaptionTable {
             | DialogId::SelectFiles
             | DialogId::UnselectFiles
             | DialogId::DeleteUnseen
+            | DialogId::ViewerFind
             | DialogId::Settings
             | DialogId::IndexedFolders
             | DialogId::ServiceReport

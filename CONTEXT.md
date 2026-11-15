@@ -311,8 +311,8 @@ The window that `F3` opens, which shows a file as text or as hex.
 
 **Text and Hex**:
 The two ways the Viewer shows a file: Text decodes it into lines, and Hex
-shows each byte. The Viewer chooses from the file's first bytes, and `F4`
-switches.
+shows each byte. The Viewer chooses from the file's first bytes, and `1`
+and `3` switch.
 
 **File operation**:
 A person's command to copy, move, synchronize, delete, rename or create a

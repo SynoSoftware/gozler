@@ -4,29 +4,139 @@
 
 use super::wide;
 use crate::core::text::Numbers;
+use crate::core::viewer::CodePage;
 use windows::Win32::Foundation::SYSTEMTIME;
 use windows::Win32::Globalization::{
-    CP_ACP, CP_OEMCP, DATE_SHORTDATE, GetDateFormatEx, GetLocaleInfoEx, GetNumberFormatEx,
-    GetTimeFormatEx, GetUserPreferredUILanguages, LOCALE_ILZERO, LOCALE_INEGNUMBER,
-    LOCALE_RETURN_NUMBER, LOCALE_SDECIMAL, LOCALE_SGROUPING, LOCALE_STHOUSAND, MUI_LANGUAGE_NAME,
-    MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar, NUMBERFMTW, TIME_FORMAT_FLAGS,
-    TIME_NOSECONDS,
+    CP_ACP, CP_OEMCP, CP_UTF8, CPINFO, DATE_SHORTDATE, GetACP, GetCPInfo, GetDateFormatEx,
+    GetLocaleInfoEx, GetNumberFormatEx, GetOEMCP, GetTimeFormatEx, GetUserPreferredUILanguages,
+    LOCALE_ILZERO, LOCALE_INEGNUMBER, LOCALE_RETURN_NUMBER, LOCALE_SDECIMAL, LOCALE_SGROUPING,
+    LOCALE_STHOUSAND, MUI_LANGUAGE_NAME, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar,
+    NUMBERFMTW, TIME_FORMAT_FLAGS, TIME_NOSECONDS, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
 };
-use windows::core::{PCWSTR, PWSTR};
+use windows::core::{BOOL, PCSTR, PCWSTR, PWSTR};
 
 /// `bytes` in the console's code page, in which a program such as `net`
 /// writes to a file, as text.
 pub(crate) fn console_text(bytes: &[u8]) -> String {
-    code_page_text(CP_OEMCP, bytes)
+    decode(CP_OEMCP, bytes)
 }
 
-/// `bytes` in Windows' ANSI code page, as the Viewer shows a text file that
-/// has no byte order mark and is not UTF-8.
-pub(crate) fn ansi_text(bytes: &[u8]) -> String {
-    code_page_text(CP_ACP, bytes)
+/// `bytes` in the code page `page`, as the Viewer shows a text file in it.
+pub(crate) fn code_page_text(page: CodePage, bytes: &[u8]) -> String {
+    decode(code_page_number(page), bytes)
 }
 
-fn code_page_text(code_page: u32, bytes: &[u8]) -> String {
+/// The bytes that spell `c` in the code page `page`, as Find looks for it;
+/// `None` when the code page has no such character, where Windows would
+/// write its default character or a look-alike instead.
+pub(crate) fn code_page_bytes(page: CodePage, c: char) -> Option<Vec<u8>> {
+    let Some(page) = non_utf8_number(page) else {
+        return Some(c.to_string().into_bytes());
+    };
+    let mut units = [0; 2];
+    let units = c.encode_utf16(&mut units);
+    let mut bytes = [0u8; 8];
+    let mut defaulted = BOOL(0);
+    // SAFETY: both buffers are locals that the call writes at most their
+    // lengths of; `page` is not UTF-8, and no code page of the Viewer is
+    // UTF-7, which refuse these flags.
+    let written = unsafe {
+        WideCharToMultiByte(
+            page,
+            WC_NO_BEST_FIT_CHARS,
+            units,
+            Some(&mut bytes),
+            PCSTR::null(),
+            Some(&raw mut defaulted),
+        )
+    };
+    let written = usize::try_from(written).ok().filter(|n| *n > 0)?;
+    (!defaulted.as_bool()).then(|| bytes[..written].to_vec())
+}
+
+/// The bytes that start a character of two bytes in the code page `page`,
+/// as Find skips the second bytes; none when Windows does not know `page`.
+pub(crate) fn code_page_leads(page: CodePage) -> [bool; 256] {
+    let mut leads = [false; 256];
+    let mut info = CPINFO::default();
+    // SAFETY: `info` is a local that the call fills.
+    if unsafe { GetCPInfo(code_page_number(page), &raw mut info) }.is_err() {
+        return leads;
+    }
+    // Pairs of first and last lead bytes, ended by a pair of zeros.
+    for &[first, last] in info.LeadByte.as_chunks::<2>().0 {
+        if first == 0 {
+            break;
+        }
+        for byte in first..=last {
+            leads[usize::from(byte)] = true;
+        }
+    }
+    leads
+}
+
+/// `text` in the code page `page`, as the compare window saves a file in
+/// it; `None` when the code page cannot hold one of its characters.
+pub(crate) fn code_page_encoded(page: CodePage, text: &str) -> Option<Vec<u8>> {
+    let Some(page) = non_utf8_number(page) else {
+        return Some(text.as_bytes().to_vec());
+    };
+    let units: Vec<u16> = text.encode_utf16().collect();
+    if units.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut defaulted = BOOL(0);
+    // SAFETY: the first call measures and the second writes at most the
+    // buffer's length; as in `code_page_bytes`, `page` is not UTF-8 and no
+    // code page here is UTF-7, which refuse the flags.
+    unsafe {
+        let length = WideCharToMultiByte(
+            page,
+            WC_NO_BEST_FIT_CHARS,
+            &units,
+            None,
+            PCSTR::null(),
+            None,
+        );
+        let mut bytes = vec![0u8; usize::try_from(length).ok().filter(|n| *n > 0)?];
+        let written = WideCharToMultiByte(
+            page,
+            WC_NO_BEST_FIT_CHARS,
+            &units,
+            Some(&mut bytes),
+            PCSTR::null(),
+            Some(&raw mut defaulted),
+        );
+        bytes.truncate(usize::try_from(written).unwrap_or(0));
+        (!defaulted.as_bool()).then_some(bytes)
+    }
+}
+
+/// The number of the code page that `page` is now, or `None` when it is
+/// UTF-8, which holds every character: Windows' ANSI and OEM code pages are
+/// UTF-8 when the person turns on "Use Unicode UTF-8 for worldwide language
+/// support", and `WideCharToMultiByte` then refuses the flags that report a
+/// character the code page cannot hold.
+fn non_utf8_number(page: CodePage) -> Option<u32> {
+    let number = match page {
+        // SAFETY: GetACP takes no argument.
+        CodePage::Ansi => unsafe { GetACP() },
+        // SAFETY: GetOEMCP takes no argument.
+        CodePage::Oem => unsafe { GetOEMCP() },
+        CodePage::Number(number) => u32::from(number),
+    };
+    (number != CP_UTF8).then_some(number)
+}
+
+fn code_page_number(page: CodePage) -> u32 {
+    match page {
+        CodePage::Ansi => CP_ACP,
+        CodePage::Oem => CP_OEMCP,
+        CodePage::Number(number) => u32::from(number),
+    }
+}
+
+fn decode(code_page: u32, bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }

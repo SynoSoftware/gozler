@@ -34,9 +34,10 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_SELCHANGE, CreateDialogParamW,
     DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, EndDialog, EnumChildWindows, GWL_STYLE,
-    GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, IDCANCEL, IDOK, MB_ICONERROR, MB_OK,
-    MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX,
-    WM_COMMAND, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE, WM_TIMER,
+    GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, IDCANCEL, IDOK, MB_ICONERROR,
+    MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MINMAXINFO, MapDialogRect, MessageBoxW,
+    SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_DESTROY,
+    WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE, WM_TIMER,
 };
 use windows::core::{BOOL, HRESULT, HSTRING, PCWSTR};
 
@@ -987,6 +988,16 @@ fn unwrapped_width<'a>(
 /// Shows an error message box. With no owner it blocks only the calling
 /// thread, as the panic hook needs (DESIGN.md: window rule 11).
 pub(crate) fn error_box(owner: Option<Hwnd>, text: &str, title: &str) {
+    message_box(owner, text, title, MB_ICONERROR);
+}
+
+/// Shows a message box that informs, such as the Viewer's Find that found
+/// nothing.
+pub(crate) fn info_box(owner: Hwnd, text: &str, title: &str) {
+    message_box(Some(owner), text, title, MB_ICONINFORMATION);
+}
+
+fn message_box(owner: Option<Hwnd>, text: &str, title: &str, icon: MESSAGEBOX_STYLE) {
     let text = wide(text);
     let _modal = super::present::modal_loop();
     // SAFETY: both texts are NUL-terminated and outlive the call.
@@ -995,7 +1006,7 @@ pub(crate) fn error_box(owner: Option<Hwnd>, text: &str, title: &str) {
             owner.map(|o| o.0),
             PCWSTR(text.as_ptr()),
             &HSTRING::from(title),
-            MB_OK | MB_ICONERROR,
+            MB_OK | icon,
         );
     }
 }

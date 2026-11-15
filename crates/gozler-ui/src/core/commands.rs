@@ -257,7 +257,7 @@ impl CommandId {
                 C::View => (
                     "command.view",
                     const { &[Keystroke::plain(Key::Function(3))] },
-                    |s| s.model.file_to_view(s.list).is_some(),
+                    |s| s.model.file_to_view(s.list).is_some() || s.model.chosen_count(s.list) > 1,
                     None,
                 ),
                 C::Edit => ("command.edit", &[], never, None),
@@ -564,11 +564,15 @@ pub(crate) enum Key {
     /// keyboard's, so they never type into quick search.
     NumPlus,
     NumMinus,
+    /// The main keyboard's `+` and `-`, which zoom with `Ctrl` as in
+    /// Notepad.
+    Plus,
+    Minus,
 }
 
 impl Key {
     /// Every key without a number, for reading a key's name or code back.
-    pub(crate) const NAMED: [Key; 19] = [
+    pub(crate) const NAMED: [Key; 21] = [
         Key::Enter,
         Key::Escape,
         Key::Tab,
@@ -588,6 +592,8 @@ impl Key {
         Key::Period,
         Key::NumPlus,
         Key::NumMinus,
+        Key::Plus,
+        Key::Minus,
     ];
 
     /// Its name in `ui.json`, the same in every language, such as "PageUp".
@@ -615,6 +621,8 @@ impl Key {
             // Without `+`, which `Keystroke::from_name` splits at.
             Key::NumPlus => "NumPlus".into(),
             Key::NumMinus => "NumMinus".into(),
+            Key::Plus => "Plus".into(),
+            Key::Minus => "Minus".into(),
         }
     }
 
@@ -637,9 +645,13 @@ impl Key {
     pub(crate) fn text(self, strings: &Strings) -> String {
         let named = |key: &'static str| strings.text(key).to_owned();
         match self {
-            Key::Letter(_) | Key::Digit(_) | Key::Function(_) | Key::Comma | Key::Period => {
-                self.name()
-            }
+            Key::Letter(_)
+            | Key::Digit(_)
+            | Key::Function(_)
+            | Key::Comma
+            | Key::Period
+            | Key::Plus
+            | Key::Minus => self.name(),
             Key::NumPlus => "Num +".to_owned(),
             Key::NumMinus => "Num -".to_owned(),
             Key::Enter => named("key.enter"),
@@ -803,6 +815,21 @@ pub(crate) enum KeyAction {
     /// A key that moves the focus or selects, the same in Search's list and
     /// a panel's (DESIGN.md: Selecting entries).
     Select(SelectKey),
+    /// A key that views the focused file, the same in Search's list and a
+    /// panel's (DESIGN.md: The Viewer).
+    View(ViewKey),
+}
+
+/// How `Shift+F3` and `Alt+F3` view the file that View shows alone: a
+/// panel's focused file, or Search's one selected file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ViewKey {
+    /// `Shift+F3`: the Viewer shows only that file, also while other files
+    /// are selected.
+    Focused,
+    /// `Alt+F3`: the External viewer of Settings > Context menu opens it,
+    /// or Windows' default program when none is set.
+    External,
 }
 
 impl KeyAction {
@@ -941,6 +968,17 @@ fn focus_keys(focus: Focus) -> impl Iterator<Item = &'static (Keystroke, KeyActi
                         Keystroke::plain(Key::NumPlus),
                         KeyAction::Select(SelectKey::Restore),
                     ),
+                    (
+                        Keystroke {
+                            shift: true,
+                            ..Keystroke::plain(Key::Function(3))
+                        },
+                        KeyAction::View(ViewKey::Focused),
+                    ),
+                    (
+                        Keystroke::alt(Key::Function(3)),
+                        KeyAction::View(ViewKey::External),
+                    ),
                 ]
             }
         }
@@ -1026,6 +1064,11 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
         (
             Keystroke::plain(Key::NumMinus),
             KeyAction::Run(CommandId::UnselectFiles),
+        ),
+        (shift(Key::Function(3)), KeyAction::View(ViewKey::Focused)),
+        (
+            Keystroke::alt(Key::Function(3)),
+            KeyAction::View(ViewKey::External),
         ),
     ]
 };

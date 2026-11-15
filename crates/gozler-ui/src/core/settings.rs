@@ -77,6 +77,10 @@ pub(crate) struct Choices {
     pub(crate) open_files: String,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) open_file_location: String,
+    /// The program that `Alt+F3` views a file with; empty for the file's
+    /// default program (DESIGN.md: The Viewer).
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) external_viewer: String,
     /// Which items a row's context menu shows.
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) context_menu: ContextMenu,
@@ -147,6 +151,7 @@ impl Default for Choices {
             open_folders: String::new(),
             open_files: String::new(),
             open_file_location: String::new(),
+            external_viewer: String::new(),
             context_menu: ContextMenu::default(),
             search_as_you_type: on(),
             show_all_when_empty: on(),
@@ -381,6 +386,7 @@ impl SettingsValues {
                 choices.open_folders = defaults.open_folders;
                 choices.open_files = defaults.open_files;
                 choices.open_file_location = defaults.open_file_location;
+                choices.external_viewer = defaults.external_viewer;
                 choices.context_menu = defaults.context_menu;
             }
             SettingsPage::Keyboard => {
@@ -815,7 +821,7 @@ pub(crate) struct Placement {
 }
 
 /// What the Viewer remembers (DESIGN.md: The Viewer): the size and place of the
-/// Viewer that was moved or closed last, and Wrap long lines.
+/// Viewer that was moved or closed last, Wrap long lines and the text size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ViewerState {
     #[serde(
@@ -826,6 +832,9 @@ pub(crate) struct ViewerState {
     pub(crate) placement: Option<Placement>,
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) wrap: bool,
+    /// The text size in percent, within the sizes zoom reaches.
+    #[serde(default = "default_zoom", deserialize_with = "zoom")]
+    pub(crate) zoom: u16,
 }
 
 impl Default for ViewerState {
@@ -833,8 +842,20 @@ impl Default for ViewerState {
         ViewerState {
             placement: None,
             wrap: on(),
+            zoom: default_zoom(),
         }
     }
+}
+
+fn default_zoom() -> u16 {
+    super::viewer_window::DEFAULT_ZOOM
+}
+
+/// A size outside the range that zoom reaches comes into it, so an edited
+/// file cannot ask for a font of zero or thousands of pixels.
+fn zoom<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let zoom = or_default::<D, Option<u16>>(deserializer)?.unwrap_or_else(default_zoom);
+    Ok(super::viewer_window::zoomed(zoom, 0))
 }
 
 impl Settings {
@@ -1371,6 +1392,7 @@ mod tests {
                         maximized: true,
                     }),
                     wrap: false,
+                    zoom: 120,
                 },
             },
         };

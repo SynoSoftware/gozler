@@ -143,9 +143,9 @@ const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 10] = [
     ),
 ];
 
-/// Each open command's box, its Browse… button, its cue and the command it
-/// shows.
-const OPEN_COMMANDS: [(ControlId, ControlId, &str, Field<String>); 3] = [
+/// Each command of the Open with group's box, its Browse… button, its cue
+/// and the command it shows: the open commands and the External viewer.
+const OPEN_COMMANDS: [(ControlId, ControlId, &str, Field<String>); 4] = [
     (
         ControlId::ContextMenuOpenFolders,
         ControlId::ContextMenuOpenFoldersBrowse,
@@ -163,6 +163,12 @@ const OPEN_COMMANDS: [(ControlId, ControlId, &str, Field<String>); 3] = [
         ControlId::ContextMenuOpenLocationBrowse,
         "settings_context_menu.cue_explorer",
         |v| &mut v.choices.open_file_location,
+    ),
+    (
+        ControlId::ContextMenuExternalViewer,
+        ControlId::ContextMenuExternalViewerBrowse,
+        "settings_context_menu.cue_default",
+        |v| &mut v.choices.external_viewer,
     ),
 ];
 

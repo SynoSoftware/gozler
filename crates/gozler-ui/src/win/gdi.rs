@@ -110,6 +110,20 @@ impl Font {
         Font::from_logfont(&logfont)
     }
 
+    /// The font at `percent` of its height, as the Viewer's text zooms;
+    /// at least one pixel tall.
+    pub(crate) fn scaled(&self, percent: u16) -> windows::core::Result<Font> {
+        let mut logfont = logfont(self.0)?;
+        let height = i64::from(logfont.lfHeight) * i64::from(percent) / 100;
+        let height = i32::try_from(height).unwrap_or(logfont.lfHeight);
+        logfont.lfHeight = if height == 0 {
+            logfont.lfHeight.signum()
+        } else {
+            height
+        };
+        Font::from_logfont(&logfont)
+    }
+
     /// Consolas at the height of `hwnd`'s font, so text laid out in columns
     /// for a console lines up.
     pub(crate) fn monospace_of(hwnd: Hwnd) -> windows::core::Result<Font> {

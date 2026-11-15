@@ -20,7 +20,7 @@ use super::icons::Icons;
 use super::include::{Elevated, NotSaved};
 use super::settings::SettingsDialog;
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar, WorkId};
-use super::viewer::Viewers;
+use super::viewer::{Files as ViewerFiles, Viewers};
 use super::work::{
     Awaited, CopyFailure, CopyNotice, OpenTarget, Opened, PathAction, PathPurpose, PreparedPaths,
     QueueReady, RegistryAnswer, RegistryRead, ReleaseAnswer, ReleasePurpose, ShellPurpose,
@@ -35,7 +35,7 @@ use crate::core::clipboard::ClipboardFormat;
 use crate::core::commands::{
     self, CommandButton, CommandId, Focus, HIDE_DETAILS, INSPECTOR_BUTTONS, INSPECTOR_COPY_FOLDER,
     INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, KeyAction, Keystroke, MenuItem, SHOW_DETAILS, State,
-    TabStop,
+    TabStop, ViewKey,
 };
 use crate::core::dates::{DateFormat, Dates};
 use crate::core::drop_target::{Dragged, DropEffect, DropKeys, DropMenu, SourceEffects};
@@ -2092,7 +2092,7 @@ impl MainWindow {
                 CommandId::NewFolder => {
                     return self.controls().panels.new_folder(self, hwnd, active);
                 }
-                CommandId::View => return self.view(hwnd, list),
+                CommandId::View => return self.view(hwnd, list, false),
                 // Not available in this version (DESIGN.md: Commands in Two
                 // panels).
                 CommandId::Edit => return,
@@ -3312,6 +3312,16 @@ impl MainWindow {
                 };
                 self.select_key(hwnd, list, key);
             }
+            KeyAction::View(key) => {
+                let list = match self.controls().panels.panel_list(target) {
+                    Some(side) => List::Panel(side),
+                    None => List::Search,
+                };
+                match key {
+                    ViewKey::Focused => self.view(hwnd, list, true),
+                    ViewKey::External => self.view_externally(list),
+                }
+            }
         }
         true
     }
@@ -3553,19 +3563,69 @@ impl MainWindow {
         self.created().work.borrow_mut().clipboard.cancel();
     }
 
-    /// `F3`: opens a Viewer of Search's one selected file, or of a panel's
-    /// focused file (DESIGN.md: The Viewer).
-    fn view(&self, hwnd: Hwnd, list: List) {
-        let (path, strings) = {
+    /// `F3`: opens a Viewer of the chosen files while several entries are
+    /// chosen, else of Search's one selected file or a panel's focused
+    /// file, which alone shows with `focused_only`, as `Shift+F3` asks
+    /// (DESIGN.md: The Viewer).
+    fn view(&self, hwnd: Hwnd, list: List, focused_only: bool) {
+        let (focused, chosen, strings) = {
+            let model = self.model.borrow();
+            let chosen = model.chosen_count(list);
+            // Several files start at the focused one. Search's model keeps
+            // no focused row; its list does.
+            let focused = match list {
+                List::Search if chosen > 1 && !focused_only => {
+                    (self.controls().search.list.focused())
+                        .and_then(|row| model.shown_row(list, row))
+                        .filter(|row| !row.is_dir)
+                        .map(wide_path)
+                }
+                _ => model.file_to_view(list),
+            };
+            (focused, chosen, model.strings().clone())
+        };
+        let files = if chosen > 1 && !focused_only {
+            let Some(entries) = self.selected_source(list) else {
+                return;
+            };
+            ViewerFiles::Chosen { entries, focused }
+        } else {
+            let Some(path) = focused else {
+                return;
+            };
+            ViewerFiles::One(path)
+        };
+        if let Err(error) = self.viewers.open(files, strings, hwnd) {
+            self.log_error(format!("The Viewer did not open: {error}"));
+        }
+    }
+
+    /// `Alt+F3`: the External viewer of Settings > Context menu opens the
+    /// file that `Shift+F3` views, or Windows' default program when none
+    /// is set (DESIGN.md: The Viewer).
+    fn view_externally(&self, list: List) {
+        let (path, viewer) = {
             let model = self.model.borrow();
             let Some(path) = model.file_to_view(list) else {
                 return;
             };
-            (path, model.strings().clone())
+            (path, model.choices().external_viewer.clone())
         };
-        if let Err(error) = self.viewers.open(path, strings, hwnd) {
-            self.log_error(format!("The Viewer did not open: {error}"));
-        }
+        let commands = Commands {
+            folders: String::new(),
+            files: viewer,
+            location: String::new(),
+        };
+        let file = Entries::Ready(vec![Selected {
+            path,
+            is_folder: false,
+        }]);
+        self.created().work.borrow_mut().shell.open_entries(
+            list,
+            EntryAction::Open,
+            file,
+            commands,
+        );
     }
 
     /// Admission stays disabled until the complete recovery read is adopted.

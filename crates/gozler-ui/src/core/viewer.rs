@@ -8,9 +8,14 @@
 //! on any input, and each allocates in proportion to its input.
 //!
 //! The code page for text without a byte order mark that is not UTF-8 is
-//! Windows' ANSI code page, which only Win32 can decode; the caller passes
-//! that decoding to [`decode_piece`]. The line functions count a byte of
-//! that code page as a character.
+//! Windows' ANSI code page, and the person can choose another; only Win32
+//! decodes code pages, so the caller passes that decoding to
+//! [`decode_piece`]. The line functions count a byte of a code page as a
+//! character.
+
+pub(crate) mod find;
+
+use std::ops::Range;
 
 /// How many bytes from the start of the file choose Text or Hex and the
 /// encoding.
@@ -47,31 +52,88 @@ pub(crate) enum Mode {
     Hex,
 }
 
+/// A code page, which only Windows decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CodePage {
+    /// Windows' ANSI code page.
+    Ansi,
+    /// The OEM code page, in which MS-DOS programs and the console write.
+    Oem,
+    /// One of [`CODE_PAGES`], by its number.
+    Number(u16),
+}
+
+/// The code pages of Encoding > Other code pages: each one's number, its
+/// name and the catalogue key of the language or script it writes.
+pub(crate) const CODE_PAGES: [(u16, &str, &str); 16] = [
+    (1250, "Windows-1250", "viewer.central_european"),
+    (1251, "Windows-1251", "viewer.cyrillic"),
+    (20866, "KOI8-R", "viewer.cyrillic"),
+    (21866, "KOI8-U", "viewer.cyrillic"),
+    (1252, "Windows-1252", "viewer.western_european"),
+    (1253, "Windows-1253", "viewer.greek"),
+    (1254, "Windows-1254", "viewer.turkish"),
+    (1255, "Windows-1255", "viewer.hebrew"),
+    (1256, "Windows-1256", "viewer.arabic"),
+    (1257, "Windows-1257", "viewer.baltic"),
+    (1258, "Windows-1258", "viewer.vietnamese"),
+    (874, "Windows-874", "viewer.thai"),
+    (932, "Shift_JIS", "viewer.japanese"),
+    (936, "GBK", "viewer.chinese_simplified"),
+    (950, "Big5", "viewer.chinese_traditional"),
+    (949, "EUC-KR", "viewer.korean"),
+];
+
+/// Decodes bytes of a code page, as Windows does; the caller of a function
+/// that decodes passes it.
+pub(crate) type CodePageText = dyn Fn(CodePage, &[u8]) -> String;
+
 /// How the bytes of a text file spell its characters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Encoding {
     Utf8,
     Utf16Le,
     Utf16Be,
-    /// Windows' ANSI code page.
-    Ansi,
+    CodePage(CodePage),
 }
 
 impl Encoding {
+    /// Every encoding the Encoding menu offers, in its order.
+    pub(crate) fn all() -> impl Iterator<Item = Encoding> {
+        [
+            Encoding::CodePage(CodePage::Ansi),
+            Encoding::CodePage(CodePage::Oem),
+            Encoding::Utf8,
+            Encoding::Utf16Le,
+            Encoding::Utf16Be,
+        ]
+        .into_iter()
+        .chain(
+            CODE_PAGES
+                .iter()
+                .map(|(number, ..)| Encoding::CodePage(CodePage::Number(*number))),
+        )
+    }
+
     /// The name the status bar shows.
     pub(crate) fn name(self) -> &'static str {
         match self {
             Encoding::Utf8 => "UTF-8",
             Encoding::Utf16Le => "UTF-16 LE",
             Encoding::Utf16Be => "UTF-16 BE",
-            Encoding::Ansi => "ANSI",
+            Encoding::CodePage(CodePage::Ansi) => "ANSI",
+            Encoding::CodePage(CodePage::Oem) => "OEM",
+            Encoding::CodePage(CodePage::Number(number)) => CODE_PAGES
+                .iter()
+                .find(|(each, ..)| *each == number)
+                .map_or("", |(_, name, _)| name),
         }
     }
 
     /// The bytes in one code unit.
     fn width(self) -> usize {
         match self {
-            Encoding::Utf8 | Encoding::Ansi => 1,
+            Encoding::Utf8 | Encoding::CodePage(_) => 1,
             Encoding::Utf16Le | Encoding::Utf16Be => 2,
         }
     }
@@ -80,7 +142,7 @@ impl Encoding {
     /// means for finding lines.
     fn kind(self, unit: &[u8]) -> Unit {
         let value = match self {
-            Encoding::Utf8 | Encoding::Ansi => u16::from(unit[0]),
+            Encoding::Utf8 | Encoding::CodePage(_) => u16::from(unit[0]),
             Encoding::Utf16Le => u16::from_le_bytes([unit[0], unit[1]]),
             Encoding::Utf16Be => u16::from_be_bytes([unit[0], unit[1]]),
         };
@@ -114,7 +176,9 @@ pub(crate) struct Detected {
     pub(crate) data_start: u64,
 }
 
-fn byte_order_mark(first: &[u8]) -> Option<Detected> {
+/// The encoding that the byte order mark at the start of `first`, the
+/// file's first bytes, names, and where the text after it starts.
+pub(crate) fn byte_order_mark(first: &[u8]) -> Option<Detected> {
     let (encoding, data_start) = match first {
         [0xEF, 0xBB, 0xBF, ..] => (Encoding::Utf8, 3),
         [0xFF, 0xFE, ..] => (Encoding::Utf16Le, 2),
@@ -162,8 +226,26 @@ pub(crate) fn detect_encoding(first: &[u8]) -> Detected {
         Err(e) => e.error_len().is_none() && first.len() == SNIFF_BYTES,
     };
     Detected {
-        encoding: if utf8 { Encoding::Utf8 } else { Encoding::Ansi },
+        encoding: if utf8 {
+            Encoding::Utf8
+        } else {
+            Encoding::CodePage(CodePage::Ansi)
+        },
         data_start: 0,
+    }
+}
+
+/// A file whose [`byte_order_mark`] is `mark` read as `encoding`, which
+/// the person chose: its text starts after a mark of that encoding, and at
+/// the file's first byte otherwise, because a mark of another encoding is
+/// text in this one.
+pub(crate) fn chosen_encoding(mark: Option<Detected>, encoding: Encoding) -> Detected {
+    let data_start = mark
+        .filter(|mark| mark.encoding == encoding)
+        .map_or(0, |mark| mark.data_start);
+    Detected {
+        encoding,
+        data_start,
     }
 }
 
@@ -172,18 +254,13 @@ pub(crate) fn detect_encoding(first: &[u8]) -> Detected {
 /// character that the piece's end cuts off, such as at the byte limit of a
 /// long line's piece, also shows as �.
 ///
-/// `ansi` decodes bytes in the ANSI code page. It is only called for
-/// [`Encoding::Ansi`].
-pub(crate) fn decode_piece(
-    encoding: Encoding,
-    bytes: &[u8],
-    ansi: &dyn Fn(&[u8]) -> String,
-) -> String {
+/// `code_page` decodes the bytes of an [`Encoding::CodePage`].
+pub(crate) fn decode_piece(encoding: Encoding, bytes: &[u8], code_page: &CodePageText) -> String {
     match encoding {
         Encoding::Utf8 => String::from_utf8_lossy(bytes).into_owned(),
         Encoding::Utf16Le => decode_utf16(bytes, u16::from_le_bytes),
         Encoding::Utf16Be => decode_utf16(bytes, u16::from_be_bytes),
-        Encoding::Ansi => ansi(bytes),
+        Encoding::CodePage(page) => code_page(page, bytes),
     }
 }
 
@@ -271,9 +348,8 @@ pub(crate) fn word_at(line: &str, index: usize) -> std::ops::Range<usize> {
     let Some(&c) = chars.get(index) else {
         return index..index;
     };
-    let word = |c: char| c.is_alphanumeric() || c == '_';
-    let same: fn(char) -> bool = if word(c) {
-        word
+    let same: fn(char) -> bool = if is_word(c) {
+        is_word
     } else if c.is_whitespace() {
         char::is_whitespace
     } else {
@@ -287,6 +363,12 @@ pub(crate) fn word_at(line: &str, index: usize) -> std::ops::Range<usize> {
             .count();
     let end = index + chars[index..].iter().take_while(|&&c| same(c)).count();
     start..end
+}
+
+/// Whether `c` belongs to a word, as a double-click and Find's whole words
+/// read it: a letter, a digit or `_`.
+pub(crate) fn is_word(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// A place between two characters of the text: the line piece that holds
@@ -311,14 +393,14 @@ pub(crate) fn text_between(
     from: TextPoint,
     to: TextPoint,
     last: bool,
-    ansi: &dyn Fn(&[u8]) -> String,
+    code_page: &CodePageText,
 ) -> String {
     let piece_end =
         |at: usize| at + piece_len(encoding, &bytes[at..], last).unwrap_or(bytes.len() - at);
     let to_offset = usize::try_from(to.line.saturating_sub(from.line))
         .unwrap_or(usize::MAX)
         .min(bytes.len());
-    let tail = decode_piece(encoding, &bytes[to_offset..piece_end(to_offset)], ansi);
+    let tail = decode_piece(encoding, &bytes[to_offset..piece_end(to_offset)], code_page);
     let tail = without_terminator(&tail);
     let tail = &tail[..char_offset(tail, to.char)];
     if to_offset == 0 {
@@ -327,11 +409,11 @@ pub(crate) fn text_between(
     // `to.line` can start inside the piece at `from.line`, where the line
     // started too far back for the two directions to agree on its pieces.
     let first_end = piece_end(0).min(to_offset);
-    let head = decode_piece(encoding, &bytes[..first_end], ansi);
+    let head = decode_piece(encoding, &bytes[..first_end], code_page);
     let skip = from.char.min(without_terminator(&head).chars().count());
     // Pieces start at characters, so the whole span decodes as its pieces
     // do, in one string of up to Copy's limit.
-    let mut text = decode_piece(encoding, &bytes[..to_offset], ansi);
+    let mut text = decode_piece(encoding, &bytes[..to_offset], code_page);
     text.drain(..char_offset(&text, skip));
     text.push_str(tail);
     text
@@ -562,7 +644,7 @@ pub(crate) fn text_place(
 
 /// How many hex digits the offset of a row has: 8, or 16 for a file of 4 GB
 /// or more.
-fn offset_digits(file_len: u64) -> usize {
+pub(crate) fn offset_digits(file_len: u64) -> usize {
     if file_len >= 1 << 32 { 16 } else { 8 }
 }
 
@@ -621,14 +703,14 @@ pub(crate) fn copy_text(
     mode: Mode,
     detected: Detected,
     bytes: &[u8],
-    ansi: &dyn Fn(&[u8]) -> String,
+    code_page: &CodePageText,
 ) -> String {
     match mode {
         Mode::Text => {
             let start = usize::try_from(detected.data_start)
                 .unwrap_or(usize::MAX)
                 .min(bytes.len());
-            decode_piece(detected.encoding, &bytes[start..], ansi)
+            decode_piece(detected.encoding, &bytes[start..], code_page)
         }
         Mode::Hex => {
             let len = bytes.len() as u64;
@@ -645,6 +727,65 @@ pub(crate) fn copy_text(
             text
         }
     }
+}
+
+/// `bytes` as Copy puts a selection of bytes in Hex on the clipboard: two
+/// hex digits for each byte, with a space between them, as Find's hex
+/// bytes take them.
+pub(crate) fn hex_bytes_text(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut text = String::with_capacity(bytes.len() * 3);
+    for (i, byte) in bytes.iter().enumerate() {
+        let space = if i == 0 { "" } else { " " };
+        let _ = write!(text, "{space}{byte:02X}");
+    }
+    text
+}
+
+/// The columns of the hex row's text that show the bytes `bytes` of its
+/// 16: their hex digits and their characters, as [`hex_row`] places them
+/// after an offset of `offset_digits` characters.
+pub(crate) fn hex_columns(offset_digits: usize, bytes: Range<usize>) -> [Range<usize>; 2] {
+    let bytes = bytes.start.min(HEX_ROW_BYTES)..bytes.end.min(HEX_ROW_BYTES);
+    if bytes.is_empty() {
+        return [0..0, 0..0];
+    }
+    // The offset and 2 spaces; 3 columns for each byte, and one more from
+    // the ninth; the characters after the 16 bytes and 2 more spaces.
+    let digit = |i: usize| offset_digits + 2 + 3 * i + usize::from(i >= HEX_ROW_BYTES / 2);
+    let characters = offset_digits + 2 + 3 * HEX_ROW_BYTES + 1 + 1;
+    [
+        digit(bytes.start)..digit(bytes.end - 1) + 2,
+        characters + bytes.start..characters + bytes.end,
+    ]
+}
+
+/// Where a match of Find at the bytes `found` lies in the text: the place
+/// before its first character, the column where that character starts once
+/// tabs expand, and the place after its last. `bytes` are the file's bytes
+/// from `base`, from [`LINE_BYTES`] before `found` (or from `data_start`)
+/// through its end.
+pub(crate) fn found_in_text(
+    encoding: Encoding,
+    data_start: u64,
+    bytes: &[u8],
+    base: u64,
+    found: &Range<u64>,
+    code_page: &CodePageText,
+) -> (TextPoint, usize, TextPoint) {
+    let point = |at: u64| {
+        let end = usize::try_from(at.saturating_sub(base))
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let line = line_start(encoding, data_start, &bytes[..end], at).max(base);
+        let from = usize::try_from(line - base).unwrap_or(end).min(end);
+        let before = decode_piece(encoding, &bytes[from..end], code_page);
+        let char = before.chars().count();
+        (TextPoint { line, char }, column_of(&before, char))
+    };
+    let (start, column) = point(found.start);
+    let (end, _) = point(found.end);
+    (start, column, end)
 }
 
 /// The largest position of a scroll bar for a file of `file_len` bytes: a
@@ -681,7 +822,9 @@ pub(crate) fn scroll_offset(file_len: u64, position: i32) -> u64 {
 mod tests {
     use super::*;
 
-    fn latin1(bytes: &[u8]) -> String {
+    const ANSI: Encoding = Encoding::CodePage(CodePage::Ansi);
+
+    pub(super) fn latin1(_: CodePage, bytes: &[u8]) -> String {
         bytes.iter().map(|&b| char::from(b)).collect()
     }
 
@@ -713,7 +856,7 @@ mod tests {
         assert_eq!(detect(&[0xFF, 0xFE, b'a', 0]), (Encoding::Utf16Le, 2));
         assert_eq!(detect(&[0xFE, 0xFF, 0, b'a']), (Encoding::Utf16Be, 2));
         assert_eq!(detect("h\u{e9}llo".as_bytes()), (Encoding::Utf8, 0));
-        assert_eq!(detect(b"h\xE9llo"), (Encoding::Ansi, 0));
+        assert_eq!(detect(b"h\xE9llo"), (ANSI, 0));
         assert_eq!(detect(b""), (Encoding::Utf8, 0));
     }
 
@@ -722,7 +865,7 @@ mod tests {
         let mut cut = vec![b'a'; SNIFF_BYTES - 1];
         cut.push(0xC3);
         assert_eq!(detect_encoding(&cut).encoding, Encoding::Utf8);
-        assert_eq!(detect_encoding(b"ab\xC3").encoding, Encoding::Ansi);
+        assert_eq!(detect_encoding(b"ab\xC3").encoding, ANSI);
         // Bytes after the first 64 KB are not read.
         let mut late = vec![b'a'; SNIFF_BYTES];
         late.push(0xFF);
@@ -748,7 +891,7 @@ mod tests {
             decode(Encoding::Utf16Le, &[0x3D, 0xD8, 0x00, 0xDE]),
             "\u{1F600}"
         );
-        assert_eq!(decode(Encoding::Ansi, b"caf\xE9"), "caf\u{e9}");
+        assert_eq!(decode(ANSI, b"caf\xE9"), "caf\u{e9}");
     }
 
     #[test]
@@ -1109,12 +1252,7 @@ mod tests {
             data_start: u64,
             last: bool,
         ) -> Result<(), TestCaseError> {
-            for encoding in [
-                Encoding::Utf8,
-                Encoding::Utf16Le,
-                Encoding::Utf16Be,
-                Encoding::Ansi,
-            ] {
+            for encoding in [Encoding::Utf8, Encoding::Utf16Le, Encoding::Utf16Be, ANSI] {
                 let next = next_line_start(encoding, bytes, position, false);
                 prop_assert!(
                     next.is_some_and(|n| n > position && n - position <= LINE_BYTES as u64)

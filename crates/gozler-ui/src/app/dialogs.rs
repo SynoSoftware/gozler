@@ -1,7 +1,8 @@
 //! The window's dialogs. Each copies the text it shows before it opens, so
 //! no model borrow is held while its modal loop runs (DESIGN.md:
 //! window rule 1). `MainWindow::open_dialog` runs each, and the dialog module
-//! sets its fixed captions from `core::captions::CaptionTable`.
+//! sets its fixed captions from `core::captions::CaptionTable`; a Viewer
+//! runs its own Find.
 
 use super::main_window::MainWindow;
 use super::work::{ShellTarget, Transparency};
@@ -10,7 +11,8 @@ use crate::core::ids::ControlId;
 use crate::core::query::{DateRange, DateRangeError, Day, SizeRange, SizeRangeError, SizeUnit};
 use crate::core::text::{Numbers, Strings};
 use crate::core::typed::{self, Refusal};
-use crate::win::controls::{Balloon, DatePicker, DropDownList, Edit, Tooltip};
+use crate::core::viewer::find::Query;
+use crate::win::controls::{Balloon, CheckBox, DatePicker, DropDownList, Edit, Tooltip};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::{self, Hwnd};
@@ -1012,6 +1014,126 @@ impl DialogProc for SelectFiles {
                     && let Ok(mask) = NameMask::parse(&text)
                 {
                     self.chosen.replace(Some((text, mask)));
+                    dialog::end(dialog, DialogEnd::Ok);
+                }
+                true
+            }
+            DialogMessage::Command { .. }
+            | DialogMessage::LinkActivated { .. }
+            | DialogMessage::DoubleClicked { .. }
+            | DialogMessage::Timer { .. }
+            | DialogMessage::Reply
+            | DialogMessage::Tree { .. }
+            | DialogMessage::Focus { .. }
+            | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Other => false,
+        }
+    }
+}
+
+/// The Viewer's Find: the text, or the bytes in hex, to look for
+/// (DESIGN.md: The Viewer).
+pub(super) struct ViewerFind {
+    /// What the dialog shows first, and what OK chose.
+    query: RefCell<Query>,
+    /// Hex bytes applies, as in the Viewer; the compare window looks for
+    /// text only (DESIGN.md: Compare by content).
+    hex_allowed: bool,
+}
+
+impl ViewerFind {
+    pub(super) fn new(query: Query) -> ViewerFind {
+        ViewerFind {
+            query: RefCell::new(query),
+            hex_allowed: true,
+        }
+    }
+
+    /// The dialog with Hex bytes cleared and disabled.
+    pub(super) fn without_hex(query: Query) -> ViewerFind {
+        ViewerFind {
+            query: RefCell::new(Query {
+                hex: false,
+                ..query
+            }),
+            hex_allowed: false,
+        }
+    }
+
+    pub(super) fn chosen(self) -> Query {
+        self.query.into_inner()
+    }
+
+    fn check_box(dialog: Hwnd, id: ControlId) -> Option<CheckBox> {
+        CheckBox::of_dialog(dialog, id.id())
+    }
+
+    /// The query as the controls show it.
+    fn read(dialog: Hwnd) -> Query {
+        let checked = |id| ViewerFind::check_box(dialog, id).is_some_and(CheckBox::is_checked);
+        Query {
+            text: Edit::of_dialog(dialog, ControlId::ViewerFindText.id())
+                .map(Edit::text)
+                .unwrap_or_default(),
+            match_case: checked(ControlId::ViewerFindCase),
+            whole_words: checked(ControlId::ViewerFindWords),
+            hex: checked(ControlId::ViewerFindHex),
+        }
+    }
+
+    /// Case and whole words do not apply to hex bytes, and OK stays
+    /// disabled until there is something to look for.
+    fn update(dialog: Hwnd) {
+        let query = ViewerFind::read(dialog);
+        for id in [ControlId::ViewerFindCase, ControlId::ViewerFindWords] {
+            if let Some(check_box) = ViewerFind::check_box(dialog, id) {
+                check_box.hwnd().set_enabled(!query.hex);
+            }
+        }
+        dialog::set_ok_enabled(dialog, query.is_valid());
+    }
+}
+
+impl DialogProc for ViewerFind {
+    fn init(&self, dialog: Hwnd) -> Opened {
+        let query = self.query.borrow();
+        if let Some(text) = Edit::of_dialog(dialog, ControlId::ViewerFindText.id()) {
+            text.hwnd().set_text(&query.text);
+            text.select_all();
+        }
+        for (id, checked) in [
+            (ControlId::ViewerFindCase, query.match_case),
+            (ControlId::ViewerFindWords, query.whole_words),
+            (ControlId::ViewerFindHex, query.hex),
+        ] {
+            if let Some(check_box) = ViewerFind::check_box(dialog, id) {
+                check_box.set_checked(checked);
+            }
+        }
+        if let Some(hex) = ViewerFind::check_box(dialog, ControlId::ViewerFindHex) {
+            hex.hwnd().set_enabled(self.hex_allowed);
+        }
+        ViewerFind::update(dialog);
+        Opened {
+            focus: ControlId::ViewerFindText.id(),
+            fonts: Vec::new(),
+        }
+    }
+
+    fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        match message {
+            DialogMessage::Edited { .. } => {
+                ViewerFind::update(dialog);
+                true
+            }
+            DialogMessage::Command { id } if id == ControlId::ViewerFindHex.id() => {
+                ViewerFind::update(dialog);
+                true
+            }
+            DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
+                let query = ViewerFind::read(dialog);
+                if query.is_valid() {
+                    self.query.replace(query);
                     dialog::end(dialog, DialogEnd::Ok);
                 }
                 true
