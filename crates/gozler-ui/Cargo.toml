@@ -24,6 +24,8 @@ gozler-core = { path = "../gozler-core" }
 gozler-client = { path = "../gozler-client" }
 gozler-fileops = { path = "../gozler-fileops" }
 jiff.workspace = true
+# Multi-Rename's search and replace, in the syntax of Search's `regex:`.
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

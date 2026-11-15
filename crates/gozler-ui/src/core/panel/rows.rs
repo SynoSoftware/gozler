@@ -281,12 +281,19 @@ impl FolderRows {
         (entry.hash == name.hash && entry.name == name.raw).then(|| self.shown_row(at, up))
     }
 
-    pub(super) fn awaited_row(&self, awaited: &Awaited, up: u64) -> Option<u64> {
+    /// The rows that show the awaited names; none while a row still shows
+    /// the name the rename takes away.
+    pub(super) fn awaited_rows(&self, awaited: &Awaited, up: u64) -> Vec<u64> {
         let renamed = awaited
             .from
             .as_ref()
             .is_some_and(|from| self.row_named(from, up).is_some());
-        self.row_named(&awaited.name, up).filter(|_| !renamed)
+        if renamed {
+            return Vec::new();
+        }
+        (awaited.names.iter())
+            .filter_map(|name| self.row_named(name, up))
+            .collect()
     }
     pub(super) fn count(&self, up: u64) -> u64 {
         up + self.shown_len() as u64

@@ -23,7 +23,7 @@ use super::settings::SettingsDialog;
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar, WorkId};
 use super::viewer::{Files as ViewerFiles, Viewers};
 use super::work::{
-    AdministratorStart, Awaited, CopyFailure, CopyNotice, DeleteAgain, OpenTarget, Opened,
+    AdministratorStart, Awaited, Chosen, CopyFailure, CopyNotice, DeleteAgain, OpenTarget, Opened,
     PathAction, PathPurpose, PreparedPaths, QueueReady, RegistryAnswer, RegistryRead,
     ReleaseAnswer, ReleasePurpose, ShellPurpose, ShellTarget, Surface,
 };
@@ -122,6 +122,7 @@ mod drops;
 mod filters;
 mod inspector;
 mod key_bar;
+mod multi_rename;
 mod panels;
 mod search;
 mod selection;
@@ -495,6 +496,8 @@ pub(crate) struct MainWindow {
     operation_delivery: RefCell<Option<OperationDelivery>>,
     delivering_operations: Cell<bool>,
     administrator_delete: RefCell<AdministratorDelete>,
+    /// Multi-Rename's fields and the batches Undo reverses, until Exit.
+    multi_rename: RefCell<multi_rename::Session>,
     shutdown: RefCell<Option<win::window::Shutdown>>,
 }
 
@@ -653,6 +656,7 @@ impl MainWindow {
             operation_delivery: RefCell::new(None),
             delivering_operations: Cell::new(false),
             administrator_delete: RefCell::new(AdministratorDelete::None),
+            multi_rename: RefCell::default(),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -2118,6 +2122,7 @@ impl MainWindow {
                 CommandId::CopyToFolder => return self.copy_to_folder(hwnd, false, list),
                 CommandId::MoveToFolder => return self.copy_to_folder(hwnd, true, list),
                 CommandId::Synchronize => return self.synchronize_folders(hwnd, None),
+                CommandId::MultiRename => return self.multi_rename_selected(list),
                 CommandId::Delete => return self.delete_selected(hwnd, list),
                 CommandId::NewFolder => {
                     return self.controls().panels.new_folder(self, hwnd, active);
@@ -2540,36 +2545,32 @@ impl MainWindow {
                         .operations
                         .paths_are_current(purpose, id)
                     {
-                        self.retire_paths(prepared.paths);
+                        self.retire_chosen(prepared.chosen);
                         continue;
                     }
-                    match prepared.action {
-                        PathAction::Transfer { moves } => {
-                            self.copy_paths_to_folder(
-                                hwnd,
-                                moves,
-                                prepared.paths,
-                                prepared.single_folder,
-                            );
+                    match (prepared.action, prepared.chosen) {
+                        (PathAction::Transfer { moves }, Chosen::Paths(paths)) => {
+                            self.copy_paths_to_folder(hwnd, moves, paths, prepared.single_folder);
                         }
-                        PathAction::PanelTransfer {
-                            moves,
-                            place,
-                            selected,
-                            start,
-                        } => {
-                            self.transfer_paths(
-                                hwnd,
+                        (
+                            PathAction::PanelTransfer {
                                 moves,
                                 place,
                                 selected,
-                                *start,
-                                prepared.paths,
-                            );
+                                start,
+                            },
+                            Chosen::Paths(paths),
+                        ) => {
+                            self.transfer_paths(hwnd, moves, place, selected, *start, paths);
                         }
-                        PathAction::Delete { place, unseen } => {
-                            self.delete_paths(hwnd, place, unseen, prepared.paths)
+                        (PathAction::Delete { place, unseen }, Chosen::Paths(paths)) => {
+                            self.delete_paths(hwnd, place, unseen, paths)
                         }
+                        (PathAction::MultiRename { place }, Chosen::Rows { rows, known }) => {
+                            self.multi_rename(hwnd, place, rows, known)
+                        }
+                        // The worker pairs each action with what it acts on.
+                        (_, chosen) => self.retire_chosen(chosen),
                     }
                 }
                 ModalStep::OpenSettings(id, read) => {
@@ -3865,6 +3866,7 @@ impl MainWindow {
             {
                 self.administrator_delete_ended(hwnd, id);
             }
+            self.keep_ended_renames();
             self.model.borrow_mut().observe_operations(
                 snapshot,
                 Arc::clone(&taken),
@@ -4306,9 +4308,13 @@ impl MainWindow {
     }
 
     fn retire_paths(&self, paths: Vec<PathBuf>) {
-        let items = paths.len();
+        self.retire_chosen(Chosen::Paths(paths));
+    }
+
+    fn retire_chosen(&self, chosen: Chosen) {
+        let items = chosen.items();
         let mut retired = Retirement::default();
-        retired.push(paths, items);
+        retired.push(chosen, items);
         self.created().work.borrow_mut().retire(retired);
     }
 

@@ -172,6 +172,9 @@ pub(crate) trait Numbers {
     fn date_time_seconds(&self, filetime: i64) -> String;
     /// A day in the short date format.
     fn date(&self, date: jiff::civil::Date) -> String;
+    /// A time of day in the short time format, as Multi-Rename's `[t]`
+    /// inserts it.
+    fn time(&self, time: jiff::civil::Time) -> String;
     /// The separator of a number's decimals, such as `.` or `,`.
     fn decimal_separator(&self) -> &str;
 }
@@ -650,6 +653,10 @@ pub(crate) mod tests {
 
         fn date(&self, date: jiff::civil::Date) -> String {
             date.to_string()
+        }
+
+        fn time(&self, time: jiff::civil::Time) -> String {
+            format!("{:02}:{:02}", time.hour(), time.minute())
         }
 
         fn decimal_separator(&self) -> &str {

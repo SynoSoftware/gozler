@@ -39,9 +39,10 @@ pub(crate) struct Ready {
     pub(crate) work: Vec<(Plan, Work)>,
     /// Selected entries whose identity cannot be read.
     pub(crate) failures: Vec<Listed>,
-    /// The request with prepare's decision for a [`Asked::Typed`]
-    /// destination, which the queue keeps and saves instead of the asked
-    /// one, so Continue after a crash writes where the run wrote.
+    /// The request with prepare's decisions, which the queue keeps and saves
+    /// instead of the asked one, so Continue after a crash writes where the
+    /// run wrote: the destination of a [`Asked::Typed`] one, or a batch
+    /// rename's names, identities and temporary names.
     pub(crate) resolved: Option<Request>,
 }
 
@@ -61,6 +62,7 @@ pub(crate) enum Work {
         to: Vec<u16>,
         name: Vec<u16>,
     },
+    Renames(Box<crate::renames::windows::Batch>),
     NewFolder {
         path: Vec<u16>,
         verbatim: Vec<u16>,
@@ -170,6 +172,9 @@ pub(crate) fn prepare(request: &Request, preparing: &Preparation<'_>) -> Result<
             let path: Vec<u16> = path.as_os_str().encode_wide().collect();
             let verbatim = verbatim(&path);
             Ok(one(Plan::default(), Work::NewFolder { path, verbatim }))
+        }
+        Request::Rename { entries, in_use } => {
+            crate::renames::windows::prepare(entries, *in_use, preparing)
         }
     }
 }

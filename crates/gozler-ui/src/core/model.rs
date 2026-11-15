@@ -31,8 +31,8 @@ use super::selection::{
     Sums, wide_path,
 };
 use super::settings::{
-    Changes, Choices, CompareState, Mode, Placement, SavedColumn, Settings, SettingsPage,
-    ViewerState,
+    Changes, Choices, CompareState, Mode, MultiRenameState, Placement, SavedColumn, Settings,
+    SettingsPage, ViewerState,
 };
 use super::text::{self, LanguageChoice, Strings};
 use super::update;
@@ -1185,6 +1185,14 @@ impl Model {
 
     pub(crate) fn set_compare(&mut self, state: CompareState) {
         self.settings.window.compare = state;
+    }
+
+    pub(crate) fn multi_rename(&self) -> &MultiRenameState {
+        &self.settings.window.multi_rename
+    }
+
+    pub(crate) fn set_multi_rename(&mut self, state: MultiRenameState) {
+        self.settings.window.multi_rename = state;
     }
 
     pub(crate) fn set_viewer(&mut self, state: ViewerState) {

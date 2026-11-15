@@ -846,6 +846,7 @@ in the sending process. These options add no indexing or content reads.
 | C38 | View | rows selected and read: exactly 1, a file, or more than 1 | the file, or the selected files, in a Viewer (see "The Viewer"); `F3` runs it, as in a panel |
 | C34 | Synchronize folders… | the window owns the file operations | compares explicit source and destination folders, then offers Synchronize; no default shortcut |
 | C39 | Compare by content… | exactly 2 rows selected and read, both files | the two files, in the comparison tool or the compare window (see "Compare by content"); `Ctrl+Shift+C` runs it |
+| C40 | Multi-Rename… | as C27 | the selected files, renamed by a rule (see "Multi-Rename"); `Ctrl+M` runs it |
 
 Copy to folder… and Move to folder… have no default shortcut in Search, because File Explorer has none and `F5` is Refresh in Search. `Delete`, `Shift+Delete`, `Ctrl+X` and `Ctrl+V` are keys of the list, not accelerators (window rule 8), so in the search box they keep deleting, cutting and pasting text. `Esc` never stops a file operation, because one stray key would leave a copy half done; File > Cancel and the status bar's Cancel do. Select all reaches rows the person never saw, up to 100,000 (`S4`), so the Delete question gives the count.
 
@@ -855,7 +856,7 @@ Open, Open file location and Explore stop at 15 entries, because File Explorer a
 
 Groups are separated by a separator, in this order:
 
-- **File:** Open, Open file location, Show in Commander, View, Properties | Copy to folder…, Move to folder…, Delete | Synchronize folders…, Compare by content… | Export results…, Cancel | Settings… | Exit
+- **File:** Open, Open file location, Show in Commander, View, Properties | Copy to folder…, Move to folder…, Multi-Rename…, Delete | Synchronize folders…, Compare by content… | Export results…, Cancel | Settings… | Exit
 - **Edit:** Cut, Copy, Paste, Copy path, Copy name, Copy folder | Select all, Clear selection | Find. Cut, Copy and Paste are in File Explorer's order.
 - **View:** Commander (`Alt+F12`) | Filters, Inspector, Columns | Sort by | Refresh | File operations
 - **Help:** Search syntax | About Gozler
@@ -1491,6 +1492,7 @@ A row of push buttons under the panels: `F3 View`, `F4 Edit`, `F5 Copy`, `F6 Mov
 | Edit | `F4` | never | — |
 | Copy to folder… | `F5` | an entry is selected or focused | the selected entries, or the focused row |
 | Move to folder… | `F6` | as Copy to folder… | as Copy to folder… |
+| Multi-Rename… | `Ctrl+M` | as Copy to folder… | as Copy to folder… (see "Multi-Rename") |
 | New folder… | `F7` | the panel shows a folder | the panel's folder |
 | Delete | `F8`, `Delete`, `Shift+Delete` | an entry is selected or focused | the selected entries, or the focused row |
 | Find | `Ctrl+F` | always | the active panel (see "Search in a panel") |
@@ -1590,7 +1592,7 @@ rows publish and retire together, including after watch and taken-entry changes.
 
 The menus follow Search's (see "Menus"): File acts on the selected entries and the window, Edit on the selection, View on what the window shows. The items of the menu bar show their keys, a panel's list keys included, such as `Esc` beside Clear selection, so the menus teach the keys as the key bar does.
 
-- **File:** Open, View, Edit, Properties | Copy to folder…, Move to folder…, New folder…, Delete | Synchronize folders…, Compare by content… | Cancel | Settings… | Exit. Edit is disabled, as in the key bar. Cancel stops the job that the status bar shows, as its Cancel does.
+- **File:** Open, View, Edit, Properties | Copy to folder…, Move to folder…, Multi-Rename…, New folder…, Delete | Synchronize folders…, Compare by content… | Cancel | Settings… | Exit. Edit is disabled, as in the key bar. Cancel stops the job that the status bar shows, as its Cancel does.
 - **Edit:** Select all, Select files…, Unselect files…, Clear selection | Find
 - **View:** Search (`Alt+F7`) | Sort by ▸ | Refresh | File operations. Search's View menu instead offers Commander (`Alt+F12`).
 - **Help** and **Language** as in Search.
@@ -1669,6 +1671,189 @@ File > Compare by content… compares two files in a window of its own, as Total
 - **From another program:** `gozler-ui.exe --compare <a> <b>` opens only the compare window, in a process of its own that ends when the window closes, so Git and other tools can use it as their diff program. Identical files show only the message. This process reads `ui.json` and never writes it, because the main window owns it.
 - **The window remembers** its size and position, the three check boxes, the extra lines, the two-line list, Above each other and the text size in `ui.json`.
 - **Bytes from the disk are untrusted:** as in `core::viewer`, no function of `core::compare` panics on any input.
+
+### Multi-Rename
+
+Multi-Rename… (`Ctrl+M`, in both modes) gives many entries new names in one step, as Total Commander's Multi-Rename tool does (`cm_MultiRenameFiles`). The person writes a rule, such as "the old name, a dash and a number", sees every new name before anything changes, and starts the renames. The engine does the renames, never replaces a file, and can reverse them (see "Batch rename"). A Total Commander mask works unchanged, except for the placeholders that "Left out" lists. `core::multi_rename` owns the rules, and the dialog is `app::main_window::multi_rename`.
+
+- **It acts on the selected entries, or on the focused row,** never on `..`, in Search, in a search panel and in a folder panel, so found files are renamed in one step; Total Commander needs Feed to listbox first. It is enabled as Copy to folder… is. The dialog opens at once: it takes each entry's path, kind, size and date modified from the rows the list already holds, and reads nothing from the disk.
+- **The fields start as the person left them** while the window runs, and as the defaults after Gozler starts: name `[N]`, extension `[E]`, empty Search for and Replace with, Extension too on and the other check boxes off, Case Unchanged, counter start 1, step 1, digits 1. The name box has the focus.
+- **A dialog that stays open after Rename,** as Total Commander's does: the renamed rows leave the list, the rows that failed stay, so Rename tries them again, and Undo is one key away.
+
+#### The dialog
+
+The title bar says Multi-Rename. The dialog is modal and resizable; the list and the status line take the extra room, and the size is saved in `ui.json`. Windows draws every control.
+
+| Area | Controls |
+| --- | --- |
+| Name | an editable combo box with the name mask and its history; buttons Name, Range…, Counter, Date, Time and More |
+| Extension | an editable combo box with the extension mask and its history; buttons Extension, Range…, Counter |
+| Case | a drop-down list: Unchanged, lowercase, UPPERCASE, First letter uppercase, First Letter Of Each Word, Title case (English) |
+| Search and replace | Search for and Replace with, editable combo boxes with history; check boxes Match case, First only, Extension too, Regular expression, Whole name |
+| Counter | Start at, Step by, and Digits, a drop-down list of 1 to 10 and Auto |
+| Saved renames | a drop-down list, `F2` (see "Saved renames") |
+| The list | a virtual list view: Name, New name, Note, Size, Date modified, and Folder when the entries come from more than one folder |
+| The status line | a row of its own above the buttons, because its counts are longer than the room beside four buttons |
+| Bottom | Edit…, Undo, Rename (the default) and Close |
+
+- **A placeholder button inserts at the caret** of the box it belongs to, in place of the selected text, so the placeholder shows in the box and the person learns it. Its caption is one word, and its tooltip names the placeholder, such as "Insert [N], the name without its extension". Date inserts `[YMD]` and Time `[hms]`. More opens a menu of every other placeholder with what it inserts.
+- **Range…** opens a dialog titled Range with the focused row's name, or its extension, in a read-only edit box and a check box, Count from the end. The person selects characters; OK inserts their range, such as `[N3-6]`, or `[N-8-5]` when counted from the end.
+- **Windows words replace Total Commander's symbols:** Match case for `^`, First only for `1x`, Extension too for `[E]`, Regular expression for RegEx, Whole name for Subst.
+
+#### The mask
+
+The name mask and the extension mask are text with placeholders in square brackets. Text outside brackets goes into the new name as it is. The new name is the name mask's result, then a dot and the extension mask's result when that result is not empty. Placeholders are case-sensitive: `[M]` is the month and `[m]` the minutes.
+
+| Placeholder | Inserts |
+| --- | --- |
+| `[N]` | the name without its extension; a folder's whole name |
+| `[E]` | the extension without its dot; empty for a folder |
+| `[A]` | the whole name, with its extension |
+| `[P]` | the name of the folder that holds the entry |
+| `[G]` | the name of the folder above that |
+| `[B0]` … `[B9]` | a folder counted up from the entry: `[B0]` is `[P]`, `[B1]` is `[G]` |
+| `[B+0]` … `[B+9]` | a folder counted down from the root: `[B+0]` is the drive letter without its colon, or the server of a share, whose `[B+1]` is the share; `[B+1]` the first folder |
+| `[[]`, `[]]` | `[` and `]` |
+| `[I]`, `[I0]`, `[I1]` | nothing |
+
+**A folder has no extension.** `[N]` is a folder's whole name and `[E]` is empty, as a panel's Ext column is empty for a folder, so folders whose names hold dots rename without a switch. Total Commander splits `My.Folder` unless the mask starts with `[I]`; Gozler accepts `[I]` and ignores it, so Total Commander masks keep working.
+
+**Ranges.** Each of `[N]`, `[E]`, `[A]`, `[P]` and `[G]` takes a range after its letter; `[B…]` takes one after `_`, as `[B1_2-5]`. Positions count characters from 1. Each Unicode character counts once, also one that Windows stores as two UTF-16 units, such as an emoji.
+
+| Range | Characters |
+| --- | --- |
+| `[N3]` | the 3rd |
+| `[N-3]` | the 3rd from the end |
+| `[N2-5]` | 2 to 5 |
+| `[N2,5]` | 5 characters from the 2nd |
+| `[N2-]` | from the 2nd to the end |
+| `[N-8,5]` | 5 characters from the 8th from the end |
+| `[N-8-5]` | from the 8th from the end to the 5th from the end |
+| `[N2--5]` | from the 2nd to the 5th from the end |
+| `[N-5-]` | from the 5th from the end to the end |
+| `[N02-9]`, `[N 2-9]` | 2 to 9, filled from the left with zeros or spaces to 8 characters when fewer exist |
+
+A range past the end of a name gives the characters that exist, and an empty text when there are none, so a rule that works on most names keeps working on short ones.
+
+**The counter**
+
+| Placeholder | Inserts |
+| --- | --- |
+| `[C]` | the counter, with the Counter fields |
+| `[C10+5:3]` | the counter starting at 10, stepping by 5, 3 digits; each part is optional, as `[C10]`, `[C+5]`, `[C:3]`, and the step can be `-5` |
+| `[C:a]` | digits from the largest value the counter reaches in the list, as Auto does |
+| `[C+1/100]` | a counter that steps once every 100 rows, such as for `[C+1/100]\[N]` |
+| `[Caa+1]` | letters: `aa`, `ab` … `az`, `ba`; the start sets the width |
+
+Every row of the list takes the next value in the list's order, including a row that keeps its name, so one row's problem never renumbers the others. A placeholder with its own settings takes the parts it leaves out from the Counter fields, so `[C10]` steps and pads as the fields say. Fewer digits than the value needs show the whole value.
+
+**Dates and times**
+
+| Placeholder | Inserts |
+| --- | --- |
+| `[Y]`, `[y]` | the year, 4 or 2 digits |
+| `[M]`, `[D]` | the month and the day, 2 digits |
+| `[h]`, `[H]` | the hour, 00 to 23 or 01 to 12 |
+| `[m]`, `[s]`, `[v]` | minutes and seconds, 2 digits; milliseconds, 3 digits |
+| `[i]`, `[i1]` | `am` or `pm`; `a` or `p` |
+| `[d]`, `[t]` | the date and the time in Windows' short formats, with `/` as `-` and `:` as `.` |
+| `[YMD]`, `[hms]` | several date letters in one bracket insert one after another |
+| `[T1]` | the date fields after it read Date modified; this is the default. An entry whose row has no Date modified keeps its name, and its row says "No date modified" |
+| `[T4]` | the date fields after it read Date taken, or Media created for a video; an entry without one keeps its name, and its row says "No date taken" |
+| `[T1+60m]`, `[T4-2h]` | the same, moved by a number of `s`, `m`, `h`, `D`, `M` or `Y`, such as to correct a camera clock |
+
+Dates are local time, as the list shows them. Date taken comes from Windows' property system, the values that File Explorer shows as Date taken (`System.Photo.DateTaken`) and Media created (`System.Media.DateEncoded`), because a parser of our own would be untrusted-bytes code to maintain for the same answer. It is read once for each entry, on the work owner, only when a mask uses `[T4]`; the status line counts "Reading dates taken… 120 of 400", and the list cannot be sorted or edited until every date is read, because the dates are read in the rows' order.
+
+**Case placeholders** change the case of the text the mask makes after them: `[U]` uppercase, `[L]` lowercase, `[F]` the first letter of each word uppercase and the rest lowercase, `[f]` the same with English title rules, `[n]` back to the case the text has. Words follow the search rule: a word starts at the beginning of the text or after a character that is not a letter or a digit. English title rules keep these words lowercase, except as the first or the last word: a, an, the, at, by, for, in, of, on, to, from, up, and, as, but, or, nor, yet, so, vs.
+
+A mask that cannot be read, such as `[Q]` or a `[` with no `]`, gives no new names; the status line names the first error: "[Q] isn't a placeholder." or "A [ has no ].".
+
+#### Search and replace, Case and the order of the steps
+
+- **Search for** finds text without regard to case, or with it when Match case is on. It does not ignore accents, so `ä` can be replaced by `ae`. `*` stands for any characters and `?` for one. `*` takes as few characters as it can, except at the end of Search for, where it takes the rest of the name.
+- **Several pairs** are separated by `|`: `ä|ö` with `ae|oe`. A pair without a replacement replaces with nothing.
+- **First only** replaces the first match of each pair. **Extension too** also searches the extension; off, only the name changes.
+- **Regular expression** reads Search for in the syntax of Search's `regex:`, and Match case applies to it as above. Replace with takes `$1` to `$9` and `${name}`. `\U`, `\L` and `\F` before a group make that group uppercase, lowercase or first letter uppercase, and `\n` keeps its case; each acts on the next group only. **Whole name**, available only with Regular expression, replaces the whole name with Replace with when the expression matches, and keeps it when it does not. An expression that does not parse gives no new names, and the status line says why.
+- **Case** changes the new name last. Lowercase and UPPERCASE change the whole name, the extension included. First letter uppercase, First Letter Of Each Word and Title case (English) change the name without its extension, because an extension such as `Jpg` is never wanted.
+- **The order** for each row: the masks, then search and replace, then Case, then the checks of "Names that cannot be used", then numbering. A row whose result equals its name keeps its name, and its Note says "No change".
+
+#### Folders and names that cannot be used
+
+- **A `\` in the result** separates folders below the entry's folder; the missing ones are created. `..` goes up a folder, as in Total Commander. A trailing `\` is removed. A rename stays on the entry's drive: a name that goes above the drive's root cannot be used, and a new path that reaches another volume through a mount point is a failure that the engine finds.
+- **Each folder name in the result** follows "Names the person types" (`core::typed`): trailing dots and spaces are trimmed, and a device name such as `NUL` or a character that no name holds cannot be used. A name longer than 255 characters, an empty name, a path that starts with a drive, `\` or `\\`, and an empty folder name such as `a\\b` cannot be used either.
+- **A row with a problem keeps its name, and the other rows are renamed,** as Total Commander skips a file that has no date taken. Its Note says why: "Not valid: " and the reason, "No date taken" or "No date modified", and the status line counts these rows.
+
+#### Numbering
+
+Names are compared without regard to case, as NTFS compares them.
+
+- **Two rows that get the same new name:** the first in the list's order gets it, and each later one gets the first free numbered name, `name (2).ext`, then `(3)`, with the numbering of Keep both.
+- **A new name that an entry outside the batch holds,** or an entry of the batch that keeps its name: numbered the same way, in the preview, so no question is needed and nothing is replaced. Total Commander asks at Start! instead, and its preview does not show the numbers. The preview knows the rows of a folder panel's folder; in a folder that the preview does not list, as in Search, the engine finds the name in use and numbers it, and the list of that folder shows the name it got.
+- **Not in use:** a name that another row of the batch gives up, as in a swap or a shift (`1→2`, `2→3`), and a change of case only.
+- The preview calls the engine's numbering function, so the two never number differently. A numbered row's Note says "Numbered".
+
+#### The list
+
+- **The list starts in the order the entries had,** in the panel or in Search, so the counter follows what the person saw. A click on a column header sorts by it, and a second click reverses the order. `Alt+Up` and `Alt+Down` move the focused row, as in the transfer queue, because `Shift` with an arrow selects rows in Gozler's lists. `Delete` removes the selected rows from the list, not from the disk, and the context menu calls it Remove from list.
+- **Names are computed through the work owner.** A list of up to its inline size of 1,000 rows is computed at once; a larger one keeps its previous names, with "Updating names…" in the status line, while the work runs, and a newer change cancels the older work. Rename is enabled only when the names shown belong to the fields and the rows shown; a change marks them out of date at once, because `Enter` arrives before the timer that computes them.
+- **The status line** counts what Rename will do, and never hides the known counts behind a problem in some rows: "9 of 12 entries get a new name. 2 are numbered. 1 can't be renamed."
+
+#### Rename
+
+- **Rename** is enabled when at least one row gets a new name. It submits one batch with the rows that get a new name, in the list's order, and leaves out the rows with No change or a problem. It puts the texts of the four boxes first in their histories.
+- **While it runs,** the fields, the list and Rename are disabled, Close has the focus, and the status line counts "Renaming… 4,210 of 10,000". Close closes the dialog; the batch goes on.
+- **The batch shows as a rename does,** with Move's transfer presentation, and takes its entries as a move does: they leave the folder panels and show struck through in the search lists until the lists read again. Its row says "Rename {folder}", and the status bar "Renaming 12 items" and "Renamed 12 items"; Cancel all cancels it as any transfer. A failure goes to the operation's Report.
+- **When it ends with the dialog open,** the renamed rows leave the list. Each row that failed stays, with "Couldn't rename: " and Windows' reason in its Note, and keeps the new name it had, so the counter does not number it again; a change to a field computes its name again. The status line says "Renamed 98 entries. 2 couldn't be renamed.", and Rename tries the failed rows again.
+- **The selection follows the renamed entries.** When the dialog closes, a folder panel selects the renamed entries that are in its folder, under their new names, and focuses the new name of the entry it had focused, as it follows an `F6` rename. So a second rule is `Esc`, `Ctrl+M`, and `F5` copies what was just renamed; Total Commander's "next step" (`F5` in its tool) is left out.
+
+#### Undo
+
+- **The window keeps the renamed entries of the last 20 batches,** each as its old path and the path it got, newest first, until Exit, as Total Commander does. A batch that renamed nothing is not kept. It reverses Multi-Rename batches only; it is not a general Undo of file operations.
+- **Undo** (`Alt+U`) is enabled while a batch is kept. It asks first, in a dialog titled Undo: "Undo the last Multi-Rename of 12 entries?", or for one entry, "Undo renaming "a.txt" to "a-1.txt"?", with "Entries that changed since then keep their names." below it, and Undo, the default, and Cancel.
+- **Undo submits a batch** that renames each entry back, the last rename first. An entry that is no longer at the path it got, or whose old name is in use, fails and is listed; nothing is numbered or replaced. The folders that the batch created stay. The batch leaves the list of kept batches, and the Undo itself is not kept, so each press goes one batch further back. The status line says "Undid the renames of 12 entries." and "1 couldn't be undone.".
+- A row in the open dialog whose entry the Undo renamed fails at Rename as any entry that no longer exists does.
+
+#### Edit names
+
+Edit… opens a dialog titled Edit names, with "New names, one per line:" and a multi-line edit box that holds the rows' new names in the list's order, with their extensions and any folders. The person types or pastes, which needs no external editor as Total Commander's does. OK gives each row the name on its line and closes; the names then pass the checks and the numbering, as computed names do. The fields are disabled, and the status line says "The names come from Edit names.". Choosing (Default) or a saved rename returns to the fields. A count of lines other than the count of rows keeps the dialog open with a balloon: "There are 98 names for 100 entries. Write one name on each line." Empty lines at the end are not counted.
+
+#### Saved renames
+
+- **Saved renames** (`F2`) is a drop-down list: (Default), then each saved rename by name, then Save… and Delete…. A saved rename holds every field of the dialog. Selecting one fills the fields; (Default) sets the defaults. Save… and Delete… open their dialog only when the person chooses them in the open list, by a click or `Enter`, so the arrow keys pass them by, as the filter pane's Custom… does.
+- **Save…** asks for a name in a dialog titled Save. A name in use asks "Replace the saved rename "Photos by date"?", with Replace and Cancel. **Delete…** asks "Delete the saved rename "Photos by date"?", with Delete and Cancel, for the saved rename chosen last.
+- **History.** The name, extension, Search for and Replace with boxes each keep their last 20 texts, newest first. `Shift+Delete` in an open list removes one.
+- Both are saved in `ui.json` under `multi_rename`, with the dialog's size, and a missing or damaged value gives an empty list.
+
+#### Keys
+
+| Key | Does |
+| --- | --- |
+| `Enter` | Rename, from a box or the list; in an open drop-down list, closes the list |
+| `Esc` | Close, also from a box; in an open drop-down list, closes the list |
+| `F2` | open Saved renames |
+| `Alt+U` | Undo |
+| `Alt` and an underlined letter | the field or button with that access key |
+| `Delete`, `Alt+Up`, `Alt+Down` | in the list: remove rows, move the focused row |
+| `Shift+Delete` | in an open history list: remove the entry |
+
+#### Left out
+
+Each item can be added later without changing anything else; none serves a common task that the rest cannot do.
+
+| Total Commander | Task | Why not |
+| --- | --- | --- |
+| `[2-5]` | a range of the full path | `[P]`, `[G]` and `[B…]` with ranges name the folders |
+| `[c]`, `[c2]`, `[c3]` | "File 3 of 12" | rare |
+| `[T2]`, `[T3]` | the time now | rare; the date a file was renamed is not a property of the file |
+| `[S]` | the size in bytes | rare |
+| `[%x%]`, `[X]`, `[X+]` | an environment variable, the clipboard | rare; paste the text into the mask instead |
+| `[u]` | join separated accents | rare outside files from macOS |
+| `[=plugin.field]` | a content plug-in field | Gozler has no plug-ins |
+| `MULTIRENAME=<name>` | run a saved rename from a button | Gozler has no button bar |
+| Result list | a log of the renames | Undo and the Report cover the reason for it |
+| `F5` next step | apply a second rule before renaming | the selection follows the renamed entries |
+| Load names from file | names from a text file | paste them into Edit names |
+| Restart as administrator | rename where Windows denies it | Move to folder… does not offer it either |
 
 ## File operations
 
@@ -1804,8 +1989,9 @@ A crash, a power loss or a forced exit does not mean the person changed their mi
 - **The engine saves each running operation** before it changes a file. The window gives it the file `%LOCALAPPDATA%\Gozler\operations.json`, or the same name in the `--data-dir` folder.
 - **At the next start,** saved transfers are available as Interrupted in the shared pane, with Continue and Dismiss; startup never opens the pane automatically.
 - **A copy or move to a new name is saved without `destination`,** under `named`, so v0.4.0, which knows no new name and needs `destination`, leaves it out instead of continuing it under the entry's old name, which Replace would overwrite.
+- **A batch rename never leaves a temporary name.** Continue finishes the batch; Dismiss gives each entry that holds a temporary name its old name back, because the person never chose that name (see "Batch rename").
 - **Waiting operations are not saved:** they have changed no file, and the Exit question says they will not run.
-- **Another window offers no file operations.** When "Allow only one window at a time" is off, a second window shows Delete, Cut, Paste, Copy to folder…, Move to folder… and New folder… disabled and accepts no drop, as it shows no tray icon, because the first window's queue owns the saved file (one queue for each user session).
+- **Another window offers no file operations.** When "Allow only one window at a time" is off, a second window shows Delete, Cut, Paste, Copy to folder…, Move to folder…, Multi-Rename… and New folder… disabled and accepts no drop, as it shows no tray icon, because the first window's queue owns the saved file (one queue for each user session).
 
 ### What a stopped operation leaves
 
@@ -1852,7 +2038,7 @@ the research record that holds the evidence.
 | D11 | When the file list is made | When the work starts, by walking the disk as the work goes (D5) | When the person asks | An operation can wait in the queue for minutes. TinyTorrent2 rejected a design that took the names at the request, because renames still running changed them | Lessons from TinyTorrent2 |
 | D12 | How paths are compared | By identity: the final path (`GetFinalPathNameByHandleW`), component by component, with `VOLUME_NAME_GUID` on a local volume and `VOLUME_NAME_DOS` on a share, which has no volume GUID path | The path text | Two strings name one folder through case, short names, mount points and junctions; a text compare would miss an overlap or move a folder into itself | Lessons from TinyTorrent2 |
 | D13 | What may be deleted | The entries of a delete; a moved source after its copy is complete; an emptied source folder; a file this operation was writing when the person cancelled it; the file that Replace replaces; a link at a name that Replace replaces, never its target; the operation's own unfinished file when its streams cannot be kept; unchanged destination-only entries approved by a complete Mirror comparison, after required output is revalidated | Anything else, such as a folder a copy merged into | A path that an operation protects is never also a path it deletes; Mirror separately revalidates its approved extras | Lessons from TinyTorrent2; Synchronize folders |
-| D14 | Device admission | Queue admits all distinct devices of each source/destination volume pair together or none, default 1 transfer per device and configurable from 1 to 3. Waiting work reserves nothing. Delete and New folder bypass admission; no paths are reserved | Path dependencies; HDD-only serialization; a scheduler in the window | One scheduler limits contention independently of drive class. Pause releases grants after quiescence and Resume requests admission. Run now yields only conflicting transfers | Copy behaviour |
+| D14 | Device admission | Queue admits all distinct devices of each source/destination volume pair together or none, default 1 transfer per device and configurable from 1 to 3. Waiting work reserves nothing. Delete, New folder and a batch rename, which changes only names, bypass admission; no paths are reserved | Path dependencies; HDD-only serialization; a scheduler in the window | One scheduler limits contention independently of drive class. Pause releases grants after quiescence and Resume requests admission. Run now yields only conflicting transfers | Copy behaviour |
 | D15 | Where the engine runs | In the window's process, with the person's token | In gozlerd | A pipe request to an elevated service would let any local user delete files as SYSTEM | — |
 | D16 | Rename on one volume | Yes, for a move | Copy and delete, as FastCopy does | A rename changes only the folder entry, so 100 GB moves in milliseconds; AngelCOPY, BetterCopy and Ultracopier rename too | Copiers |
 | D17 | Our own copy loop for the Windows engine | No: `CopyFile2` | A loop of `ReadFile`/`WriteFile` | BetterCopy deleted its own loop in favour of `CopyFileExW`; the ring (D7) is the one own loop, chosen by the person | Copiers |
@@ -2272,6 +2458,21 @@ hard-disk mode is in Ring copy.
   deleted when it is empty (D3). A cancel takes effect before a file's
   copy is complete or after its source's delete, never between them, so a
   cancel or a failure leaves each file in one place.
+
+### Batch rename
+
+`Request::Rename` renames many entries in one operation, for Multi-Rename and its Undo. Each entry has its full path and its new name, which is relative to the entry's folder and may hold `\` and `..`. The engine owns these rules; the dialog checks none of them on the disk.
+
+1. **Prepare** opens each entry without following links, reads its identity (D12) and its volume, and resolves its new path. A new path on another volume is a listed failure for that entry.
+2. **It never replaces.** With `InUse::Number`, a new path that holds an entry outside the batch, or one that the batch does not move away, gets the first free numbered name, as the preview does. Undo's request uses `InUse::Fail`, which fails such an entry instead.
+3. **Order.** An entry is renamed only after the entry that holds its new name has moved away, so a shift such as `1→2`, `2→3`, `3→4` runs from the end. A cycle, such as a swap, moves one entry to a temporary name in its folder first, `~gozler-1` or the next free number; the engine records the name before it uses it. Names are compared by identity, so a change of case is a rename of one entry. An entry inside a folder of the batch, as Search can select both, is renamed before that folder, so the path it was prepared with still leads to it. An entry whose new name that folder holds cannot wait for it, so it gets the first free numbered name, and Undo's entry fails.
+4. **Missing folders** of a new path are created before the entry moves into them, as a copy creates a missing destination.
+5. **No device admission** (D14). The progress counts entries.
+6. **Cancel** takes effect between two renames. A cycle that has started finishes, so no entry keeps a temporary name. An entry whose rename fails at its temporary name takes its old name back, numbered when the other entry of a swap took it.
+7. **The result** lists each renamed entry, as the index of its entry in the request, its old path and the path it got, both where the batch left them: below the new name of a folder that the batch renamed after the entry. Each failure is listed with Windows' error. The dialog finds its rows by the index, because the paths change when a folder of the batch is renamed later.
+8. **Saved before the first change,** with each rename and each temporary name. After a crash, Continue renames what is left: an entry at its new path is done, and an entry at a temporary name goes on to its new path; the engine finds each by its identity, and lists one that is at none of them. Dismiss gives each entry at a temporary name its old name back, numbered when another entry took it, without replacing anything, and leaves the rest.
+
+D13 needs no change, because a batch deletes nothing.
 
 ### Conflicts
 

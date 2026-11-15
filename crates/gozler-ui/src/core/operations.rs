@@ -329,6 +329,7 @@ impl Operations {
                             **request,
                             Request::Delete { .. }
                                 | Request::Move { .. }
+                                | Request::Rename { .. }
                                 | Request::Synchronize { .. }
                         );
                     *phase = if took { Phase::Kept } else { Phase::Removed };
@@ -501,7 +502,7 @@ impl Operations {
                     errors
                         | match &*op.request {
                             Request::Copy { .. } => 1,
-                            Request::Move { .. } => 2,
+                            Request::Move { .. } | Request::Rename { .. } => 2,
                             Request::Synchronize { .. } => 4,
                             _ => 0,
                         }
@@ -625,6 +626,7 @@ mod tests {
             bytes: 0,
             listed: if failed { vec![listed] } else { Vec::new() },
             ring: RingCounts::default(),
+            renamed: Vec::new(),
         }))
     }
 

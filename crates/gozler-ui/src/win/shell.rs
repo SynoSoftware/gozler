@@ -1,6 +1,7 @@
 //! COM and OLE, the known folders, the save dialog, the folder and program
 //! pickers, the shell's verbs: open, show in File Explorer, Properties and
-//! run as administrator, dragging entries out, and the person's registry settings.
+//! run as administrator, dragging entries out, the person's registry settings,
+//! and the Date taken that File Explorer shows.
 
 use super::Hwnd;
 use crate::core::clipboard::folder_of;
@@ -14,15 +15,15 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use windows::Win32::Foundation::{
     CloseHandle, E_POINTER, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, FILETIME, HANDLE,
-    HWND, POINT, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
+    HWND, POINT, PROPERTYKEY, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, GetVolumeInformationW, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CreateBindCtx, IBindCtx,
-    IDataObject, IDispatch, IServiceProvider,
+    COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize,
+    CreateBindCtx, IBindCtx, IDataObject, IDispatch, IServiceProvider,
 };
 use windows::Win32::System::Ole::{
     DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource, OleInitialize, OleUninitialize,
@@ -40,7 +41,7 @@ use windows::Win32::UI::Shell::{
     FOS_NOTESTFILECREATE, FOS_OVERWRITEPROMPT, FOS_PICKFOLDERS, FileOpenDialog, FileSaveDialog,
     HDROP, IFileOpenDialog, IFileSaveDialog, IFileSystemBindData, IFileSystemBindData_Impl,
     ILClone, ILCreateFromPathW, ILFindLastID, ILFree, ILIsParent, ILRemoveLastID, IShellBrowser,
-    IShellDispatch2, IShellFolderViewDual, IShellItem, IShellWindows, KF_FLAG_DEFAULT,
+    IShellDispatch2, IShellFolderViewDual, IShellItem, IShellItem2, IShellWindows, KF_FLAG_DEFAULT,
     KF_FLAG_DONT_VERIFY, KNOWN_FOLDER_FLAG, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC,
     SEE_MASK_NOCLOSEPROCESS, SHCreateDataObject, SHCreateItemFromParsingName, SHDoDragDrop,
     SHELLEXECUTEINFOW, SHGetKnownFolderPath, SHOP_FILEPATH, SHObjectProperties,
@@ -49,7 +50,7 @@ use windows::Win32::UI::Shell::{
     ShellWindows,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL};
-use windows::core::{BSTR, HSTRING, IUnknown, Interface, PCWSTR, w};
+use windows::core::{BSTR, GUID, HSTRING, IUnknown, Interface, PCWSTR, w};
 
 mod windows_shortcut;
 
@@ -1007,6 +1008,54 @@ fn execute(
     // the call.
     unsafe { ShellExecuteExW(&mut info) }.map_err(io_error)?;
     Ok(info.hProcess)
+}
+
+/// `System.Photo.DateTaken`, File Explorer's Date taken.
+const DATE_TAKEN: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0x14b8_1da1_0135_4d31_96d9_6cbf_c967_1a99),
+    pid: 36867,
+};
+
+/// `System.Media.DateEncoded`, File Explorer's Media created.
+const MEDIA_CREATED: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0x2e4b_640d_5019_46d8_8881_5541_4cc5_caa0),
+    pid: 100,
+};
+
+/// The Date taken of each of `paths`, or its Media created for a video, as
+/// File Explorer shows them, as a `FILETIME`; `None` for an entry that has
+/// neither. Runs on a work-owner worker, in an apartment of its own, and
+/// stops with what it read once `stopped` says so.
+pub(crate) fn dates_taken(paths: &[Vec<u16>], stopped: impl Fn() -> bool) -> Vec<Option<i64>> {
+    // SAFETY: balanced below when it succeeds; a thread already in another
+    // apartment keeps it and can still make the calls.
+    let entered = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let mut dates = Vec::with_capacity(paths.len());
+    for path in paths {
+        if stopped() {
+            break;
+        }
+        let path: Vec<u16> = path.iter().copied().chain([0]).collect();
+        // SAFETY: `path` is NUL-terminated and outlives the call; the item
+        // lives in this apartment.
+        let item: windows::core::Result<IShellItem2> =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None) };
+        let time = item.and_then(|item| {
+            // SAFETY: plain property reads of a live item.
+            unsafe { item.GetFileTime(&DATE_TAKEN) }
+                .or_else(|_| unsafe { item.GetFileTime(&MEDIA_CREATED) })
+        });
+        dates
+            .push(time.ok().map(|time| {
+                (i64::from(time.dwHighDateTime) << 32) | i64::from(time.dwLowDateTime)
+            }));
+    }
+    if entered {
+        // SAFETY: matches the successful CoInitializeEx above, after every
+        // item was released.
+        unsafe { CoUninitialize() };
+    }
+    dates
 }
 
 #[cfg(test)]

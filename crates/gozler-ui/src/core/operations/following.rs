@@ -154,6 +154,7 @@ fn operation_items(operation: &Operation) -> usize {
         Request::Copy { sources, .. }
         | Request::Move { sources, .. }
         | Request::Delete { sources } => sources.len(),
+        Request::Rename { entries, .. } => entries.len(),
         Request::NewFolder { .. } | Request::Synchronize { .. } => 1,
     };
     sources

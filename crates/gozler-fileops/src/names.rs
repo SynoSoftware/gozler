@@ -12,7 +12,7 @@ mod upper;
 /// `gozler_core::fold`, which normalizes, nor `char::to_uppercase`, which
 /// turns `ß` into `SS` and differs from `CharUpperW` in other units, matches
 /// NTFS, and a false match with Skip would leave a file uncopied.
-pub(crate) fn fold(name: &[u16]) -> Vec<u16> {
+pub fn fold(name: &[u16]) -> Vec<u16> {
     let mut folded = Vec::with_capacity(name.len());
     fold_into(name, &mut folded);
     folded
@@ -131,6 +131,14 @@ pub(crate) fn is_numbered(candidate: &[u16], name: &[u16], is_folder: bool) -> b
         && digits
             .iter()
             .all(|&unit| (u16::from(b'0')..=u16::from(b'9')).contains(&unit))
+}
+
+/// Keep both's numbered name `number` for `name`: `report (2).pdf`, or
+/// `photos (2)` for a folder. Multi-Rename's preview numbers with it, so
+/// the preview and the engine never number a name differently.
+pub fn numbered_name(name: &[u16], is_folder: bool, number: u32) -> Vec<u16> {
+    let (stem, extension) = split(name, is_folder);
+    numbered(stem, extension, number)
 }
 
 /// The stem and the extension that Keep both puts the number between. The

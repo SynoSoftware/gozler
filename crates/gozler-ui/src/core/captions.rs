@@ -162,7 +162,7 @@ impl DialogItem {
 /// caption shows the same icon on every button that has it (DESIGN.md:
 /// Look). A fix that needs administrator permission shows the
 /// administrator shield instead, so its caption has no icon here.
-const BUTTON_GLYPHS: [(&str, Glyph); 32] = [
+const BUTTON_GLYPHS: [(&str, Glyph); 43] = [
     ("button.ok", Glyph::Accept),
     ("button.cancel", Glyph::Cancel),
     ("button.close", Glyph::Cancel),
@@ -195,6 +195,17 @@ const BUTTON_GLYPHS: [(&str, Glyph); 32] = [
     ("compare.compare", Glyph::Refresh),
     ("compare.next", Glyph::ChevronDown),
     ("compare.previous", Glyph::ChevronUp),
+    ("multi_rename.insert_name", Glyph::Add),
+    ("multi_rename.insert_extension", Glyph::Add),
+    ("multi_rename.range", Glyph::Add),
+    ("multi_rename.counter", Glyph::Add),
+    ("multi_rename.date", Glyph::Add),
+    ("multi_rename.time", Glyph::Add),
+    ("multi_rename.more", Glyph::ChevronDown),
+    ("multi_rename.rename", Glyph::Rename),
+    ("multi_rename.edit", Glyph::Edit),
+    ("multi_rename.undo", Glyph::Undo),
+    ("multi_rename.save_button", Glyph::Save),
 ];
 
 /// The icon of a push button whose caption is the catalogue text `key`.
@@ -324,6 +335,71 @@ impl CaptionTable {
                     (Control(C::ViewerFindHex), "viewer.hex_bytes"),
                 ],
                 plain: &[(Ok, "viewer.find_title"), (Cancel, "button.cancel")],
+            },
+            DialogId::MultiRename => CaptionTable {
+                title: "multi_rename.title",
+                keyed: &[
+                    (Control(C::MultiRenameNameLabel), "multi_rename.name"),
+                    (
+                        Control(C::MultiRenameExtensionLabel),
+                        "multi_rename.extension",
+                    ),
+                    (Control(C::MultiRenameCaseLabel), "multi_rename.case"),
+                    (Control(C::MultiRenameSearchLabel), "multi_rename.search"),
+                    (Control(C::MultiRenameReplaceLabel), "multi_rename.replace"),
+                    (Control(C::MultiRenameMatchCase), "multi_rename.match_case"),
+                    (Control(C::MultiRenameFirstOnly), "multi_rename.first_only"),
+                    (
+                        Control(C::MultiRenameExtensionToo),
+                        "multi_rename.extension_too",
+                    ),
+                    (Control(C::MultiRenameRegex), "multi_rename.regex"),
+                    (Control(C::MultiRenameWholeName), "multi_rename.whole_name"),
+                    (Control(C::MultiRenameStartLabel), "multi_rename.start"),
+                    (Control(C::MultiRenameStepLabel), "multi_rename.step"),
+                    (Control(C::MultiRenameDigitsLabel), "multi_rename.digits"),
+                    (Control(C::MultiRenameSavedLabel), "multi_rename.saved"),
+                    (Control(C::MultiRenameEdit), "multi_rename.edit"),
+                    (Control(C::MultiRenameUndo), "multi_rename.undo"),
+                ],
+                plain: &[
+                    (
+                        Control(C::MultiRenameInsertName),
+                        "multi_rename.insert_name",
+                    ),
+                    (Control(C::MultiRenameNameRange), "multi_rename.range"),
+                    (Control(C::MultiRenameNameCounter), "multi_rename.counter"),
+                    (Control(C::MultiRenameInsertDate), "multi_rename.date"),
+                    (Control(C::MultiRenameInsertTime), "multi_rename.time"),
+                    (Control(C::MultiRenameMore), "multi_rename.more"),
+                    (
+                        Control(C::MultiRenameInsertExtension),
+                        "multi_rename.insert_extension",
+                    ),
+                    (Control(C::MultiRenameExtensionRange), "multi_rename.range"),
+                    (
+                        Control(C::MultiRenameExtensionCounter),
+                        "multi_rename.counter",
+                    ),
+                    (Control(C::MultiRenameCounter), "multi_rename.counter_group"),
+                    (Ok, "multi_rename.rename"),
+                    (Cancel, "button.close"),
+                ],
+            },
+            DialogId::PickRange => CaptionTable {
+                title: "multi_rename.range_title",
+                keyed: &[(Control(C::PickRangeFromEnd), "multi_rename.from_end")],
+                plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
+            },
+            DialogId::EditNames => CaptionTable {
+                title: "multi_rename.edit_title",
+                keyed: &[(Control(C::EditNamesLabel), "multi_rename.edit_label")],
+                plain: &[(Ok, "button.ok"), (Cancel, "button.cancel")],
+            },
+            DialogId::SaveRename => CaptionTable {
+                title: "multi_rename.save_title",
+                keyed: &[(Control(C::SaveRenameLabel), "multi_rename.save_label")],
+                plain: &[(Ok, "multi_rename.save_button"), (Cancel, "button.cancel")],
             },
             DialogId::Synchronize => CaptionTable {
                 title: "sync.title",
@@ -767,6 +843,10 @@ impl CaptionTable {
             | DialogId::UnselectFiles
             | DialogId::DeleteUnseen
             | DialogId::ViewerFind
+            | DialogId::MultiRename
+            | DialogId::PickRange
+            | DialogId::EditNames
+            | DialogId::SaveRename
             | DialogId::Settings
             | DialogId::IndexedFolders
             | DialogId::ServiceReport

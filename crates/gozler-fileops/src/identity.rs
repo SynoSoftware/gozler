@@ -64,6 +64,10 @@ impl Identity {
         let rest = &self.0[self.volume().len()..];
         rest.strip_prefix(&[BACKSLASH]).unwrap_or(rest)
     }
+
+    pub(crate) fn units(&self) -> &[u16] {
+        &self.0
+    }
 }
 
 /// A set of paths, by component, that answers whether a path equals or is

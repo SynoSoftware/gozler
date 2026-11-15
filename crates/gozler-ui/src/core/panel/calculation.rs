@@ -163,7 +163,7 @@ impl Calculation {
                 .from
                 .as_ref()
                 .is_some_and(|from| origin.row_named(from, up).is_some());
-            !replaces && origin.row_named(&awaited.name, up).is_some()
+            !replaces && (awaited.names.iter()).all(|name| origin.row_named(name, up).is_some())
         });
         if existed {
             interaction.awaited = None;
@@ -317,37 +317,42 @@ impl Calculation {
         } else if matches!(mapping.kind, UpdatedKind::Listed { .. }) {
             interaction.gone = None;
         }
-        if let Some(awaited) = &interaction.awaited
-            && mapping
-                .read
-                .as_ref()
-                .is_some_and(|read| awaited.ended.is_some_and(|ended| ended < read.generation))
-            && rows.awaited_row(awaited, up).is_none()
+        let shown = interaction.awaited.as_ref().map(|awaited| {
+            let after_end = (mapping.read.as_ref())
+                .is_some_and(|read| awaited.ended.is_some_and(|ended| ended < read.generation));
+            (rows.awaited_rows(awaited, up), after_end)
+        });
+        if let Some((shown, true)) = &shown
+            && shown.is_empty()
         {
             interaction.awaited = None;
         }
-        let awaited_place = interaction.awaited.as_ref().and_then(|awaited| {
-            let row = rows.awaited_row(awaited, up)?;
-            let mut selected = place.selected.clone();
-            if awaited.select {
-                let mut positions: Vec<u64> = selected.iter().flat_map(Clone::clone).collect();
-                positions.push(row);
-                positions.sort_unstable();
-                positions.dedup();
-                selected = Arc::new(ranges(&positions));
-            }
-            let shared = RowSelection {
-                count: row_count(&selected),
-                positions: Arc::clone(&selected),
-            };
-            Some((
-                Place {
-                    focused: Some(row),
-                    selected,
-                },
-                shared,
-            ))
-        });
+        let awaited_place = interaction
+            .awaited
+            .as_ref()
+            .zip(shown)
+            .and_then(|(awaited, shown)| {
+                let (rows_shown, after_end) = shown;
+                if rows_shown.is_empty() || (rows_shown.len() < awaited.names.len() && !after_end) {
+                    return None;
+                }
+                let focused = (awaited.focus.as_ref())
+                    .and_then(|focus| rows.row_named(focus, up))
+                    .or(place.focused);
+                let mut selected = place.selected.clone();
+                if awaited.select {
+                    let mut positions: Vec<u64> = selected.iter().flat_map(Clone::clone).collect();
+                    positions.extend(rows_shown);
+                    positions.sort_unstable();
+                    positions.dedup();
+                    selected = Arc::new(ranges(&positions));
+                }
+                let shared = RowSelection {
+                    count: row_count(&selected),
+                    positions: Arc::clone(&selected),
+                };
+                Some((Place { focused, selected }, shared))
+            });
         let selected = RowSelection {
             count: row_count(&place.selected),
             positions: Arc::clone(&place.selected),

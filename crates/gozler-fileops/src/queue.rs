@@ -21,7 +21,7 @@ use crate::moves::{Moving, move_by_rename};
 use crate::names::Names;
 use crate::operation::{
     Current, CurrentFile, End, Listed, Operation, OperationId, OrderRefused, Outcome, Pause,
-    Progress, Refusal, Request, RingCounts, Running, SourcesFolder, State, Total, Wait,
+    Progress, Refusal, Renamed, Request, RingCounts, Running, SourcesFolder, State, Total, Wait,
 };
 use crate::place::Target;
 use crate::prepare::{Preparation, Ready, Transfer, Work, check_space, prepare};
@@ -189,6 +189,7 @@ struct Completion {
     listed: Vec<Listed>,
     end: End,
     ring: RingCounts,
+    renamed: Vec<Renamed>,
 }
 
 struct Admitted {
@@ -384,7 +385,8 @@ impl Queue {
                     }
                     Request::Delete { .. }
                     | Request::NewFolder { .. }
-                    | Request::Synchronize { .. } => return false,
+                    | Request::Synchronize { .. }
+                    | Request::Rename { .. } => return false,
                 }
             }
             operation.request = Arc::new(request);
@@ -498,7 +500,10 @@ impl Queue {
                         }
                     }
                 } else {
-                    left.push(std::mem::replace(&mut operation.phase, Phase::Cancelling));
+                    left.push((
+                        id,
+                        std::mem::replace(&mut operation.phase, Phase::Cancelling),
+                    ));
                 }
                 ids.push(id);
             }
@@ -517,7 +522,18 @@ impl Queue {
         };
         let shared = Arc::clone(&self.shared);
         self.shared.spawn(move || {
-            drop(left);
+            // A dismissed batch rename gives its entries at temporary names
+            // their old names back before its saved entry goes.
+            let mut restored = BTreeMap::new();
+            for (id, phase) in left {
+                if let Phase::Interrupted(Restored {
+                    request: Request::Rename { entries, .. },
+                    ..
+                }) = &phase
+                {
+                    restored.insert(id, crate::renames::windows::restore_temporaries(entries));
+                }
+            }
             drop(removed);
             let written = shared.write_saved();
             {
@@ -527,6 +543,7 @@ impl Queue {
                         && matches!(operation.phase, Phase::Cancelling)
                     {
                         let mut outcome = Outcome::ended(End::Cancelled);
+                        outcome.listed = restored.remove(&id).unwrap_or_default();
                         if let Err(error) = &written {
                             outcome.listed.push(Listed {
                                 path: shared.saved_path.clone(),
@@ -1080,7 +1097,7 @@ impl Shared {
         operation.total = ready.prepared.total;
         operation.renames = ready.work.iter().all(|(_, work)| match work {
             Work::Transfer(transfer) => transfer.moving && transfer.copied.is_empty(),
-            Work::Rename { .. } => true,
+            Work::Rename { .. } | Work::Renames(_) => true,
             Work::Delete { .. }
             | Work::NewFolder { .. }
             | Work::Compare(_)
@@ -1097,6 +1114,7 @@ impl Shared {
             listed: Vec::new(),
             end: End::Complete,
             ring: RingCounts::default(),
+            renamed: Vec::new(),
         }));
         let phase = if ready
             .work
@@ -1442,6 +1460,7 @@ impl Shared {
         let final_outcome = {
             let mut completion = completion.lock().expect("no engine worker panics");
             completion.listed.extend(outcome.listed);
+            completion.renamed.extend(outcome.renamed);
             completion.ring.to_windows += outcome.ring.to_windows;
             completion.ring.clones_refused += outcome.ring.clones_refused;
             if outcome.end != End::Complete
@@ -1451,13 +1470,15 @@ impl Shared {
             }
             completion.remaining -= 1;
             (completion.remaining == 0).then(|| {
-                Outcome::new(
+                let mut outcome = Outcome::new(
                     completion.end.clone(),
                     progress.items(),
                     progress.bytes(),
                     std::mem::take(&mut completion.listed),
                     completion.ring,
-                )
+                );
+                outcome.renamed = std::mem::take(&mut completion.renamed);
+                outcome
             })
         };
         let Some(mut outcome) = final_outcome else {
@@ -1499,10 +1520,18 @@ impl Shared {
         };
         let mut taken = Taken::default();
         for (id, request, ended) in takers {
-            if let Request::Delete { sources } | Request::Move { sources, .. } = &*request {
-                for source in sources {
-                    taken.insert(id, source, ended);
+            match &*request {
+                Request::Delete { sources } | Request::Move { sources, .. } => {
+                    for source in sources {
+                        taken.insert(id, source, ended);
+                    }
                 }
+                Request::Rename { entries, .. } => {
+                    for entry in entries {
+                        taken.insert(id, &entry.path, ended);
+                    }
+                }
+                Request::Copy { .. } | Request::NewFolder { .. } | Request::Synchronize { .. } => {}
             }
         }
         let mut taken = Arc::new(taken);
@@ -1673,9 +1702,9 @@ fn current(file: &CurrentFile) -> Current {
     }
 }
 
-/// The operations that take their sources if they delete or move them, each
-/// with whether it has ended: every one that prepares or
-/// was submitted and has not been removed. One that ended before it was
+/// The operations that take their sources if they delete, move or rename
+/// them, each with whether it has ended: every one that prepares or was
+/// submitted and has not been removed. One that ended before it was
 /// submitted, refused or cancelled, changed nothing and takes nothing.
 fn takers(operations: &Operations) -> Vec<(OperationId, Arc<Request>, bool)> {
     let takes = |operation: &Tracked| {
@@ -1722,6 +1751,7 @@ fn run(start: Start, execution: &Execution<'_>) -> Outcome {
     let rule = Rule { choice, run };
     let mut disk_full = None;
     let mut ring = RingCounts::default();
+    let mut renamed = Vec::new();
     match work {
         Work::Compare(_) => unreachable!("the queue handles comparison before execution"),
         Work::Synchronize(review) => {
@@ -1767,6 +1797,11 @@ fn run(start: Start, execution: &Execution<'_>) -> Outcome {
                 Err(error) => failures.push(failure(&path, error)),
             }
         }
+        Work::Renames(batch) => {
+            let (listed, done) = crate::renames::windows::run(*batch, cancel, pause, progress);
+            failures.extend(listed);
+            renamed = done;
+        }
         Work::NewFolder { path, verbatim } => match create_folder(&verbatim, None) {
             Ok(()) => progress.add_items(1),
             Err(error) => failures.push(failure(&path, error.code)),
@@ -1779,7 +1814,9 @@ fn run(start: Start, execution: &Execution<'_>) -> Outcome {
     } else {
         End::Complete
     };
-    Outcome::new(end, progress.items(), progress.bytes(), failures, ring)
+    let mut outcome = Outcome::new(end, progress.items(), progress.bytes(), failures, ring);
+    outcome.renamed = renamed;
+    outcome
 }
 
 fn run_synchronization(
@@ -2117,6 +2154,7 @@ mod tests {
                     listed: Vec::new(),
                     end: End::Complete,
                     ring: RingCounts::default(),
+                    renamed: Vec::new(),
                 })),
             }),
         )

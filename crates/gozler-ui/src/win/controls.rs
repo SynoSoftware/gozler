@@ -21,40 +21,43 @@ use crate::core::commands::Keystroke;
 use crate::core::glyph::Glyph;
 use crate::core::layout::column_sizing;
 use crate::core::layout::{self, Dpi, Px, Size, glyph_gap, icon_glyph_height};
-use windows::Win32::Foundation::{LPARAM, RECT, SYSTEMTIME, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SYSTEMTIME, WPARAM};
 use windows::Win32::Graphics::Gdi::COLOR_WINDOWTEXT;
 use windows::Win32::UI::Controls::{
     BCM_GETIMAGELIST, BCM_SETIMAGELIST, BCM_SETSHIELD, BCM_SETSPLITINFO, BCSIF_STYLE, BCSS_NOSPLIT,
     BS_SPLITBUTTON, BST_CHECKED, BUTTON_IMAGELIST, BUTTON_IMAGELIST_ALIGN,
-    BUTTON_IMAGELIST_ALIGN_CENTER, BUTTON_IMAGELIST_ALIGN_LEFT, BUTTON_SPLITINFO,
+    BUTTON_IMAGELIST_ALIGN_CENTER, BUTTON_IMAGELIST_ALIGN_LEFT, BUTTON_SPLITINFO, COMBOBOXINFO,
     DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, EM_GETCUEBANNER, EM_GETMARGINS, EM_GETSEL, EM_LIMITTEXT,
-    EM_SETCUEBANNER, EM_SETSEL, GDT_NONE, GDT_VALID, HIMAGELIST, HKM_GETHOTKEY, HKM_SETHOTKEY,
-    HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT, HOTKEYF_SHIFT, ICC_BAR_CLASSES,
-    ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES,
-    ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
-    LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
-    LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE,
-    LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMTEXTW,
-    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
-    LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP,
-    LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
-    LVSCW_AUTOSIZE, LVSIL_SMALL, PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE,
-    PROGRESS_CLASSW, SetWindowTheme, TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_IDISHWND, TTF_SUBCLASS,
-    TTF_TRACK, TTM_ADDTOOLW, TTM_GETTEXTW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
-    TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, WC_LISTVIEWW,
+    EM_REPLACESEL, EM_SETCUEBANNER, EM_SETSEL, GDT_NONE, GDT_VALID, GetComboBoxInfo, HIMAGELIST,
+    HKM_GETHOTKEY, HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT,
+    HOTKEYF_SHIFT, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS,
+    ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX,
+    InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
+    LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED,
+    LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
+    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
+    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
+    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
+    LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
+    LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSCW_AUTOSIZE, LVSIL_SMALL, PBM_SETMARQUEE, PBM_SETPOS,
+    PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SetWindowTheme, TOOLTIPS_CLASSW, TTF_ABSOLUTE,
+    TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_GETTEXTW, TTM_NEWTOOLRECTW,
+    TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON,
+    TTS_NOPREFIX, TTTOOLINFOW, WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_ICON, BS_PUSHBUTTON, CB_ADDSTRING,
-    CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN, CB_RESETCONTENT,
-    CB_SETCURSEL, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL, CBN_SELENDOK, CBS_DROPDOWNLIST,
-    CreateWindowExW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL, ES_NUMBER, ES_READONLY,
-    GWL_STYLE, GetWindowLongPtrW, HICON, HMENU, IMAGE_ICON, LB_ADDSTRING, LB_GETCOUNT,
-    LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_RESETCONTENT, LB_SETCURSEL, SM_CXVSCROLL,
-    STM_GETIMAGE, STM_SETIMAGE, SendMessageW, SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_COPY, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
+    CB_DELETESTRING, CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN,
+    CB_RESETCONTENT, CB_SETCURSEL, CB_SHOWDROPDOWN, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL,
+    CBN_SELENDOK, CBS_DROPDOWNLIST, CreateWindowExW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS,
+    ES_AUTOHSCROLL, ES_NUMBER, ES_READONLY, GWL_STYLE, GetWindowLongPtrW, HICON, HMENU, IMAGE_ICON,
+    LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_RESETCONTENT,
+    LB_SETCURSEL, SM_CXVSCROLL, STM_GETIMAGE, STM_SETIMAGE, SendMessageW, SetWindowLongPtrW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPY, WM_GETTEXTLENGTH, WM_KILLFOCUS, WM_NCDESTROY,
+    WM_SETTEXT, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
     WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
@@ -342,6 +345,21 @@ impl Edit {
     pub(crate) fn selection(self) -> (usize, usize) {
         let selection = send(self.0, EM_GETSEL, 0, 0) as usize;
         (selection & 0xffff, (selection >> 16) & 0xffff)
+    }
+
+    /// Lets the person type or paste text of any length; a box takes 32,767
+    /// characters otherwise.
+    pub(crate) fn allow_any_length(self) {
+        send(self.0, EM_LIMITTEXT, 0, 0);
+    }
+
+    /// Puts `text` in place of the selected text, or at the caret, as
+    /// typing does: `Ctrl+Z` takes it back, and the box says that its text
+    /// changed.
+    pub(crate) fn replace_selection(self, text: &str) {
+        let text = wide(text);
+        // SAFETY: `text` is a NUL-terminated string that outlives the call.
+        unsafe { send_pointer(self.0, EM_REPLACESEL, 1, text.as_ptr()) };
     }
 }
 
@@ -802,6 +820,133 @@ impl DropDownList {
             super::present::mark_after(self.0, || send(self.0, CB_SETCURSEL, index, 0));
         }
     }
+
+    /// Opens the list, as `F4` does.
+    pub(crate) fn open(self) {
+        send(self.0, CB_SHOWDROPDOWN, 1, 0);
+    }
+}
+
+/// A box that takes typing, with a list of texts to choose from, such as
+/// Multi-Rename's name mask and its history.
+#[derive(Clone, Copy)]
+pub(crate) struct ComboBox(Hwnd);
+
+impl ComboBox {
+    pub(crate) fn hwnd(self) -> Hwnd {
+        self.0
+    }
+
+    /// The combo box `id` of a dialog whose template declares one.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<ComboBox> {
+        super::dialog::item(dialog, id).map(ComboBox)
+    }
+
+    /// Its text box.
+    fn edit(self) -> Option<Edit> {
+        let mut info = COMBOBOXINFO {
+            cbSize: size_of::<COMBOBOXINFO>() as u32,
+            ..COMBOBOXINFO::default()
+        };
+        // SAFETY: `info` is a local the call fills in.
+        unsafe { GetComboBoxInfo(self.0.0, &mut info) }.ok()?;
+        (!info.hwndItem.is_invalid()).then_some(Edit(Hwnd(info.hwndItem)))
+    }
+
+    /// Keeps the caret where the person left it while another control has
+    /// the focus, and puts it after a text the program sets, so that
+    /// [`Self::insert`] puts its text there when the person clicks a
+    /// button. A combo box otherwise moves its caret to the start when it
+    /// loses the focus.
+    pub(crate) fn keep_caret(self) {
+        if let Some(edit) = self.edit() {
+            // SAFETY: the procedure uses no data, and removes itself on
+            // WM_NCDESTROY, the edit's last message.
+            let _ = unsafe { SetWindowSubclass(edit.0.0, Some(keep_caret), 0, 0) };
+        }
+    }
+
+    /// Inserts `text` at the caret, in place of the selected text, and gives
+    /// the box the focus with the caret after the text.
+    pub(crate) fn insert(self, text: &str) {
+        let Some(edit) = self.edit() else {
+            return;
+        };
+        edit.replace_selection(text);
+        let (_, caret) = edit.selection();
+        self.0.focus();
+        edit.select(caret, caret);
+    }
+
+    /// Gives the list `items`, unless it has them, and keeps the text in
+    /// the box.
+    pub(crate) fn set_items<S: AsRef<str>>(self, items: &[S]) {
+        let shown = item_texts(self.0, CB_GETCOUNT, CB_GETLBTEXTLEN, CB_GETLBTEXT);
+        if shown
+            .iter()
+            .map(String::as_str)
+            .eq(items.iter().map(AsRef::as_ref))
+        {
+            return;
+        }
+        let text = self.0.text();
+        send(self.0, CB_RESETCONTENT, 0, 0);
+        for item in items {
+            let item = wide(item.as_ref());
+            // SAFETY: `item` is a NUL-terminated string that outlives the
+            // call; the list keeps its own copy.
+            unsafe { send_pointer(self.0, CB_ADDSTRING, 0, item.as_ptr()) };
+        }
+        self.0.set_text(&text);
+    }
+
+    /// Whether the list is open.
+    pub(crate) fn is_open(self) -> bool {
+        send(self.0, CB_GETDROPPEDSTATE, 0, 0) != 0
+    }
+
+    /// The item that the open list highlights.
+    pub(crate) fn highlighted(self) -> Option<usize> {
+        usize::try_from(send(self.0, CB_GETCURSEL, 0, 0)).ok()
+    }
+
+    /// Removes the item at `index` from the list.
+    pub(crate) fn remove(self, index: usize) {
+        send(self.0, CB_DELETESTRING, index, 0);
+    }
+}
+
+/// [`ComboBox::keep_caret`]'s procedure on the box's edit control.
+unsafe extern "system" fn keep_caret(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    let edit = Edit(Hwnd(hwnd));
+    // The combo box takes the selection away while the edit loses the focus.
+    let kept = (msg == WM_KILLFOCUS).then(|| edit.selection());
+    // SAFETY: the parameters are the ones Windows passed.
+    let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+    match msg {
+        WM_KILLFOCUS => {
+            if let Some((start, end)) = kept {
+                edit.select(start, end);
+            }
+        }
+        WM_SETTEXT => {
+            let end = send(edit.0, WM_GETTEXTLENGTH, 0, 0) as usize;
+            edit.select(end, end);
+        }
+        WM_NCDESTROY => {
+            // SAFETY: the edit gets no message after this one.
+            let _ = unsafe { RemoveWindowSubclass(hwnd, Some(keep_caret), 0) };
+        }
+        _ => {}
+    }
+    result
 }
 
 /// A list box that a dialog's template declares, such as Settings >

@@ -285,8 +285,10 @@ impl Serialize for CommandShortcuts {
 
 /// Default keys that a version added after tables were saved, which such a
 /// table can give another command: Compare's was Copy path's before.
-const LATER_DEFAULTS: &[(CommandId, Keystroke)] =
-    &[(CommandId::Compare, Keystroke::ctrl_shift(Key::Letter(b'C')))];
+const LATER_DEFAULTS: &[(CommandId, Keystroke)] = &[
+    (CommandId::Compare, Keystroke::ctrl_shift(Key::Letter(b'C'))),
+    (CommandId::MultiRename, Keystroke::ctrl(Key::Letter(b'M'))),
+];
 
 impl<'de> Deserialize<'de> for CommandShortcuts {
     /// A table that breaks a rule, such as two commands with one shortcut

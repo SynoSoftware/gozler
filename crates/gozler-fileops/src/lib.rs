@@ -1,4 +1,5 @@
-//! gozler-fileops: the copy, move and delete engine of gozler's window.
+//! gozler-fileops: the copy, move, delete and rename engine of gozler's
+//! window.
 //!
 //! The window talks to one object, the [`Queue`]. It prepares an operation,
 //! which reads the selected entries from the disk on a queue thread, asks
@@ -57,7 +58,7 @@ mod io_threads;
 mod listing;
 #[cfg(windows)]
 mod moves;
-mod names;
+pub mod names;
 mod operation;
 #[cfg(windows)]
 mod place;
@@ -68,6 +69,7 @@ mod prepare;
 mod queue;
 #[cfg(windows)]
 mod receive;
+mod renames;
 mod retry;
 mod ring_plan;
 mod saved;
@@ -86,11 +88,12 @@ mod win32;
 pub use conflicts::Policy;
 pub use operation::{
     Current, Destination, End, Listed, NoRoom, Operation, OperationId, OrderRefused, Outcome,
-    Prepared, Reason, Refusal, Request, RingCounts, Running, RunningPhase, SourcesFolder, State,
-    Total, Wait,
+    Prepared, Reason, Refusal, Rename, Renamed, Request, RingCounts, Running, RunningPhase,
+    SourcesFolder, State, Total, Wait,
 };
 #[cfg(windows)]
 pub use queue::{NotCompared, NotInterrupted, NotPrepared, Queue, ReservedId};
+pub use renames::InUse;
 pub use settings::{
     CopyWorkers, Count, DeleteWorkers, Engine, LargeFileLimit, Preset, RingBlock, RingBuffer,
     RingHardDisk, RingSsd, SettingError, SpeedSettings, TransferLimit,

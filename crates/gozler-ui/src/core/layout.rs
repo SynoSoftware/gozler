@@ -41,7 +41,7 @@ impl Dpi {
 
 impl Dip {
     /// Rounded to the nearest pixel, as `MulDiv` rounds.
-    fn to_px(self, dpi: Dpi) -> Px {
+    pub(crate) fn to_px(self, dpi: Dpi) -> Px {
         let scaled = (i64::from(self.0) * i64::from(dpi.get()) + 48).div_euclid(96);
         Px(i32::try_from(scaled).expect("a layout size fits in i32 at any DPI"))
     }

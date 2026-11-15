@@ -232,6 +232,11 @@ impl Numbers for WindowsNumbers {
         ))
     }
 
+    fn time(&self, time: jiff::civil::Time) -> String {
+        let day = jiff::civil::Date::constant(2000, 1, 1).to_datetime(time);
+        short_time(&system_time(day), TIME_NOSECONDS)
+    }
+
     fn decimal_separator(&self) -> &str {
         &self.decimal_text
     }
@@ -247,6 +252,11 @@ fn date_time(filetime: i64, time_flags: TIME_FORMAT_FLAGS) -> String {
     };
     let local = at.to_zoned(gozler_winfs::local_time_zone()).datetime();
     let time = system_time(local);
+    format!("{} {}", short_date(&time), short_time(&time, time_flags))
+}
+
+/// `time`'s time of day in the user's time format with `time_flags`.
+fn short_time(time: &SYSTEMTIME, time_flags: TIME_FORMAT_FLAGS) -> String {
     let mut clock = [0u16; 64];
     // SAFETY: `time` is a complete SYSTEMTIME; the call writes at most its
     // buffer's length.
@@ -254,12 +264,12 @@ fn date_time(filetime: i64, time_flags: TIME_FORMAT_FLAGS) -> String {
         GetTimeFormatEx(
             PCWSTR::null(),
             time_flags,
-            Some(&time),
+            Some(time),
             PCWSTR::null(),
             Some(&mut clock),
         )
     };
-    format!("{} {}", short_date(&time), text(&clock, clock_len))
+    text(&clock, clock_len)
 }
 
 fn system_time(local: jiff::civil::DateTime) -> SYSTEMTIME {

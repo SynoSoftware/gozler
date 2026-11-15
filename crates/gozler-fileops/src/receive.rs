@@ -133,7 +133,7 @@ pub(crate) fn receive(
 /// links, and its identity is its target's. A folder that does not exist is
 /// opened at the nearest folder above it that exists; any other error
 /// refuses, and so does a file in its place.
-fn open_destination(
+pub(crate) fn open_destination(
     destination: &Path,
     sources: &PathTrie,
     cancel: &AtomicBool,

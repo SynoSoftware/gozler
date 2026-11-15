@@ -526,6 +526,24 @@ pub(super) fn offer_key(window: HWND, target: HWND, key: WPARAM, flags: LPARAM) 
     .0 != 0
 }
 
+/// The key that [`offer_key`] offers in the message `msg`, and the control
+/// it was pressed in; `None` for any other message.
+pub(super) fn offered_key(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<(Hwnd, Keystroke)> {
+    if msg != KEY_DOWN {
+        return None;
+    }
+    let keystroke = keystroke(VIRTUAL_KEY((wparam.0 & 0xffff) as u16))?;
+    Some((Hwnd(HWND(lparam.0 as *mut _)), keystroke))
+}
+
+/// The screen point of a `WM_CONTEXTMENU` whose lparam is `lparam`, or
+/// `None` for the keyboard's.
+pub(super) fn context_point(lparam: LPARAM) -> Option<(i32, i32)> {
+    // -1, -1 is the keyboard's; the coordinates are signed words.
+    let word = |shift: u32| i32::from((lparam.0 as usize >> shift) as u16 as i16);
+    (lparam.0 != -1).then(|| (word(0), word(16)))
+}
+
 /// Gives `msg`, a message of the top-level window `root` besides the main
 /// one, to that window's keys: for a window that [`own_keys`] names, first
 /// as [`Message::KeyDown`], then to its `IsDialogMessageW`. Whether the
@@ -1015,17 +1033,11 @@ unsafe fn decode<'a>(msg: u32, wparam: WPARAM, lparam: LPARAM) -> Message<'a> {
         MODIFIERS_CHANGED | WM_EXITMENULOOP => Message::ModifiersChanged,
         WM_CONTEXTMENU => Message::ContextMenu {
             from: Hwnd(HWND(wparam.0 as *mut _)),
-            // -1, -1 is the keyboard's; the coordinates are signed words.
-            point: (lparam.0 != -1).then(|| {
-                (
-                    i32::from(low(lparam.0 as usize) as i16),
-                    i32::from(high(lparam.0 as usize) as i16),
-                )
-            }),
+            point: context_point(lparam),
         },
-        KEY_DOWN => match keystroke(VIRTUAL_KEY(low(wparam.0))) {
-            Some(keystroke) => Message::KeyDown {
-                target: Hwnd(HWND(lparam.0 as *mut _)),
+        KEY_DOWN => match offered_key(msg, wparam, lparam) {
+            Some((target, keystroke)) => Message::KeyDown {
+                target,
                 keystroke,
                 repeat: wparam.0 & (1 << 31) != 0,
             },

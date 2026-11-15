@@ -9,6 +9,7 @@ use super::glyph::Glyph;
 use super::ids::DialogId;
 use super::layout::{Dip, Panes};
 use super::model::Column;
+use super::multi_rename::Fields;
 use super::open::total_commander_command;
 use super::panel::SavedPanels;
 use super::query::{Filters, Matching};
@@ -788,6 +789,8 @@ pub(crate) struct WindowState {
     pub(crate) viewer: ViewerState,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) compare: CompareState,
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) multi_rename: MultiRenameState,
 }
 
 impl Default for WindowState {
@@ -811,6 +814,7 @@ impl Default for WindowState {
             panels: SavedPanels::default(),
             viewer: ViewerState::default(),
             compare: CompareState::default(),
+            multi_rename: MultiRenameState::default(),
         }
     }
 }
@@ -904,6 +908,81 @@ impl Default for CompareState {
             above_each_other: false,
             zoom: default_zoom(),
         }
+    }
+}
+
+/// What Multi-Rename keeps (DESIGN.md: Multi-Rename): the dialog's size,
+/// the saved renames and the texts last used in its boxes. A damaged value
+/// gives the default, such as an empty list.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct MultiRenameState {
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) size: Option<DialogSize>,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(crate) saved: Vec<SavedRename>,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "History::is_empty"
+    )]
+    pub(crate) history: History,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DialogSize {
+    pub(crate) width: Dip,
+    pub(crate) height: Dip,
+}
+
+/// Every field of Multi-Rename, under the name the person saved them as.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SavedRename {
+    pub(crate) name: String,
+    pub(crate) fields: Fields,
+}
+
+/// The texts last used in Multi-Rename's boxes, newest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct History {
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(crate) name: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(crate) extension: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(crate) search: Vec<String>,
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(crate) replace: Vec<String>,
+}
+
+impl History {
+    fn is_empty(&self) -> bool {
+        [&self.name, &self.extension, &self.search, &self.replace]
+            .iter()
+            .all(|texts| texts.is_empty())
     }
 }
 
@@ -1470,6 +1549,23 @@ mod tests {
                     two_line_list: false,
                     above_each_other: true,
                     zoom: 80,
+                },
+                multi_rename: MultiRenameState {
+                    size: Some(DialogSize {
+                        width: Dip(900),
+                        height: Dip(640),
+                    }),
+                    saved: vec![SavedRename {
+                        name: "Photos by date".into(),
+                        fields: Fields {
+                            name: "[T4][YMD]-[C:3]".into(),
+                            ..Fields::default()
+                        },
+                    }],
+                    history: History {
+                        search: vec!["IMG_".into()],
+                        ..History::default()
+                    },
                 },
             },
         };

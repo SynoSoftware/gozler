@@ -127,6 +127,10 @@ impl DialogProc for About<'_> {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -213,6 +217,10 @@ impl DialogProc for ServiceReport {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -327,6 +335,10 @@ impl DialogProc for CustomDate {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -470,6 +482,10 @@ impl DialogProc for CustomSize {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -700,6 +716,10 @@ impl DialogProc for Transfer {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -869,6 +889,10 @@ impl DialogProc for NewFolder<'_> {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -951,6 +975,10 @@ impl DialogProc for DeleteUnseen {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -1026,6 +1054,10 @@ impl DialogProc for SelectFiles {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -1146,6 +1178,10 @@ impl DialogProc for ViewerFind {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }

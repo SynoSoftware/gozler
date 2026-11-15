@@ -1,6 +1,7 @@
 //! What the window asks the queue for, and what it reads back.
 
 use crate::conflicts::Policy;
+use crate::renames::InUse;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -34,13 +35,19 @@ pub enum Request {
         destination: PathBuf,
         mirror: bool,
     },
+    /// Gives each entry a new name in or below its folder, without device
+    /// admission: Multi-Rename's batch, or its Undo. It never replaces an
+    /// entry.
+    Rename { entries: Vec<Rename>, in_use: InUse },
 }
 
 impl Request {
+    /// Whether the window shows it as a transfer: a batch rename shows as
+    /// a move's rename does.
     pub fn is_transfer(&self) -> bool {
         matches!(
             self,
-            Self::Copy { .. } | Self::Move { .. } | Self::Synchronize { .. }
+            Self::Copy { .. } | Self::Move { .. } | Self::Synchronize { .. } | Self::Rename { .. }
         )
     }
 
@@ -48,9 +55,53 @@ impl Request {
         match self {
             Self::Copy { policy, .. } | Self::Move { policy, .. } => Some(*policy),
             Self::Synchronize { .. } => Some(Policy::UpdateChanged),
-            Self::Delete { .. } | Self::NewFolder { .. } => None,
+            Self::Delete { .. } | Self::NewFolder { .. } | Self::Rename { .. } => None,
         }
     }
+}
+
+/// One entry of a batch rename.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rename {
+    /// The entry's full path.
+    pub path: PathBuf,
+    /// Its new name, relative to its folder; it may hold `\` and `..`.
+    pub name: PathBuf,
+    /// What prepare read of it, which the saved file keeps, so Continue and
+    /// Dismiss find the entry whatever name it holds.
+    pub(crate) found: Option<Found>,
+}
+
+impl Rename {
+    pub fn new(path: PathBuf, name: PathBuf) -> Rename {
+        Rename {
+            path,
+            name,
+            found: None,
+        }
+    }
+}
+
+/// A renamed entry's identity, and the temporary name that prepare chose
+/// for it in its folder, if it needs one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Found {
+    pub(crate) volume: u64,
+    pub(crate) file: u128,
+    pub(crate) temporary: Option<OsString>,
+}
+
+/// An entry that a batch rename renamed. Both paths are where the batch
+/// left them: below the new name of a folder that the batch renamed after
+/// the entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renamed {
+    /// The index of its entry in the request that prepare read.
+    pub entry: usize,
+    /// Its path with its old name.
+    pub from: PathBuf,
+    /// The path it got, numbered when its name was in use.
+    pub to: PathBuf,
 }
 
 /// Where a copy or a move writes. Prepare decides what the window cannot
@@ -130,17 +181,21 @@ pub enum SourcesFolder {
 impl SourcesFolder {
     /// The folder of `request`'s sources.
     pub(crate) fn of(request: &Request) -> SourcesFolder {
-        let sources = match request {
+        let folder = match request {
             Request::Copy { sources, .. }
             | Request::Move { sources, .. }
-            | Request::Delete { sources } => sources,
+            | Request::Delete { sources } => {
+                common_folder(sources.iter().map(|path| path.to_string_lossy()))
+            }
+            Request::Rename { entries, .. } => {
+                common_folder(entries.iter().map(|entry| entry.path.to_string_lossy()))
+            }
             Request::NewFolder { .. } => return SourcesFolder::Several,
             Request::Synchronize { source, .. } => {
                 return SourcesFolder::Shared(source.to_string_lossy().into_owned());
             }
         };
-        common_folder(sources.iter().map(|path| path.to_string_lossy()))
-            .map_or(SourcesFolder::Several, SourcesFolder::Shared)
+        folder.map_or(SourcesFolder::Several, SourcesFolder::Shared)
     }
 }
 
@@ -410,6 +465,8 @@ pub struct Outcome {
     /// In the order they happened.
     pub listed: Vec<Listed>,
     pub ring: RingCounts,
+    /// What a batch rename renamed, in the order it happened.
+    pub renamed: Vec<Renamed>,
 }
 
 impl Outcome {
@@ -431,6 +488,7 @@ impl Outcome {
             bytes,
             listed,
             ring,
+            renamed: Vec::new(),
         }
     }
 
@@ -443,6 +501,7 @@ impl Outcome {
             bytes: 0,
             listed: Vec::new(),
             ring: RingCounts::default(),
+            renamed: Vec::new(),
         }
     }
 }

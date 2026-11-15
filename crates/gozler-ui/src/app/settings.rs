@@ -2832,6 +2832,10 @@ impl DialogProc for SettingsDialog<'_> {
             | DialogMessage::DoubleClicked { .. }
             | DialogMessage::Timer { .. }
             | DialogMessage::Tree { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => return false,
         };
         if handled {
@@ -3047,6 +3051,10 @@ impl DialogProc for CommandShortcut<'_> {
             | DialogMessage::Tree { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }

@@ -24,6 +24,7 @@ pub(crate) mod include;
 mod inspector;
 pub(crate) mod layout;
 pub(crate) mod model;
+pub(crate) mod multi_rename;
 pub(crate) mod open;
 pub(crate) mod operations;
 pub(crate) mod panel;

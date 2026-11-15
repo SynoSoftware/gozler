@@ -579,6 +579,7 @@ pub(crate) fn row_menu(strings: &Strings, phase: RowPhase) -> Vec<MenuNode> {
 pub(crate) fn glyph_of(request: &Request) -> Glyph {
     match request {
         _ if renamed(request).is_some() => Glyph::Rename,
+        Request::Rename { .. } => Glyph::Rename,
         Request::Copy { .. } => Glyph::Copy,
         Request::Synchronize { .. } => Glyph::Refresh,
         Request::Move { .. } => Glyph::MoveToFolder,
@@ -651,6 +652,12 @@ fn kind_of(request: &Request) -> Kind {
             "file_operations.row_rename",
             "file_operations.waiting_for_rename",
         ),
+        Request::Rename { .. } => kind(
+            "file_operations.rename",
+            "file_operations.renaming",
+            "file_operations.row_rename_items",
+            "file_operations.waiting_for_rename",
+        ),
         Request::Copy { .. } => kind(
             "file_operations.copy",
             "file_operations.copying",
@@ -717,15 +724,18 @@ fn joined(folder: &str, name: &str) -> String {
 }
 
 fn ends_of(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) -> Ends {
-    let entries = |sources: &[PathBuf]| match sources {
-        [one] => text_of(one),
-        _ => sources_text(
+    let several = |count: usize| {
+        sources_text(
             strings,
             numbers,
             &operation.folder,
-            sources.len(),
+            count,
             "file_operations.several_folders_inline",
-        ),
+        )
+    };
+    let entries = |sources: &[PathBuf]| match sources {
+        [one] => text_of(one),
+        _ => several(sources.len()),
     };
     if let Some((path, name)) = renamed(&operation.request) {
         let to = joined(parent_of(&path), &name);
@@ -750,6 +760,13 @@ fn ends_of(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) -> E
         },
         Request::Delete { sources } => Ends {
             from: entries(sources),
+            to: None,
+        },
+        Request::Rename { entries, .. } => Ends {
+            from: match entries.as_slice() {
+                [one] => text_of(&one.path),
+                _ => several(entries.len()),
+            },
             to: None,
         },
         Request::Synchronize {
@@ -789,15 +806,15 @@ fn sources_text(
 
 /// Where the card says an operation reads and writes, which stays the same
 /// for the whole operation while the file line names each file: as
-/// [`ends_of`] says, except that a copy, a move and a delete read from the
-/// folder that holds their entries, also for one.
+/// [`ends_of`] says, except that a copy, a move, a delete and a batch
+/// rename read from the folder that holds their entries, also for one.
 fn card_ends(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) -> Ends {
-    let from = |sources: &[PathBuf]| {
+    let from = |count: usize| {
         sources_text(
             strings,
             numbers,
             &operation.folder,
-            sources.len(),
+            count,
             "file_operations.several_folders",
         )
     };
@@ -812,11 +829,15 @@ fn card_ends(strings: &Strings, numbers: &dyn Numbers, operation: &Operation) ->
             destination,
             ..
         } => Ends {
-            from: from(sources),
+            from: from(sources.len()),
             to: Some(text_of(&destination.path())),
         },
         Request::Delete { sources } => Ends {
-            from: from(sources),
+            from: from(sources.len()),
+            to: None,
+        },
+        Request::Rename { entries, .. } => Ends {
+            from: from(entries.len()),
             to: None,
         },
         Request::NewFolder { .. } | Request::Synchronize { .. } => {
@@ -1090,6 +1111,10 @@ fn card(
                 | Request::Move { sources, .. }
                 | Request::Delete { sources } => match sources.as_slice() {
                     [one] => text_of(one),
+                    _ => String::new(),
+                },
+                Request::Rename { entries, .. } => match entries.as_slice() {
+                    [one] => text_of(&one.path),
                     _ => String::new(),
                 },
                 Request::NewFolder { .. } | Request::Synchronize { .. } => String::new(),
@@ -1580,13 +1605,19 @@ fn size_of_total(
             numbers,
             &[],
         ),
+        (None, Request::Rename { entries, .. }) => strings.count(
+            "file_operations.selected",
+            entries.len() as u64,
+            numbers,
+            &[],
+        ),
         (None, Request::NewFolder { .. } | Request::Synchronize { .. }) => String::new(),
     }
 }
 
 /// The items a running operation without a total has done: "6,240
 /// deleted", "6,240 copied"; nothing for a rename or a new folder, which is
-/// one step.
+/// one step, nor for a batch rename, which prepare always gives a total.
 fn items_done(strings: &Strings, numbers: &dyn Numbers, request: &Request, items: u64) -> String {
     let key = match request {
         _ if renamed(request).is_some() => return String::new(),
@@ -1594,7 +1625,7 @@ fn items_done(strings: &Strings, numbers: &dyn Numbers, request: &Request, items
         Request::Move { .. } => "file_operations.moved",
         Request::Delete { .. } => "file_operations.deleted",
         Request::Synchronize { .. } => "sync.processed",
-        Request::NewFolder { .. } => return String::new(),
+        Request::NewFolder { .. } | Request::Rename { .. } => return String::new(),
     };
     strings.count(key, items, numbers, &[])
 }
@@ -1619,7 +1650,12 @@ enum Completed {
     Copy(PathBuf),
     Move(PathBuf),
     Synchronize(PathBuf),
-    Rename { source: String, name: String },
+    Rename {
+        source: String,
+        name: String,
+    },
+    /// A batch rename.
+    Renames,
     Delete,
     NewFolder(PathBuf),
 }
@@ -1635,6 +1671,7 @@ impl Completion {
             Request::Move { destination, .. } => Completed::Move(destination.path()),
             Request::Synchronize { destination, .. } => Completed::Synchronize(destination.clone()),
             Request::Delete { .. } => Completed::Delete,
+            Request::Rename { .. } => Completed::Renames,
             Request::NewFolder { path } => Completed::NewFolder(path.clone()),
         };
         Self {
@@ -1727,6 +1764,7 @@ impl StatusOperation {
                         | Completed::Move(_)
                         | Completed::Synchronize(_)
                         | Completed::Rename { .. }
+                        | Completed::Renames
                 );
             }
             Self::Running { request, .. }
@@ -1943,6 +1981,10 @@ pub(crate) fn status_widest(
             destination: destination(),
         },
         Request::Delete { sources: several() },
+        Request::Rename {
+            entries: vec![gozler_fileops::Rename::new(PathBuf::new(), PathBuf::new()); 2],
+            in_use: gozler_fileops::InUse::Number,
+        },
         Request::Move {
             policy: gozler_fileops::Policy::default(),
             sources: one(),
@@ -1991,6 +2033,7 @@ pub(crate) fn status_widest(
                 bytes: 0,
                 listed: vec![skipped.clone(); failed],
                 ring: RingCounts::default(),
+                renamed: Vec::new(),
             };
             ended_line(strings, numbers, request, &outcome, false)
         })
@@ -2001,14 +2044,11 @@ pub(crate) fn status_widest(
 /// What a running operation does: "Copying Projects to D:\Backup",
 /// "Deleting 12 items".
 fn doing_line(strings: &Strings, numbers: &dyn Numbers, request: &Request) -> String {
+    let items =
+        |count: usize| strings.count("file_operations.size_items", count as u64, numbers, &[]);
     let what = |sources: &[PathBuf]| match sources {
         [one] => name_of(&text_of(one)).to_owned(),
-        _ => strings.count(
-            "file_operations.size_items",
-            sources.len() as u64,
-            numbers,
-            &[],
-        ),
+        _ => items(sources.len()),
     };
     if let Some((path, name)) = renamed(request) {
         return strings.format("file_operations.status_renaming", &[name_of(&path), &name]);
@@ -2032,6 +2072,13 @@ fn doing_line(strings: &Strings, numbers: &dyn Numbers, request: &Request) -> St
         ),
         Request::Delete { sources } => {
             strings.format("file_operations.status_deleting", &[&what(sources)])
+        }
+        Request::Rename { entries, .. } => {
+            let what = match entries.as_slice() {
+                [one] => name_of(&text_of(&one.path)).to_owned(),
+                _ => items(entries.len()),
+            };
+            strings.format("file_operations.status_renaming_items", &[&what])
         }
         Request::NewFolder { path } => {
             strings.format("file_operations.status_creating", &[&text_of(path)])
@@ -2106,6 +2153,8 @@ fn completion_line(strings: &Strings, numbers: &dyn Numbers, completion: &Comple
             strings.format(key, &[&text_of(destination)])
         }
         Completed::Delete => count("file_operations.ended_delete", &[&size]),
+        Completed::Renames if cancelled => count("file_operations.cancelled_rename_items", &[]),
+        Completed::Renames => count("file_operations.ended_rename_items", &[]),
         Completed::NewFolder(_) if cancelled => return String::new(),
         Completed::NewFolder(path) => {
             let key = match failed {
@@ -2472,6 +2521,7 @@ mod tests {
                     reason: Reason::Failed(5),
                 }],
                 ring: RingCounts::default(),
+                renamed: Vec::new(),
             }),
             numbered: false,
         };
@@ -2503,6 +2553,7 @@ mod tests {
                 bytes: 0,
                 listed: Vec::new(),
                 ring: RingCounts::default(),
+                renamed: Vec::new(),
             };
             let request = Request::Copy {
                 policy: gozler_fileops::Policy::default(),
@@ -2549,6 +2600,7 @@ mod tests {
                 reason: Reason::Failed(code),
             }],
             ring: RingCounts::default(),
+            renamed: Vec::new(),
         };
         let delete = Request::Delete {
             sources: sources.clone(),
@@ -2610,6 +2662,7 @@ mod tests {
                 bytes: 0,
                 listed: Vec::new(),
                 ring: RingCounts::default(),
+                renamed: Vec::new(),
             }),
             numbered,
         };
@@ -2646,6 +2699,7 @@ mod tests {
             bytes: 0,
             listed: Vec::new(),
             ring: RingCounts::default(),
+            renamed: Vec::new(),
         });
         let request = Arc::new(Request::Delete {
             sources: vec![PathBuf::from(r"C:\f\a")],

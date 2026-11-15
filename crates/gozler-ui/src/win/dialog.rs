@@ -23,21 +23,21 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, S_OK, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    DTN_DATETIMECHANGE, EMF_CENTERED, LVN_GETDISPINFOW, LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW,
-    LVN_ITEMCHANGED, NM_CLICK, NM_DBLCLK, NM_RETURN, NMHDR, NMLVDISPINFOW, NMLVEMPTYMARKUP,
-    NMLVGETINFOTIPW, NMTREEVIEWW, NMTVITEMCHANGE, TASKDIALOG_BUTTON, TASKDIALOG_NOTIFICATIONS,
-    TASKDIALOGCONFIG, TASKDIALOGCONFIG_0, TASKDIALOGCONFIG_1, TD_INFORMATION_ICON, TD_WARNING_ICON,
-    TDF_ALLOW_DIALOG_CANCELLATION, TDF_POSITION_RELATIVE_TO_WINDOW,
-    TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE, TDN_CREATED, TVE_EXPAND, TVIS_STATEIMAGEMASK,
-    TVN_ITEMCHANGEDW, TVN_ITEMEXPANDINGW, TaskDialogIndirect,
+    DTN_DATETIMECHANGE, EMF_CENTERED, LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_GETEMPTYMARKUP,
+    LVN_GETINFOTIPW, LVN_ITEMCHANGED, NM_CLICK, NM_DBLCLK, NM_RETURN, NMHDR, NMLISTVIEW,
+    NMLVDISPINFOW, NMLVEMPTYMARKUP, NMLVGETINFOTIPW, NMTREEVIEWW, NMTVITEMCHANGE,
+    TASKDIALOG_BUTTON, TASKDIALOG_NOTIFICATIONS, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0,
+    TASKDIALOGCONFIG_1, TD_INFORMATION_ICON, TD_WARNING_ICON, TDF_ALLOW_DIALOG_CANCELLATION,
+    TDF_POSITION_RELATIVE_TO_WINDOW, TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE, TDN_CREATED,
+    TVE_EXPAND, TVIS_STATEIMAGEMASK, TVN_ITEMCHANGEDW, TVN_ITEMEXPANDINGW, TaskDialogIndirect,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_SELCHANGE, CreateDialogParamW,
-    DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS, EndDialog, EnumChildWindows, GWL_STYLE,
-    GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW, IDCANCEL, IDOK, MB_ICONERROR,
-    MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MINMAXINFO, MapDialogRect, MessageBoxW,
-    SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_DESTROY,
-    WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE, WM_TIMER,
+    BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_EDITCHANGE, CBN_SELCHANGE,
+    CBN_SELENDOK, CreateDialogParamW, DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS,
+    EndDialog, EnumChildWindows, GWL_STYLE, GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW,
+    IDCANCEL, IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MINMAXINFO,
+    MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_COMMAND,
+    WM_CONTEXTMENU, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE, WM_TIMER,
 };
 use windows::core::{BOOL, HRESULT, HSTRING, PCWSTR};
 
@@ -59,11 +59,34 @@ pub(crate) enum DialogMessage {
     Command {
         id: u16,
     },
-    /// The control `id` holds another value: an edit control's or a hotkey
-    /// control's text, a list's selection, or a date picker's date or check
-    /// box.
+    /// The control `id` holds another value: an edit control's, a combo
+    /// box's or a hotkey control's text, a list's selection, or a date
+    /// picker's date or check box.
     Edited {
         id: u16,
+    },
+    /// The person chose the selected item of the drop-down list `id`
+    /// (`CBN_SELENDOK`).
+    Chosen {
+        id: u16,
+    },
+    /// A key pressed in the control `target` of a dialog that
+    /// [`super::window::own_keys`] names, before the dialog's own keys; a
+    /// handler that takes it keeps it from the control.
+    Key {
+        target: Hwnd,
+        keystroke: Keystroke,
+    },
+    /// A click on the header of column `column` of the list view `id`.
+    ColumnClicked {
+        id: u16,
+        column: usize,
+    },
+    /// The context menu of `target`, at a screen point, or `None` for the
+    /// keyboard's.
+    ContextMenu {
+        target: Hwnd,
+        at: Option<(i32, i32)>,
     },
     /// The edit control `id` got the focus, or lost it.
     Focus {
@@ -246,6 +269,14 @@ unsafe extern "system" fn procedure<D: DialogProc>(
     // runs.
     let running = unsafe { &*running };
     let dialog = Hwnd(hwnd);
+    if let Some((target, keystroke)) = super::window::offered_key(msg, wparam, lparam) {
+        let taken = running
+            .state
+            .message(dialog, DialogMessage::Key { target, keystroke });
+        // SAFETY: plain values; the offer's sender reads the answer.
+        unsafe { SetWindowLongPtrW(hwnd, DWLP_MSGRESULT, isize::from(taken)) };
+        return isize::from(taken);
+    }
     let message = match msg {
         WM_INITDIALOG => {
             open(dialog, running);
@@ -258,6 +289,11 @@ unsafe extern "system" fn procedure<D: DialogProc>(
                 BN_CLICKED => DialogMessage::Command { id },
                 // A list box's LBN_SELCHANGE is a combo box's CBN_SELCHANGE.
                 EN_CHANGE | CBN_SELCHANGE => DialogMessage::Edited { id },
+                CBN_SELENDOK => DialogMessage::Chosen { id },
+                // A button's BN_DOUBLECLICKED has CBN_EDITCHANGE's code.
+                CBN_EDITCHANGE if Hwnd(HWND(lparam.0 as *mut _)).is_class("ComboBox") => {
+                    DialogMessage::Edited { id }
+                }
                 EN_SETFOCUS => DialogMessage::Focus { id, focused: true },
                 EN_KILLFOCUS => DialogMessage::Focus { id, focused: false },
                 _ => DialogMessage::Other,
@@ -324,6 +360,15 @@ unsafe extern "system" fn procedure<D: DialogProc>(
                     }
                     return 0;
                 }
+                LVN_COLUMNCLICK => {
+                    // SAFETY: LVN_COLUMNCLICK's lparam points to an
+                    // NMLISTVIEW.
+                    let notice = unsafe { &*(lparam.0 as *const NMLISTVIEW) };
+                    match usize::try_from(notice.iSubItem) {
+                        Ok(column) => DialogMessage::ColumnClicked { id, column },
+                        Err(_) => DialogMessage::Other,
+                    }
+                }
                 NM_CLICK | NM_RETURN => DialogMessage::LinkActivated { id },
                 NM_DBLCLK => DialogMessage::DoubleClicked { id },
                 DTN_DATETIMECHANGE | LVN_ITEMCHANGED => DialogMessage::Edited { id },
@@ -357,6 +402,10 @@ unsafe extern "system" fn procedure<D: DialogProc>(
             }
         }
         WM_TIMER => DialogMessage::Timer { id: wparam.0 },
+        WM_CONTEXTMENU => DialogMessage::ContextMenu {
+            target: Hwnd(HWND(wparam.0 as *mut _)),
+            at: super::window::context_point(lparam),
+        },
         WM_DESTROY => {
             running.state.closed(dialog);
             return 0;
@@ -389,6 +438,10 @@ unsafe extern "system" fn procedure<D: DialogProc>(
     let command = match message {
         DialogMessage::Command { id, .. } => Some(id),
         DialogMessage::Edited { .. }
+        | DialogMessage::Chosen { .. }
+        | DialogMessage::Key { .. }
+        | DialogMessage::ColumnClicked { .. }
+        | DialogMessage::ContextMenu { .. }
         | DialogMessage::Focus { .. }
         | DialogMessage::KeysCaptured { .. }
         | DialogMessage::LinkActivated { .. }

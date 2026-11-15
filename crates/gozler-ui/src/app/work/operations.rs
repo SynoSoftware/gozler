@@ -2,6 +2,7 @@
 
 use crate::app::dialogs::TransferStart;
 use crate::core::fetch::List;
+use crate::core::multi_rename::{self, Known, Row};
 use crate::core::open::Entries;
 use crate::core::operations::{Followed, Following, PreparedFailure, Reporting};
 use crate::core::panel::CommandPlace;
@@ -31,12 +32,13 @@ pub(in crate::app) enum PathPurpose {
     Copy(List),
     Move(List),
     Delete(List),
+    Rename(List),
 }
 
 impl PathPurpose {
     fn list(self) -> List {
         match self {
-            Self::Copy(list) | Self::Move(list) | Self::Delete(list) => list,
+            Self::Copy(list) | Self::Move(list) | Self::Delete(list) | Self::Rename(list) => list,
         }
     }
 }
@@ -57,6 +59,10 @@ pub(in crate::app) enum PathAction {
         /// person types a word to delete (DESIGN.md: Delete).
         unseen: bool,
     },
+    /// Multi-Rename, from a panel's `place` or from Search.
+    MultiRename {
+        place: Option<CommandPlace>,
+    },
 }
 
 impl PathAction {
@@ -69,6 +75,27 @@ impl PathAction {
                 PathPurpose::Move(list)
             }
             Self::Delete { .. } => PathPurpose::Delete(list),
+            Self::MultiRename { .. } => PathPurpose::Rename(list),
+        }
+    }
+}
+
+/// What a command acts on: the entries' paths, or for Multi-Rename the
+/// rows its list shows, with what the list held of each entry, and the
+/// names of a folder panel's folder, which its preview numbers against.
+pub(in crate::app) enum Chosen {
+    Paths(Vec<PathBuf>),
+    Rows {
+        rows: Vec<Row>,
+        known: Option<Known>,
+    },
+}
+
+impl Chosen {
+    pub(in crate::app) fn items(&self) -> usize {
+        match self {
+            Chosen::Paths(paths) => paths.len(),
+            Chosen::Rows { rows, .. } => rows.len(),
         }
     }
 }
@@ -86,7 +113,7 @@ impl PreparingPaths {
 
 pub(in crate::app) struct PreparedPaths {
     pub(in crate::app) action: PathAction,
-    pub(in crate::app) paths: Vec<PathBuf>,
+    pub(in crate::app) chosen: Chosen,
     pub(in crate::app) single_folder: bool,
 }
 
@@ -123,6 +150,7 @@ impl Work {
                         PathPurpose::Copy(list),
                         PathPurpose::Move(list),
                         PathPurpose::Delete(list),
+                        PathPurpose::Rename(list),
                     ]
                 })
                 .map(|purpose| {
@@ -269,10 +297,31 @@ impl Work {
 
 fn prepare_paths(input: PreparingPaths, cancel: &CancelToken) -> PreparedPaths {
     let single_folder = input.entries.one().is_some_and(|entry| entry.is_folder);
-    let paths = if cancel.is_cancelled() {
-        Vec::new()
+    let chosen = if cancel.is_cancelled() {
+        Chosen::Paths(Vec::new())
+    } else if matches!(input.action, PathAction::MultiRename { .. }) {
+        let known = match &input.entries {
+            Entries::Panel(panel) => {
+                let (folder, names) = panel.listing();
+                Some(Known::new(folder, names))
+            }
+            Entries::Ready(_) | Entries::Results(_) => None,
+        };
+        let entries = (input.entries.dragged().into_iter())
+            .take_while(|_| !cancel.is_cancelled())
+            .map(|entry| multi_rename::Entry {
+                path: entry.path,
+                is_folder: entry.is_folder,
+                size: entry.size,
+                modified: entry.modified,
+            })
+            .collect();
+        Chosen::Rows {
+            rows: Row::of(entries),
+            known,
+        }
     } else {
-        match input.entries {
+        Chosen::Paths(match input.entries {
             Entries::Results(files) => files
                 .iter()
                 .take_while(|_| !cancel.is_cancelled())
@@ -284,11 +333,11 @@ fn prepare_paths(input: PreparingPaths, cancel: &CancelToken) -> PreparedPaths {
                 .take_while(|_| !cancel.is_cancelled())
                 .map(|entry| PathBuf::from(OsString::from_wide(&entry.path)))
                 .collect(),
-        }
+        })
     };
     PreparedPaths {
         action: input.action,
-        paths,
+        chosen,
         single_folder,
     }
 }

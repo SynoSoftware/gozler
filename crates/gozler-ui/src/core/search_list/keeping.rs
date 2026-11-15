@@ -37,6 +37,7 @@ impl Ended {
                     Request::Copy { sources, .. }
                     | Request::Move { sources, .. }
                     | Request::Delete { sources } => sources.len(),
+                    Request::Rename { entries, .. } => entries.len(),
                     Request::NewFolder { .. } | Request::Synchronize { .. } => 1,
                 };
                 if items > INLINE_ITEMS {
@@ -104,8 +105,10 @@ impl Keep {
                 .operations
                 .iter()
                 .filter(|(id, request)| {
-                    matches!(**request, Request::Delete { .. } | Request::Move { .. })
-                        && !kept.contains(id)
+                    matches!(
+                        **request,
+                        Request::Delete { .. } | Request::Move { .. } | Request::Rename { .. }
+                    ) && !kept.contains(id)
                 })
                 .map(|(id, _)| *id)
                 .collect();

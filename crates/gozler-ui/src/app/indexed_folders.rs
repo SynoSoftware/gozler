@@ -596,6 +596,10 @@ impl DialogProc for IndexedFolders<'_> {
             | DialogMessage::Reply
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
+            | DialogMessage::Key { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. }
+            | DialogMessage::Chosen { .. }
             | DialogMessage::Other => false,
         }
     }

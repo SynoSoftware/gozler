@@ -71,10 +71,11 @@ pub(crate) enum CommandId {
     Update,
     /// Compare by content (DESIGN.md: Compare by content).
     Compare,
+    MultiRename,
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 44] = [
+    pub(crate) const ALL: [CommandId; 45] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
         CommandId::ShowInCommander,
@@ -119,6 +120,7 @@ impl CommandId {
         CommandId::UnselectFiles,
         CommandId::Update,
         CommandId::Compare,
+        CommandId::MultiRename,
     ];
 
     /// The command's row; a `match`, so every command has one.
@@ -228,6 +230,12 @@ impl CommandId {
                 // Delete, Cut and Paste are keys of the list (control_key).
                 C::CopyToFolder => ("command.copy_to_folder", &[], transfer, None),
                 C::MoveToFolder => ("command.move_to_folder", &[], transfer, None),
+                C::MultiRename => (
+                    "command.multi_rename",
+                    const { &[Keystroke::ctrl(Key::Letter(b'M'))] },
+                    file_operation,
+                    None,
+                ),
                 C::Synchronize => ("command.synchronize", &[], operations_available, None),
                 C::Compare => (
                     "command.compare",
@@ -319,6 +327,7 @@ impl CommandId {
             C::ShowSearch | C::ShowCommander => Glyph::BackToWindow,
             C::CopyToFolder => Glyph::CopyTo,
             C::MoveToFolder => Glyph::MoveToFolder,
+            C::MultiRename => Glyph::Rename,
             C::Synchronize => Glyph::Refresh,
             C::Delete => Glyph::Delete,
             C::Cut => Glyph::Cut,
@@ -367,9 +376,13 @@ impl CommandId {
             | C::Find
             | C::SortBy
             | C::Cancel => true,
-            C::Open | C::View | C::Properties | C::CopyToFolder | C::MoveToFolder | C::Delete => {
-                true
-            }
+            C::Open
+            | C::View
+            | C::Properties
+            | C::CopyToFolder
+            | C::MoveToFolder
+            | C::MultiRename
+            | C::Delete => true,
             C::SelectFiles | C::UnselectFiles | C::Edit | C::NewFolder => mode == Mode::Commander,
             C::OpenFileLocation
             | C::ShowInCommander
@@ -1313,6 +1326,7 @@ impl MenuItem {
                 | C::CopyFolder
                 | C::CopyToFolder
                 | C::MoveToFolder
+                | C::MultiRename
                 | C::Delete
                 | C::Paste
                 | C::SearchInThisFolder
@@ -1587,7 +1601,13 @@ fn every_menu() -> Vec<Menu> {
                     C::Edit,
                     C::Properties,
                 ]),
-                run(&[C::CopyToFolder, C::MoveToFolder, C::NewFolder, C::Delete]),
+                run(&[
+                    C::CopyToFolder,
+                    C::MoveToFolder,
+                    C::MultiRename,
+                    C::NewFolder,
+                    C::Delete,
+                ]),
                 run(&[C::Synchronize, C::Compare]),
                 run(&[C::ExportResults, C::Cancel]),
                 run(&[C::Settings]),

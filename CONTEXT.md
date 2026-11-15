@@ -332,6 +332,44 @@ The rule chosen before a copy or move for files whose names already exist at
 the destination: update changed files, update only newer files, keep both or
 skip existing files. A metadata match does not verify equal contents.
 
+**Numbered name**:
+The first free name of the form `report (2).pdf`, or `photos (2)` for a
+folder, which an entry gets instead of replacing the entry that holds its
+name: Keep both's name, and Multi-Rename's.
+
+**Multi-Rename**:
+The dialog that gives many entries new names in one step, from a rule the
+person writes or from names they type, and shows every new name before
+anything changes.
+_Avoid_: bulk rename, batch rename tool
+
+**Rename mask**:
+Multi-Rename's name mask or extension mask: text with placeholders that
+builds each new name, such as `[N]-[C]`. Not Select files' mask, which
+matches names.
+_Avoid_: template, pattern
+
+**Placeholder**:
+A part of a rename mask in square brackets that inserts something of the
+entry, such as `[N]` for its name or `[C]` for a counter.
+_Avoid_: token, tag, variable
+
+**Batch**:
+The renames that one Rename of Multi-Rename starts, as one file operation.
+_Avoid_: job, run
+
+**Undo**:
+Multi-Rename's command that renames the entries of its last batch back,
+one batch for each press, while the window runs. It reverses nothing else.
+
+**Saved rename**:
+A named set of Multi-Rename's fields that the person saved to use again.
+_Avoid_: preset, template, setting
+
+**Temporary name**:
+The name an entry holds for a moment while its batch renames entries in a
+circle, such as a swap of two names.
+
 **Synchronization**:
 A one-way update of a destination folder tree from an authoritative source
 folder tree, after comparing and reviewing their differences.

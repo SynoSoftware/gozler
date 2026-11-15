@@ -2,6 +2,7 @@
 //! temporary folder. None reads or writes any other folder, and none needs
 //! a running gozlerd.
 
+use std::ffi::OsString;
 use std::fs::{self, FileTimes};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::{FileTimesExt, MetadataExt, OpenOptionsExt};
@@ -23,17 +24,18 @@ use crate::identity::Identity;
 use crate::io_threads::IoThreads;
 use crate::listing::LISTING_WORDS;
 use crate::names::Names;
-use crate::operation::{Pause, Progress};
+use crate::operation::{Found, Pause, Progress};
 use crate::place::Target;
+use crate::prepare::{Preparation, Work};
 use crate::receive::{receive, verbatim};
 use crate::ring_plan::Layout;
 use crate::saved::{self, Saved};
 use crate::totals::Index;
 use crate::volumes::{CopyPlan, VolumeClass};
 use crate::{
-    Count, Destination, End, LargeFileLimit, Listed, OperationId, Outcome, Policy, Preset, Queue,
-    Reason, Refusal, Request, RingBlock, RingBuffer, RingCounts, RingHardDisk, RingSsd,
-    SourcesFolder, SpeedSettings, State, Taken, Total,
+    Count, Destination, End, InUse, LargeFileLimit, Listed, OperationId, Outcome, Policy, Preset,
+    Queue, Reason, Refusal, Rename, Renamed, Request, RingBlock, RingBuffer, RingCounts,
+    RingHardDisk, RingSsd, SourcesFolder, SpeedSettings, State, Taken, Total,
 };
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
@@ -565,7 +567,10 @@ fn with_policy(mut request: Request, chosen: Option<Policy>) -> Request {
     if let Some(chosen) = chosen {
         match &mut request {
             Request::Copy { policy, .. } | Request::Move { policy, .. } => *policy = chosen,
-            Request::Delete { .. } | Request::NewFolder { .. } | Request::Synchronize { .. } => {}
+            Request::Delete { .. }
+            | Request::NewFolder { .. }
+            | Request::Synchronize { .. }
+            | Request::Rename { .. } => {}
         }
     }
     request
@@ -2758,4 +2763,202 @@ fn a_destination_without_a_folder_above_is_refused() {
         watched.ended(id).end,
         End::Refused(Refusal::DestinationMissing)
     );
+}
+
+/// A batch rename of `renames`, each a path in `scratch` and its new name.
+fn renaming(scratch: &Scratch, renames: &[(&str, &str)], in_use: InUse) -> Request {
+    Request::Rename {
+        entries: (renames.iter())
+            .map(|(path, name)| Rename::new(scratch.path(path), PathBuf::from(name)))
+            .collect(),
+        in_use,
+    }
+}
+
+fn read_text(scratch: &Scratch, name: &str) -> Option<String> {
+    fs::read_to_string(scratch.path(name)).ok()
+}
+
+fn holds_a_temporary_name(scratch: &Scratch) -> bool {
+    (fs::read_dir(scratch.path("")).expect("list the test folder")).any(|entry| {
+        entry
+            .expect("an entry")
+            .file_name()
+            .to_string_lossy()
+            .starts_with("~gozler")
+    })
+}
+
+/// A swap and a shift of four rename in one batch without replacing an
+/// entry, and leave no temporary name.
+#[test]
+fn a_batch_rename_swaps_and_shifts_without_replacing() {
+    let scratch = Scratch::new("renames");
+    for name in ["a", "b", "1", "2", "3", "4"] {
+        scratch.write(name, name.as_bytes());
+    }
+    let renames = [
+        ("a", "b"),
+        ("b", "a"),
+        ("1", "2"),
+        ("2", "3"),
+        ("3", "4"),
+        ("4", "5"),
+    ];
+    let request = renaming(&scratch, &renames, InUse::Number);
+    let outcome = Watched::new(&scratch.saved()).run(request, None);
+    assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
+    assert_eq!(outcome.renamed.len(), 6);
+    let names = ["a", "b", "1", "2", "3", "4", "5"];
+    let texts = names.map(|name| read_text(&scratch, name));
+    let expected = [
+        Some("b"),
+        Some("a"),
+        None,
+        Some("1"),
+        Some("2"),
+        Some("3"),
+        Some("4"),
+    ];
+    assert_eq!(texts, expected.map(|text| text.map(str::to_owned)));
+    assert!(!holds_a_temporary_name(&scratch));
+}
+
+/// A file inside a folder of the batch is renamed before the folder, and
+/// the result names both paths of each entry where the batch left them, so
+/// renaming each back undoes the batch, and the entry of the request that
+/// each rename belongs to. A new path's missing folders are created.
+#[test]
+fn a_batch_renames_inside_a_folder_it_renames() {
+    let scratch = Scratch::new("renames-folder");
+    scratch.write(r"d\x.txt", b"x");
+    scratch.write("z.txt", b"z");
+    let renames = [
+        ("d", "e"),
+        (r"d\x.txt", "y.txt"),
+        ("z.txt", r"new\sub\z.txt"),
+    ];
+    let request = renaming(&scratch, &renames, InUse::Number);
+    let outcome = Watched::new(&scratch.saved()).run(request, None);
+    assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
+    let renamed = |entry: usize, from: &str, to: &str| Renamed {
+        entry,
+        from: scratch.path(from),
+        to: scratch.path(to),
+    };
+    assert_eq!(
+        outcome.renamed,
+        [
+            renamed(1, r"e\x.txt", r"e\y.txt"),
+            renamed(2, "z.txt", r"new\sub\z.txt"),
+            renamed(0, "d", "e"),
+        ]
+    );
+    assert_eq!(read_text(&scratch, r"e\y.txt").as_deref(), Some("x"));
+    assert_eq!(read_text(&scratch, r"new\sub\z.txt").as_deref(), Some("z"));
+}
+
+/// A name that another program takes after prepare is numbered and never
+/// replaced; Undo's batch fails such an entry instead, which keeps its name.
+#[test]
+fn a_name_in_use_is_numbered_or_fails_undo() {
+    let scratch = Scratch::new("renames-in-use");
+    scratch.write("a", b"a");
+    let watched = Watched::new(&scratch.saved());
+    let (id, _) = watched.prepared(renaming(&scratch, &[("a", "b")], InUse::Number));
+    scratch.write("b", b"theirs");
+    watched.queue.submit(id).expect("prepared");
+    let outcome = watched.ended(id);
+    assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
+    assert_eq!(read_text(&scratch, "b").as_deref(), Some("theirs"));
+    assert_eq!(read_text(&scratch, "b (2)").as_deref(), Some("a"));
+
+    let undo = renaming(&scratch, &[("b (2)", "b")], InUse::Fail);
+    let outcome = watched.run(undo, None);
+    let numbered = scratch.path("b (2)");
+    assert_eq!(outcome.listed, [failed(&numbered, ERROR_ALREADY_EXISTS)]);
+    assert_eq!(read_text(&scratch, "b (2)").as_deref(), Some("a"));
+}
+
+/// A cancel during a swap lets the swap finish, so no entry keeps a
+/// temporary name, and takes effect before the next swap.
+#[test]
+fn a_cancel_inside_a_cycle_finishes_the_cycle() {
+    let scratch = Scratch::new("renames-cancel");
+    for name in ["a", "b", "c", "d"] {
+        scratch.write(name, name.as_bytes());
+    }
+    let renames = [("a", "b"), ("b", "a"), ("c", "d"), ("d", "c")];
+    let Request::Rename { entries, in_use } = renaming(&scratch, &renames, InUse::Number) else {
+        unreachable!("a batch rename")
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
+    let settings = SpeedSettings::automatic();
+    let preparing = Preparation {
+        settings: &settings,
+        rule: first_run(None),
+        index: &NoIndex,
+        cancel: &cancel,
+        pause: None,
+    };
+    let mut ready = crate::renames::windows::prepare(&entries, in_use, &preparing).expect("ready");
+    let Some((_, Work::Renames(batch))) = ready.work.pop() else {
+        panic!("a batch rename's work")
+    };
+    // The first report comes after the first swap's second rename.
+    let progress = Progress::default();
+    let setting = Arc::clone(&cancel);
+    *progress.at_first_report.lock().expect("no hook") =
+        Some(Box::new(move || setting.store(true, Ordering::Relaxed)));
+    let (listed, renamed) =
+        crate::renames::windows::run(*batch, &cancel, &Pause::default(), &progress);
+    assert_eq!((listed, renamed.len()), (Vec::new(), 2));
+    let texts = ["a", "b", "c", "d"].map(|name| read_text(&scratch, name));
+    let expected = [Some("b"), Some("a"), Some("c"), Some("d")];
+    assert_eq!(texts, expected.map(|text| text.map(str::to_owned)));
+    assert!(!holds_a_temporary_name(&scratch));
+}
+
+/// After a crash in a swap, with one entry at its temporary name, Continue
+/// moves it on to its new name, and Dismiss gives it its old name back.
+#[test]
+fn continue_and_dismiss_end_a_swap_left_at_a_temporary_name() {
+    for dismissing in [false, true] {
+        let scratch = Scratch::new("renames-crash");
+        let a = scratch.write("a", b"a");
+        let b = scratch.write("b", b"b");
+        let entry = |path: &Path, name: &str, temporary: Option<&str>| {
+            let file = identity(path);
+            Rename {
+                path: path.to_path_buf(),
+                name: PathBuf::from(name),
+                found: Some(Found {
+                    volume: file.volume_serial,
+                    file: file.file_id,
+                    temporary: temporary.map(OsString::from),
+                }),
+            }
+        };
+        let request = Request::Rename {
+            entries: vec![entry(&a, "b", Some("~gozler-1")), entry(&b, "a", None)],
+            in_use: InUse::Number,
+        };
+        fs::rename(&a, scratch.path("~gozler-1")).expect("the crash's temporary name");
+        save(&scratch, &request, None, system_time());
+
+        let expected = if dismissing {
+            let watched = Watched::new(&scratch.saved());
+            let id = watched.queue.operations()[0].id;
+            watched.queue.dismiss(id).expect("interrupted");
+            assert_eq!(watched.ended(id).listed, Vec::new());
+            [Some("a"), Some("b")]
+        } else {
+            let outcome = resume(&scratch);
+            assert_eq!((outcome.end, outcome.listed), (End::Complete, Vec::new()));
+            [Some("b"), Some("a")]
+        };
+        let texts = ["a", "b"].map(|name| read_text(&scratch, name));
+        assert_eq!(texts, expected.map(|text| text.map(str::to_owned)));
+        assert!(!holds_a_temporary_name(&scratch));
+    }
 }

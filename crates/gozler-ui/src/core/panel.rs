@@ -31,11 +31,11 @@ use gozler_core::proto::ResultItem;
 use gozler_core::query::{NameMask, QueryStart};
 use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::winpath::{absolute, is_root, parent_of};
-use gozler_fileops::{OperationId, Request, Taken};
+use gozler_fileops::{OperationId, Rename, Request, Taken};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 mod calculation;
@@ -338,6 +338,12 @@ impl PanelEntries {
             path,
             is_folder: entry.is_folder(),
         })
+    }
+
+    /// The folder, and the name of each entry it lists.
+    pub(crate) fn listing(&self) -> (&str, impl Iterator<Item = &[u16]>) {
+        let names = self.rows.entries().iter().map(|entry| &*entry.name);
+        (&self.folder, names)
     }
 
     pub(crate) fn dragged(self) -> Vec<DragEntry> {
@@ -771,12 +777,16 @@ enum CountState {
     Ready(Counts),
 }
 
-/// A name that an operation of this window creates in the shown folder
-/// ([`Panels::await_name`]).
+/// The names that an operation of this window creates in the shown folder
+/// ([`Panels::await_name`], [`Panels::await_names`]). The list shows them
+/// once every name shows, or once a listing started after the operation's
+/// end shows some of them.
 #[derive(Clone, Debug)]
 struct Awaited {
-    name: Name,
-    /// The renamed entry was selected, so its new name is too.
+    names: Vec<Name>,
+    /// The name the focus goes to; without one, the focus stays.
+    focus: Option<Name>,
+    /// The renamed entries were selected, so their new names are too.
     select: bool,
     /// The name of the entry it renames: while a row shows it, the rename
     /// has not happened, as when it waits for the answer to a conflict.
@@ -1542,9 +1552,19 @@ pub(crate) fn ends_in(request: &Request, folder: &str) -> bool {
                 || matches!(request, Request::Move { .. }) && sources.iter().any(|s| takes(s))
         }
         Request::Delete { sources } => sources.iter().any(|s| takes(s)),
+        // A `..` left in a new path still leaves it within its real folder.
+        Request::Rename { entries, .. } => entries
+            .iter()
+            .any(|entry| takes(&entry.path) || lands(&renamed_path(entry))),
         Request::NewFolder { path } => lands(path),
         Request::Synchronize { destination, .. } => lands(destination),
     }
+}
+
+/// The new full path of a batch rename's entry, as text: its name read from
+/// the entry's folder, with any `..` left in it.
+fn renamed_path(entry: &Rename) -> PathBuf {
+    entry.path.parent().unwrap_or(&entry.path).join(&entry.name)
 }
 
 /// Whether `request`'s end changes a folder size that a panel showing
@@ -1564,6 +1584,9 @@ pub(crate) fn changes_sizes(request: &Request, folder: &str) -> bool {
             ..
         } => below(&destination.path()) || sources.iter().any(|s| below(s)),
         Request::Delete { sources } => sources.iter().any(|s| below(s)),
+        Request::Rename { entries, .. } => entries
+            .iter()
+            .any(|entry| below(&entry.path) || below(&renamed_path(entry))),
         Request::NewFolder { path } => below(path),
         Request::Synchronize { destination, .. } => below(destination),
     }
@@ -2439,19 +2462,66 @@ impl Panels {
         }
         let name = Name::of(name.encode_utf16().collect());
         let from = from.map(|from| Name::of(from.encode_utf16().collect()));
+        let panel = self.panel(side);
+        let origin = Some((Arc::clone(&panel.rows), panel.up_rows()));
+        self.wait_for(
+            side,
+            Awaited {
+                names: vec![name.clone()],
+                focus: Some(name),
+                select,
+                from,
+                operation,
+                ended: None,
+                origin,
+            },
+        );
+    }
+
+    /// Selects `names`, the new names of a batch rename's entries in
+    /// `side`'s folder, and focuses `focus` among them, once rows show them
+    /// (DESIGN.md: Multi-Rename). It keeps the rows selected now, so the
+    /// caller clears them first. `ended` says that the batch has
+    /// ended, so a listing started from now on that lacks a name means the
+    /// batch did not give it. The rows usually show the names already, so
+    /// the caller shows the update this returns, as for any calculation.
+    #[must_use = "the update selects the names that the rows show already"]
+    pub(crate) fn await_names(
+        &mut self,
+        side: Side,
+        names: &[String],
+        focus: Option<&str>,
+        operation: OperationId,
+        ended: bool,
+    ) -> Option<PanelUpdate> {
+        if self.panel(side).search().is_some() || names.is_empty() {
+            return None;
+        }
+        let name = |name: &str| Name::of(name.encode_utf16().collect());
+        let ended = ended.then_some(self.moment);
+        self.wait_for(
+            side,
+            Awaited {
+                names: names.iter().map(|each| name(each)).collect(),
+                focus: focus.map(name),
+                select: true,
+                from: None,
+                operation,
+                ended,
+                // A new name that a row shows now belongs to an entry the
+                // batch renames away, as in a swap.
+                origin: None,
+            },
+        )
+    }
+
+    fn wait_for(&mut self, side: Side, awaited: Awaited) -> Option<PanelUpdate> {
         let taken = Arc::clone(&self.taken);
         let panel = self.panel_mut(side);
-        panel.set_awaited(Some(Awaited {
-            name,
-            select,
-            from,
-            operation,
-            ended: None,
-            origin: Some((Arc::clone(&panel.rows), panel.up_rows())),
-        }));
+        panel.set_awaited(Some(awaited));
         panel.interaction_revision += 1;
         panel.quick.invalidate();
-        panel.submit(RowChange::Await, &taken);
+        panel.submit(RowChange::Await, &taken)
     }
 
     /// The place that shows `side`'s awaited name, once a row shows it,

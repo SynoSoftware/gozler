@@ -1,5 +1,6 @@
 //! Taken entries: the paths that the window leaves out of the panels and
-//! shows blank in the search results, because a delete or a move has them.
+//! shows blank in the search results, because a delete, a move or a batch
+//! rename has them.
 //!
 //! This is a display rule on the path text the window gave; the safety rule
 //! is D14 on identities. The window asks for every row it paints, so a row
@@ -24,7 +25,7 @@ use crate::operation::OperationId;
 const BACKSLASH: u16 = b'\\' as u16;
 
 /// The folded full paths of the sources of every waiting, running or ended
-/// delete or move that is still in the queue. The window takes a snapshot
+/// delete, move or batch rename that is still in the queue. The window takes a snapshot
 /// of it at each wake, so a paint never waits for the engine's lock.
 #[derive(Debug, Default, Clone)]
 pub struct Taken {

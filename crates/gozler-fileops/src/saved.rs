@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::conflicts::Policy;
-use crate::operation::{Destination, Request};
+use crate::operation::{Destination, Found, Rename, Request};
+use crate::renames::InUse;
 use crate::settings::{
     CopyWorkers, Count, DeleteWorkers, Engine, LargeFileLimit, RingBlock, RingBuffer, RingHardDisk,
     RingSsd, SettingError, SpeedSettings,
@@ -44,7 +45,34 @@ pub(crate) struct Saved {
     /// unfinished.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     started: Option<i64>,
+    /// A batch rename's entries; its `sources` are empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    renames: Vec<SavedRename>,
+    /// Only for a batch rename: `fail` for Undo's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    in_use: Option<SavedInUse>,
     settings: SavedSettings,
+}
+
+/// An entry of a batch rename, with the name prepare decided and what finds
+/// it whatever name it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct SavedRename {
+    path: SavedPath,
+    name: SavedPath,
+    volume: u64,
+    /// The file ID in hexadecimal, because JSON numbers cannot hold 128 bits
+    /// exactly.
+    file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    temporary: Option<SavedPath>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SavedInUse {
+    Number,
+    Fail,
 }
 
 /// What a saved operation restores to.
@@ -76,6 +104,38 @@ impl Saved {
                     choice: None,
                     mirror: Some(*mirror),
                     started: Some(started),
+                    renames: Vec::new(),
+                    in_use: None,
+                    settings: SavedSettings::from(settings),
+                });
+            }
+            Request::Rename { entries, in_use } => {
+                return Some(Saved {
+                    kind: Kind::Rename,
+                    sources: Vec::new(),
+                    destination: None,
+                    named: None,
+                    choice: None,
+                    mirror: None,
+                    started: Some(started),
+                    renames: entries
+                        .iter()
+                        .filter_map(|entry| {
+                            let found = entry.found.as_ref()?;
+                            Some(SavedRename {
+                                path: SavedPath::new(&entry.path),
+                                name: SavedPath::new(&entry.name),
+                                volume: found.volume,
+                                file: format!("{:032x}", found.file),
+                                temporary: (found.temporary.as_ref())
+                                    .map(|name| SavedPath::new(Path::new(name))),
+                            })
+                        })
+                        .collect(),
+                    in_use: Some(match in_use {
+                        InUse::Number => SavedInUse::Number,
+                        InUse::Fail => SavedInUse::Fail,
+                    }),
                     settings: SavedSettings::from(settings),
                 });
             }
@@ -112,6 +172,8 @@ impl Saved {
             choice: request.policy().map(SavedChoice::from),
             mirror: None,
             started: Some(started),
+            renames: Vec::new(),
+            in_use: None,
             settings: SavedSettings::from(settings),
         })
     }
@@ -140,6 +202,27 @@ impl Saved {
                 }
             }
             (Kind::Synchronize, _) => return None,
+            (Kind::Rename, None) if sources.is_empty() => Request::Rename {
+                entries: (self.renames.iter())
+                    .map(|saved| {
+                        Some(Rename {
+                            path: saved.path.path(),
+                            name: saved.name.path(),
+                            found: Some(Found {
+                                volume: saved.volume,
+                                file: u128::from_str_radix(&saved.file, 16).ok()?,
+                                temporary: (saved.temporary.as_ref())
+                                    .map(|name| name.path().into_os_string()),
+                            }),
+                        })
+                    })
+                    .collect::<Option<_>>()?,
+                in_use: match self.in_use? {
+                    SavedInUse::Number => InUse::Number,
+                    SavedInUse::Fail => InUse::Fail,
+                },
+            },
+            (Kind::Rename, _) => return None,
             (Kind::Copy, Some(destination)) => Request::Copy {
                 policy: self.choice.map(Policy::from).unwrap_or_default(),
                 sources,
@@ -169,6 +252,7 @@ enum Kind {
     Copy,
     Move,
     Delete,
+    Rename,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

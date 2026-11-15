@@ -36,7 +36,7 @@ pub(super) mod tray;
 pub(super) mod viewers;
 
 pub(super) use clipboard::{CopyFailure, CopyNotice};
-pub(super) use operations::{PathAction, PathPurpose, PreparedPaths};
+pub(super) use operations::{Chosen, PathAction, PathPurpose, PreparedPaths};
 pub(super) use queue::{
     Accepted as QueueAccepted, CheckPurpose, Client as QueueClient, Ready as QueueReady,
 };
