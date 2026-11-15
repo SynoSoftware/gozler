@@ -342,11 +342,14 @@
 #define IDC_COMMAND_SHORTCUT_KEY 1903
 
 // An operation's failures: what went wrong, how many items were done, and
-// each entry that failed or was skipped with its reason.
+// each entry that failed or was skipped with its reason. A delete that
+// Windows denied also offers Retry as administrator.
 #define IDD_FILE_OPERATIONS_FAILED 114
 #define IDC_FAILED_INSTRUCTION 3101
 #define IDC_FAILED_BODY 3102
 #define IDC_FAILED_LIST 3103
+#define IDC_FAILED_KEEP_ADMINISTRATOR 3104
+#define IDC_FAILED_RETRY 3105
 
 // Two panels' Copy to folder and Move to folder: what they act on, and the
 // destination as text.

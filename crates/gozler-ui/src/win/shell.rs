@@ -20,8 +20,9 @@ use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, GetVolumeInformationW, WIN32_FIND_DATAW,
 };
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-    CoInitializeEx, CoTaskMemFree, CoUninitialize, CreateBindCtx, IBindCtx, IDataObject,
+    CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CreateBindCtx, IBindCtx,
+    IDataObject, IDispatch, IServiceProvider,
 };
 use windows::Win32::System::Ole::{
     DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE, IDropSource, OleInitialize, OleUninitialize,
@@ -31,6 +32,7 @@ use windows::Win32::System::Registry::{
     RRF_RT_REG_SZ, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW,
 };
 use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VariantClear};
 use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
     DragAcceptFiles, DragFinish, DragQueryFileW, DragQueryPoint, FOLDERID_Documents,
@@ -47,7 +49,7 @@ use windows::Win32::UI::Shell::{
     ShellWindows,
 };
 use windows::Win32::UI::WindowsAndMessaging::{SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL};
-use windows::core::{HSTRING, IUnknown, Interface, PCWSTR, w};
+use windows::core::{BSTR, HSTRING, IUnknown, Interface, PCWSTR, w};
 
 mod windows_shortcut;
 
@@ -911,6 +913,67 @@ impl Session {
 /// prompt.
 pub(crate) fn refused(error: &io::Error) -> bool {
     error.raw_os_error() == Some(ERROR_CANCELLED.0 as i32)
+}
+
+/// Starts `program` with `parameters` as the desktop's File Explorer does,
+/// which for a program that runs as administrator means without
+/// administrator rights: Windows gives a program the rights of the program
+/// that starts it, and File Explorer runs with the person's filtered token.
+/// File Explorer's desktop view starts it, through
+/// `IShellDispatch2::ShellExecute`. Fails when File Explorer does not run.
+pub(crate) fn start_as_desktop_user(
+    program: &Path,
+    parameters: &OsStr,
+    _worker: &super::work::OffThread,
+) -> io::Result<()> {
+    // SAFETY: this worker thread initializes its own STA once.
+    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) }
+        .ok()
+        .map_err(io_error)?;
+    // SAFETY: COM runs on this thread, and the call releases every
+    // interface before it returns.
+    let started = unsafe { execute_from_desktop(program, parameters) };
+    // SAFETY: matches the successful CoInitializeEx above.
+    unsafe { CoUninitialize() };
+    started.map_err(io_error)
+}
+
+/// [`start_as_desktop_user`]'s calls to File Explorer.
+///
+/// # Safety
+///
+/// COM is initialized as an STA on this thread.
+unsafe fn execute_from_desktop(program: &Path, parameters: &OsStr) -> windows::core::Result<()> {
+    // SAFETY: plain COM calls on this thread's apartment; each VARIANT is
+    // empty or holds a BSTR that it owns until VariantClear frees it.
+    unsafe {
+        let windows: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER)?;
+        let empty = VARIANT::default();
+        let mut hwnd = 0;
+        let desktop =
+            windows.FindWindowSW(&empty, &empty, SWC_DESKTOP, &mut hwnd, SWFO_NEEDDISPATCH)?;
+        let browser: IShellBrowser = desktop
+            .cast::<IServiceProvider>()?
+            .QueryService(&SID_STopLevelBrowser)?;
+        let view: IDispatch = browser
+            .QueryActiveShellView()?
+            .GetItemObject(SVGIO_BACKGROUND)?;
+        let shell: IShellDispatch2 = view.cast::<IShellFolderViewDual>()?.Application()?.cast()?;
+        let wide = |text: &OsStr| BSTR::from_wide(&text.encode_wide().collect::<Vec<_>>());
+        let mut arguments = VARIANT::default();
+        let inner = &mut *arguments.Anonymous.Anonymous;
+        inner.vt = VT_BSTR;
+        inner.Anonymous.bstrVal = std::mem::ManuallyDrop::new(wide(parameters));
+        let started = shell.ShellExecute(
+            &wide(program.as_os_str()),
+            &arguments,
+            &empty,
+            &empty,
+            &empty,
+        );
+        let _ = VariantClear(&mut arguments);
+        started
+    }
 }
 
 /// `ShellExecuteExW` with `verb`, without Windows' own error messages,

@@ -8,6 +8,8 @@ use std::path::PathBuf;
 
 pub(crate) const SAVE_ARGUMENT: &str = "--save-include";
 pub(crate) const REBUILD_ARGUMENT: &str = "--rebuild-index";
+pub(crate) const DELETE_ARGUMENT: &str = "--delete-as-administrator";
+pub(crate) const KEEP_ADMINISTRATOR_ARGUMENT: &str = "--keep-administrator";
 /// Opens only the compare window for two files (DESIGN.md: Compare by
 /// content).
 pub(crate) const COMPARE_ARGUMENT: &str = "--compare";
@@ -86,10 +88,22 @@ pub(crate) struct Arguments {
     pub(crate) save_include: Option<PathBuf>,
     pub(crate) rebuild_index: bool,
     pub(crate) unregister_shortcut: bool,
-    /// The two files that `--compare` names. It is no [`Request`],
+    /// The copy that a failure report's Retry starts as administrator. It
+    /// is no [`Request`], because a window that runs as administrator
+    /// accepts requests from every program, which could then delete any
+    /// file without Windows' permission prompt.
+    pub(crate) delete: Option<DeleteStart>,
+    /// The two files that `--compare` names. It is no [`Request`] either,
     /// because it opens a process of its own that the first window never
     /// sees.
     pub(crate) compare: Option<[PathBuf; 2]>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct DeleteStart {
+    /// The file that lists the items to delete.
+    pub(crate) list: PathBuf,
+    pub(crate) keeps_administrator: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -121,6 +135,8 @@ impl Arguments {
         let mut location = None;
         let mut reveal = None;
         let mut open = None;
+        let mut delete_list = None;
+        let mut keeps_administrator = false;
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             let arg = arg.to_string_lossy();
@@ -130,6 +146,8 @@ impl Arguments {
                 "--unregister-shortcut" => result.unregister_shortcut = true,
                 SAVE_ARGUMENT => result.save_include = args.next().map(PathBuf::from),
                 REBUILD_ARGUMENT => result.rebuild_index = true,
+                DELETE_ARGUMENT => delete_list = Some(PathBuf::from(value(&mut args, &arg)?)),
+                KEEP_ADMINISTRATOR_ARGUMENT => keeps_administrator = true,
                 COMPARE_ARGUMENT => {
                     let left = value(&mut args, &arg)?;
                     let right = value(&mut args, &arg)?;
@@ -203,14 +221,25 @@ impl Arguments {
             return Err(Error::SearchRequired);
         }
         let commander = reveal.is_some() || open.is_some();
+        // A delete runs only in the first window, which owns the file
+        // operations.
         if commander && (has_search || location.is_some())
             || reveal.is_some() && open.is_some()
             || result.sign_in && (has_search || commander || result.new_window)
+            || delete_list.is_some() && (result.sign_in || result.new_window)
             || result.compare.is_some()
-                && (has_search || commander || location.is_some() || result.sign_in)
+                && (has_search
+                    || commander
+                    || location.is_some()
+                    || result.sign_in
+                    || delete_list.is_some())
         {
             return Err(Error::Conflict);
         }
+        result.delete = delete_list.map(|list| DeleteStart {
+            list,
+            keeps_administrator,
+        });
         result.request = if has_search {
             search.location = location;
             Some(Request::Search(search))

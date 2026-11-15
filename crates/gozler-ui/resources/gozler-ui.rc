@@ -420,7 +420,8 @@ BEGIN
 END
 
 // An operation's failures: the instruction in the main instruction font,
-// the items done, and each entry with its reason.
+// the items done, and each entry with its reason. The window hides the
+// check box and Retry unless it offers to delete again as administrator.
 IDD_FILE_OPERATIONS_FAILED DIALOGEX 0, 0, 380, 230
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -428,6 +429,8 @@ BEGIN
     LTEXT           "", IDC_FAILED_INSTRUCTION, 7, 7, 366, 12, SS_NOPREFIX
     LTEXT           "", IDC_FAILED_BODY, 7, 22, 366, 18, SS_NOPREFIX
     CONTROL         "", IDC_FAILED_LIST, "SysListView32", LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 7, 44, 366, 158
+    AUTOCHECKBOX    "", IDC_FAILED_KEEP_ADMINISTRATOR, 7, 211, 250, 10, WS_TABSTOP
+    PUSHBUTTON      "", IDC_FAILED_RETRY, 269, 209, 50, 14
     DEFPUSHBUTTON   "", IDCANCEL, 323, 209, 50, 14
 END
 

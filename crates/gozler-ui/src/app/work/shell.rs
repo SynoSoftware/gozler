@@ -5,6 +5,7 @@ use crate::core::clipboard::folder_of;
 use crate::core::commands::CommandId;
 use crate::core::fetch::List;
 use crate::core::open::{Commands, Entries, EntryAction, Selected};
+use crate::core::startup::{DELETE_ARGUMENT, KEEP_ADMINISTRATOR_ARGUMENT};
 use crate::core::work::{Id, Replacement, Retirement, Waiting};
 use crate::win::folder;
 use crate::win::wake::OpenWaker;
@@ -67,14 +68,29 @@ enum Invocation {
         command: CommandId,
     },
     Reveal(Selected),
-    /// A copy of this window that runs as administrator and shows `entry`
-    /// in Commander, after Windows refused this window its folder
-    /// (DESIGN.md: A panel). `data_dir` is the folder that `--data-dir`
-    /// gave this window.
+    /// A copy of this window that runs as administrator and replaces it.
+    /// `data_dir` is the folder that `--data-dir` gave this window.
     Administrator {
-        entry: Selected,
+        start: AdministratorStart,
         data_dir: Option<PathBuf>,
     },
+}
+
+/// What the copy of this window that runs as administrator does first.
+pub(in crate::app) enum AdministratorStart {
+    /// Shows the entry in Commander, after Windows refused this window its
+    /// folder (DESIGN.md: A panel).
+    Show(Selected),
+    /// Deletes the sources again, after Windows denied this window's delete
+    /// some of their items (DESIGN.md: File operations).
+    Delete(DeleteAgain),
+}
+
+pub(in crate::app) struct DeleteAgain {
+    pub(in crate::app) sources: Vec<PathBuf>,
+    /// Whether Gozler keeps running as administrator after the delete,
+    /// rather than starting again without administrator rights.
+    pub(in crate::app) keeps_administrator: bool,
 }
 
 impl Invocation {
@@ -100,9 +116,17 @@ impl Invocation {
                 EntryAction::Properties => CommandId::Properties,
             }),
             Self::Commander { command, .. } => Some(*command),
-            Self::Target(..) | Self::Setup(_) | Self::Reveal(_) | Self::Administrator { .. } => {
-                None
-            }
+            Self::Administrator {
+                start: AdministratorStart::Delete(_),
+                ..
+            } => Some(CommandId::Delete),
+            Self::Target(..)
+            | Self::Setup(_)
+            | Self::Reveal(_)
+            | Self::Administrator {
+                start: AdministratorStart::Show(_),
+                ..
+            } => None,
         }
     }
 
@@ -259,10 +283,10 @@ impl Work {
 
     pub(in crate::app) fn start_as_administrator(
         &mut self,
-        entry: Selected,
+        start: AdministratorStart,
         data_dir: Option<PathBuf>,
     ) {
-        self.invoke(Invocation::Administrator { entry, data_dir });
+        self.invoke(Invocation::Administrator { start, data_dir });
     }
 
     fn invoke(&mut self, invocation: Invocation) {
@@ -416,11 +440,8 @@ fn open(
                 }),
             ..Opened::default()
         },
-        Invocation::Administrator { entry, data_dir } => {
-            let started = std::env::current_exe().and_then(|program| {
-                let parameters = administrator_parameters(&entry, data_dir.as_deref());
-                session.start_program_as_administrator(&program, &parameters)
-            });
+        Invocation::Administrator { start, data_dir } => {
+            let started = start_administrator(&start, data_dir.as_deref(), session);
             Opened {
                 failure: started
                     .err()
@@ -555,6 +576,106 @@ fn act_on_entries(
     }
 }
 
+/// Starts the copy of this window that runs as administrator. A delete's
+/// sources go in a file of their own, as [`write_delete_list`] writes it,
+/// because a selection can be longer than a command line; the copy deletes
+/// the file once it has read it, and this window deletes it when the copy
+/// does not start.
+fn start_administrator(
+    start: &AdministratorStart,
+    data_dir: Option<&Path>,
+    session: &crate::win::shell::Session,
+) -> io::Result<()> {
+    let program = std::env::current_exe()?;
+    match start {
+        AdministratorStart::Show(entry) => session
+            .start_program_as_administrator(&program, &administrator_parameters(entry, data_dir)),
+        AdministratorStart::Delete(delete) => {
+            let list = write_delete_list(&delete.sources)?;
+            let parameters = delete_parameters(&list, delete.keeps_administrator, data_dir);
+            let started = session.start_program_as_administrator(&program, &parameters);
+            if started.is_err() {
+                let _ = std::fs::remove_file(&list);
+            }
+            started
+        }
+    }
+}
+
+/// Writes `sources` to a new file in the temporary folder, each as UTF-16
+/// followed by a NUL, which no path holds, and gives its path.
+fn write_delete_list(sources: &[PathBuf]) -> io::Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let file =
+        std::env::temp_dir().join(format!("gozler-delete-{}-{stamp}.txt", std::process::id()));
+    let bytes: Vec<u8> = sources
+        .iter()
+        .flat_map(|source| source.as_os_str().encode_wide().chain(Some(0)))
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    std::fs::write(&file, bytes)?;
+    Ok(file)
+}
+
+/// The largest list [`read_delete_list`] reads: far more than the paths of
+/// a selection take, and little enough to allocate.
+const DELETE_LIST_LIMIT: u64 = 256 << 20;
+
+/// Reads the sources that [`write_delete_list`] wrote to `list`, and
+/// deletes the file. A list that this window cannot have written, such as
+/// one with a path that is not absolute, is an error, so none of it is
+/// deleted.
+pub(in crate::app) fn read_delete_list(list: &Path) -> io::Result<Vec<PathBuf>> {
+    let bytes = read_capped(list, DELETE_LIST_LIMIT);
+    let _ = std::fs::remove_file(list);
+    let bytes = bytes?;
+    let (pairs, rest) = bytes.as_chunks::<2>();
+    if !rest.is_empty() {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    let units: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+    units
+        .split(|&unit| unit == 0)
+        .filter(|source| !source.is_empty())
+        .map(|source| {
+            let source = PathBuf::from(OsString::from_wide(source));
+            if source.is_absolute() {
+                Ok(source)
+            } else {
+                Err(io::Error::from(io::ErrorKind::InvalidData))
+            }
+        })
+        .collect()
+}
+
+fn read_capped(file: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    Ok(bytes)
+}
+
+/// The command line that has a copy of this window delete the sources that
+/// `list` holds, with this window's `--data-dir`.
+fn delete_parameters(list: &Path, keeps_administrator: bool, data_dir: Option<&Path>) -> OsString {
+    let mut parameters = OsString::from(DELETE_ARGUMENT);
+    parameters.push(" ");
+    push_quoted(&mut parameters, list.as_os_str());
+    if keeps_administrator {
+        parameters.push(" ");
+        parameters.push(KEEP_ADMINISTRATOR_ARGUMENT);
+    }
+    push_data_dir(&mut parameters, data_dir);
+    parameters
+}
+
 /// The command line that has a copy of this window show `entry` in
 /// Commander: `--open` for a folder and `--reveal` for a file, with this
 /// window's `--data-dir`, so the copy replaces this window and no other.
@@ -565,11 +686,17 @@ fn administrator_parameters(entry: &Selected, data_dir: Option<&Path>) -> OsStri
         "--reveal "
     });
     push_quoted(&mut parameters, &OsString::from_wide(&entry.path));
+    push_data_dir(&mut parameters, data_dir);
+    parameters
+}
+
+/// Adds ` --data-dir "<folder>"` for a window that `--data-dir` gave
+/// `data_dir`, so the window it starts uses the same folder.
+pub(in crate::app) fn push_data_dir(parameters: &mut OsString, data_dir: Option<&Path>) {
     if let Some(folder) = data_dir {
         parameters.push(" --data-dir ");
-        push_quoted(&mut parameters, folder.as_os_str());
+        push_quoted(parameters, folder.as_os_str());
     }
-    parameters
 }
 
 /// Adds `argument` in quotes, with the backslashes before the closing quote
@@ -613,5 +740,42 @@ mod tests {
             administrator_parameters(&file, None),
             OsString::from(r#"--reveal "C:\Windows\Prefetch\a b.pf""#)
         );
+    }
+
+    /// The copy that runs as administrator deletes what this list gives
+    /// back, so a path that came back split or changed would delete another
+    /// item.
+    #[test]
+    fn delete_list_gives_back_each_source() {
+        let sources = vec![
+            PathBuf::from(r"C:\Program Files\PostgreSQL\18"),
+            PathBuf::from("D:\\M\u{fc}nchen \u{1F600}.txt"),
+        ];
+        let list = write_delete_list(&sources).expect("the temporary folder takes a file");
+        assert_eq!(read_delete_list(&list).expect("the list reads"), sources);
+        assert!(!list.exists(), "reading the list deletes it");
+    }
+
+    /// The copy deletes without asking, so a list it cannot read exactly
+    /// deletes nothing.
+    #[test]
+    fn a_damaged_delete_list_deletes_nothing() {
+        let relative: Vec<u8> = "Windows\\Temp\0"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        for bytes in [vec![b'C', 0, b':'], relative] {
+            let list = std::env::temp_dir().join(format!(
+                "gozler-delete-test-{}-{}.txt",
+                std::process::id(),
+                bytes.len()
+            ));
+            std::fs::write(&list, bytes).expect("the temporary folder takes a file");
+            assert_eq!(
+                read_delete_list(&list).map_err(|error| error.kind()),
+                Err(io::ErrorKind::InvalidData)
+            );
+            assert!(!list.exists(), "reading the list deletes it");
+        }
     }
 }

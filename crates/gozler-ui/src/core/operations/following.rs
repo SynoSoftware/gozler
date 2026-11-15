@@ -77,6 +77,9 @@ pub(crate) struct Followed {
 pub(crate) struct Reporting {
     pub(crate) operation: Operation,
     pub(crate) strings: Strings,
+    /// Whether Windows can start the window again as administrator for the
+    /// same person, so a denied delete offers Retry.
+    pub(crate) may_retry_as_administrator: bool,
 }
 
 pub(crate) struct PreparedFailure {
@@ -105,6 +108,7 @@ impl Reporting {
             &self.operation.request,
             &outcome,
             windows_text,
+            self.may_retry_as_administrator,
         );
         PreparedFailure {
             id: self.operation.id,

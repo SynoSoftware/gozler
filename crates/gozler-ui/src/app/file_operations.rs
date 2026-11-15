@@ -3,7 +3,7 @@
 //! runs lifecycle decisions. The child content has no independent placement,
 //! activation or message loop. Reports read immutable outcomes on demand.
 
-use super::work::{CheckPurpose, QueueAccepted, QueueClient};
+use super::work::{CheckPurpose, DeleteAgain, QueueAccepted, QueueClient};
 use crate::core::captions::{ButtonIcon, DialogCaptions, DialogItem};
 use crate::core::file_operations::{
     self, Bar, CARD_ICON, Detail, Failure, Layout, Metrics, QueueAction, ROW_GLYPHS, ROW_ICON, Row,
@@ -16,7 +16,9 @@ use crate::core::operations::{QueueStep, Source, SourceStep};
 use crate::core::text::Strings;
 use crate::core::work::Retirement;
 use crate::win::clipboard::ClipboardFiles;
-use crate::win::controls::{Button, GlyphLabel, Label, ListColumn, ListView, ProgressBar, Tooltip};
+use crate::win::controls::{
+    Button, CheckBox, GlyphLabel, Label, ListColumn, ListView, ProgressBar, Tooltip,
+};
 use crate::win::dialog::{self, DialogMessage, DialogProc, Opened};
 use crate::win::drop_target::DropSource;
 use crate::win::file_operations::{
@@ -666,14 +668,20 @@ impl FileOperations {
 }
 
 /// Shows what failed in an ended operation: the failure dialog, or a
-/// message box when nothing is listed. It runs its own message loop.
-pub(super) fn show_failure(owner: Hwnd, strings: &Strings, failure: Failure) -> Failure {
+/// message box when nothing is listed. It runs its own message loop. Gives
+/// back the failure, and the delete to run as administrator when the
+/// person selected Retry.
+pub(super) fn show_failure(
+    owner: Hwnd,
+    strings: &Strings,
+    failure: Failure,
+) -> (Failure, Option<DeleteAgain>) {
     if failure.rows.is_empty() {
         // A refusal, or a full disk before any entry failed, lists
         // nothing, so the message stands alone.
         let text = format!("{}\n\n{}", failure.instruction, failure.body);
         dialog::error_box(Some(owner), &text, &failure.title);
-        return failure;
+        return (failure, None);
     }
     let mut captions = DialogCaptions::new(DialogId::FileOperationsFailed, strings);
     captions.title.clone_from(&failure.title);
@@ -684,9 +692,18 @@ pub(super) fn show_failure(owner: Hwnd, strings: &Strings, failure: Failure) -> 
             strings.text("file_operations.column_item").to_owned(),
             strings.text("file_operations.column_reason").to_owned(),
         ],
+        retry: Cell::new(None),
     };
     let _ = dialog::run_modal(owner, DialogId::FileOperationsFailed, &captions, &dialog);
-    dialog.failure
+    let keeps_administrator = dialog.retry.get();
+    let mut failure = dialog.failure;
+    let delete = keeps_administrator.zip(failure.retry_sources.take()).map(
+        |(keeps_administrator, sources)| DeleteAgain {
+            sources,
+            keeps_administrator,
+        },
+    );
+    (failure, delete)
 }
 
 /// `dip` at the DPI of `hwnd`.
@@ -1723,6 +1740,9 @@ struct FailureDialog {
     failure: Failure,
     columns: [String; 2],
     list: OnceCell<ListView>,
+    /// After Retry: whether the person keeps Gozler running as
+    /// administrator.
+    retry: Cell<Option<bool>>,
 }
 
 impl DialogProc for FailureDialog {
@@ -1757,14 +1777,37 @@ impl DialogProc for FailureDialog {
             list.set_count(self.failure.rows.len() as u64);
             list.show_info_tips();
         }
+        // Before the dialog sizes its buttons to their widest caption: a
+        // Retry it shows gets its shield, and one it hides no caption.
+        let retries = self.failure.retry_sources.is_some();
+        if let Some(retry) = Button::of_dialog(dialog, ControlId::FailedRetry.id()) {
+            if retries {
+                retry.set_icon(Some(ButtonIcon::Shield));
+            } else {
+                retry.hwnd().set_text("");
+            }
+            retry.hwnd().set_visible(retries);
+        }
+        if let Some(keep) = dialog::item(dialog, ControlId::FailedKeepAdministrator.id()) {
+            keep.set_visible(retries);
+        }
         Opened {
             focus: DialogItem::Cancel.id(),
             fonts,
         }
     }
 
-    fn message(&self, _dialog: Hwnd, _message: DialogMessage) -> bool {
-        false
+    fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        match message {
+            DialogMessage::Command { id } if id == ControlId::FailedRetry.id() => {
+                let keeps = CheckBox::of_dialog(dialog, ControlId::FailedKeepAdministrator.id())
+                    .is_some_and(CheckBox::is_checked);
+                self.retry.set(Some(keeps));
+                dialog::end(dialog, dialog::DialogEnd::Ok);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn list_cell(&self, id: u16, row: u64, column: usize) -> Option<String> {

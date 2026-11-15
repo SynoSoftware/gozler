@@ -128,12 +128,14 @@ fn window_code_has_no_unowned_launcher_or_recognized_wait() {
 
 fn exception(file: &str, function: &str) -> bool {
     match file {
-        // No HWND exists during startup/reset; panic reporting cannot dispatch
-        // into half-mutated window state. Logging otherwise runs on workers.
+        // No HWND exists during startup, reset or the start again without
+        // administrator rights; panic reporting cannot dispatch into
+        // half-mutated window state. Logging otherwise runs on workers.
         "app/mod.rs" => matches!(
             function,
             "run"
                 | "reset_and_start_again"
+                | "start_without_administrator"
                 | "instance_suffix"
                 | "runs_another_program"
                 | "install_panic_hook"

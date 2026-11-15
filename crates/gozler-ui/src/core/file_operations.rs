@@ -2246,17 +2246,27 @@ pub(crate) struct Failure {
     pub(crate) body: String,
     /// Each entry's path and reason.
     pub(crate) rows: Vec<[String; 2]>,
+    /// The sources of a delete that Windows denied some items, which Retry
+    /// deletes again in a copy that runs as administrator; `None` when the
+    /// dialog offers no Retry.
+    pub(crate) retry_sources: Option<Vec<PathBuf>>,
 }
+
+/// Windows' `ERROR_ACCESS_DENIED`.
+const ACCESS_DENIED: u32 = 5;
 
 /// The failure dialog of an operation that ended as `outcome`, or `None`
 /// when nothing failed or was skipped. A cancelled operation shows what
 /// failed before the cancel. `windows_text` words a Windows error code.
+/// With `may_retry_as_administrator`, a delete that Windows denied an item
+/// offers Retry.
 pub(crate) fn failure(
     strings: &Strings,
     numbers: &dyn Numbers,
     request: &Request,
     outcome: &Outcome,
     windows_text: &dyn Fn(u32) -> String,
+    may_retry_as_administrator: bool,
 ) -> Option<Failure> {
     if !reports(outcome) {
         return None;
@@ -2273,10 +2283,32 @@ pub(crate) fn failure(
         .collect();
     let count = rows.len() as u64;
     let done = strings.count("file_operations.done", outcome.items, numbers, &[]);
+    let retry_sources = match request {
+        // After a cancel, the sources hold items the person stopped and the
+        // dialog never lists, so Retry would delete them unasked.
+        Request::Delete { sources }
+            if may_retry_as_administrator
+                && outcome.end == End::Complete
+                && (outcome.listed.iter())
+                    .any(|listed| listed.reason == Reason::Failed(ACCESS_DENIED)) =>
+        {
+            Some(sources.clone())
+        }
+        _ => None,
+    };
     let (instruction, body) = match &outcome.end {
         End::Complete | End::Cancelled => (
             strings.count("file_operations.failed", count, numbers, &[]),
-            joined_sentences([done, strings.text("file_operations.failed_body").to_owned()]),
+            joined_sentences(
+                [
+                    Some(done),
+                    Some(strings.text("file_operations.failed_body").to_owned()),
+                    (retry_sources.is_some())
+                        .then(|| strings.text("file_operations.retry_body").to_owned()),
+                ]
+                .into_iter()
+                .flatten(),
+            ),
         ),
         End::DiskFull(no_room) => (
             strings.text("file_operations.disk_full").to_owned(),
@@ -2292,6 +2324,7 @@ pub(crate) fn failure(
         instruction,
         body,
         rows,
+        retry_sources,
     })
 }
 
@@ -2476,9 +2509,16 @@ mod tests {
                 sources: vec![PathBuf::from(r"Y:\backup")],
                 destination: Destination::Folder(PathBuf::from(r"C:\b")),
             };
-            failure(&english(), &English, &request, &outcome, &|_| String::new())
-                .expect("a full disk reports")
-                .body
+            failure(
+                &english(),
+                &English,
+                &request,
+                &outcome,
+                &|_| String::new(),
+                false,
+            )
+            .expect("a full disk reports")
+            .body
         };
         assert_eq!(
             body(Some(117_706_141_696)),
@@ -2488,6 +2528,57 @@ mod tests {
         assert_eq!(
             body(Some(200 << 30)),
             "image.mrimg needs 184 GB. 2 items are done."
+        );
+    }
+
+    /// Retry deletes the sources again as administrator, so only a delete
+    /// that Windows denied, and that ran to its end, may offer it: offered
+    /// for a copy, it would delete the copy's sources, and after a cancel,
+    /// the items the person stopped.
+    #[test]
+    fn only_a_denied_delete_offers_retry_as_administrator() {
+        let sources = vec![PathBuf::from(r"C:\Program Files\PostgreSQL")];
+        let outcome = |code, end| Outcome {
+            end,
+            items: 20,
+            completed: 19,
+            succeeded: false,
+            bytes: 0,
+            listed: vec![Listed {
+                path: PathBuf::from(r"C:\Program Files\PostgreSQL\18\bin\psql.exe"),
+                reason: Reason::Failed(code),
+            }],
+            ring: RingCounts::default(),
+        };
+        let delete = Request::Delete {
+            sources: sources.clone(),
+        };
+        let copy = Request::Copy {
+            policy: gozler_fileops::Policy::default(),
+            sources: sources.clone(),
+            destination: Destination::Folder(PathBuf::from(r"D:\Backup")),
+        };
+        let retry_after = |request: &Request, code, may, end| {
+            failure(
+                &english(),
+                &English,
+                request,
+                &outcome(code, end),
+                &|_| String::new(),
+                may,
+            )
+            .expect("a failed item reports")
+            .retry_sources
+        };
+        let retry = |request: &Request, code, may| retry_after(request, code, may, End::Complete);
+        assert_eq!(retry(&delete, ACCESS_DENIED, true), Some(sources));
+        assert_eq!(retry(&copy, ACCESS_DENIED, true), None);
+        assert_eq!(retry(&delete, ACCESS_DENIED, false), None);
+        // ERROR_SHARING_VIOLATION: administrator rights do not help.
+        assert_eq!(retry(&delete, 32, true), None);
+        assert_eq!(
+            retry_after(&delete, ACCESS_DENIED, true, End::Cancelled),
+            None
         );
     }
 

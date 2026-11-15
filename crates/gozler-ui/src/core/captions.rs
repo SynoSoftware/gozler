@@ -715,7 +715,13 @@ impl CaptionTable {
             // texts and the list from what failed.
             DialogId::FileOperationsFailed => CaptionTable {
                 title: "file_operations.title",
-                keyed: &[],
+                keyed: &[
+                    (
+                        Control(C::FailedKeepAdministrator),
+                        "file_operations.keep_administrator",
+                    ),
+                    (Control(C::FailedRetry), "file_operations.retry"),
+                ],
                 plain: &[(Cancel, "button.close")],
             },
             // DialogCaptions::command_shortcut fills in the command and the

@@ -23,9 +23,9 @@ use super::settings::SettingsDialog;
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar, WorkId};
 use super::viewer::{Files as ViewerFiles, Viewers};
 use super::work::{
-    Awaited, CopyFailure, CopyNotice, OpenTarget, Opened, PathAction, PathPurpose, PreparedPaths,
-    QueueReady, RegistryAnswer, RegistryRead, ReleaseAnswer, ReleasePurpose, ShellPurpose,
-    ShellTarget, Surface,
+    AdministratorStart, Awaited, CopyFailure, CopyNotice, DeleteAgain, OpenTarget, Opened,
+    PathAction, PathPurpose, PreparedPaths, QueueReady, RegistryAnswer, RegistryRead,
+    ReleaseAnswer, ReleasePurpose, ShellPurpose, ShellTarget, Surface,
 };
 use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, FilterCaptions, IndexCaptions, Inspected,
@@ -395,6 +395,20 @@ enum Ending {
     Running,
     ForSetup,
     ForReset,
+    /// To start again without administrator rights (DESIGN.md: File
+    /// operations).
+    WithoutAdministrator,
+}
+
+/// The delete that a failure report's Retry gave this copy, which runs as
+/// administrator (DESIGN.md: File operations).
+enum AdministratorDelete {
+    None,
+    /// Waits until the queue that this window restores is ready.
+    Waiting(DeleteAgain),
+    /// The delete runs; once it ends, and its report closes, Gozler starts
+    /// again without administrator rights.
+    Returning(OperationId),
 }
 
 enum Reveal {
@@ -479,6 +493,7 @@ pub(crate) struct MainWindow {
     modal_running: Cell<bool>,
     operation_delivery: RefCell<Option<OperationDelivery>>,
     delivering_operations: Cell<bool>,
+    administrator_delete: RefCell<AdministratorDelete>,
     shutdown: RefCell<Option<win::window::Shutdown>>,
 }
 
@@ -556,6 +571,8 @@ enum ModalStep {
     Operation(OperationDialog),
     PreparedFailure(PreparedFailure),
     Synchronize(OperationId),
+    /// The delete that a failure report's Retry asked for has ended.
+    ReturnWithoutAdministrator,
 }
 
 /// The folder row that dragged files would be dropped into. The drop goes
@@ -634,6 +651,7 @@ impl MainWindow {
             modal_running: Cell::new(false),
             operation_delivery: RefCell::new(None),
             delivering_operations: Cell::new(false),
+            administrator_delete: RefCell::new(AdministratorDelete::None),
         });
         let hwnd = win::window::create_window(class, Rc::clone(&window), placement)
             .expect("the main window opens");
@@ -1247,7 +1265,7 @@ impl MainWindow {
                 .work
                 .borrow_mut()
                 .shell
-                .start_as_administrator(entry, self.data_dir.clone());
+                .start_as_administrator(AdministratorStart::Show(entry), self.data_dir.clone());
             self.poll_work(hwnd);
         }
         true
@@ -2629,6 +2647,7 @@ impl MainWindow {
                 }
                 ModalStep::PreparedFailure(prepared) => self.show_prepared_failure(hwnd, prepared),
                 ModalStep::Synchronize(id) => self.synchronize_folders(hwnd, Some(id)),
+                ModalStep::ReturnWithoutAdministrator => self.return_without_administrator(hwnd),
             }
         }
         self.modal_running.set(false);
@@ -3712,6 +3731,22 @@ impl MainWindow {
         let operations = FileOperations::new(hwnd, queue, strings);
         operations.set_transfer_limit(self.model.borrow().choices().transfers_per_device);
         let _ = self.file_operations.set(operations);
+        let waiting = std::mem::replace(
+            &mut *self.administrator_delete.borrow_mut(),
+            AdministratorDelete::None,
+        );
+        if let AdministratorDelete::Waiting(delete) = waiting {
+            let id = self.start_operation(
+                Request::Delete {
+                    sources: delete.sources,
+                },
+                None,
+            );
+            if let Some(id) = id.filter(|_| !delete.keeps_administrator) {
+                self.administrator_delete
+                    .replace(AdministratorDelete::Returning(id));
+            }
+        }
         self.controls().key_bar.update_key_bar(self);
         // Enrichment may have woken before adoption; explicitly read the restored state.
         hwnd.post(QUEUE_CHANGED);
@@ -3768,8 +3803,20 @@ impl MainWindow {
                 }
             }
             let taken = operations.taken();
+            let snapshot = operations.snapshot();
+            // A delete that ends without a report returns now; one with a
+            // report returns when the report closes.
+            if let Some(id) = self.returns_after()
+                && snapshot.iter().any(|operation| {
+                    operation.id == id
+                        && matches!(&operation.state, gozler_fileops::State::Ended(outcome)
+                            if !crate::core::file_operations::reports(outcome))
+                })
+            {
+                self.administrator_delete_ended(hwnd, id);
+            }
             self.model.borrow_mut().observe_operations(
-                operations.snapshot(),
+                snapshot,
                 Arc::clone(&taken),
                 Instant::now(),
             );
@@ -4083,7 +4130,11 @@ impl MainWindow {
                     return false;
                 };
                 self.created().work.borrow_mut().operations.prepare_report(
-                    Reporting { operation, strings },
+                    Reporting {
+                        operation,
+                        strings,
+                        may_retry_as_administrator: win::instance::may_run_as_administrator(),
+                    },
                     self.numbers.borrow().clone(),
                 );
             }
@@ -4098,19 +4149,32 @@ impl MainWindow {
             .operation_outcome(prepared.id)
             .is_some_and(|outcome| Arc::ptr_eq(&outcome, &prepared.outcome));
         if current {
+            let mut retry = None;
             if let Some(failure) = prepared.failure.take() {
-                prepared.failure = Some(super::file_operations::show_failure(
-                    hwnd,
-                    &prepared.strings,
-                    failure,
-                ));
+                let (failure, chosen) =
+                    super::file_operations::show_failure(hwnd, &prepared.strings, failure);
+                prepared.failure = Some(failure);
+                retry = chosen;
             }
             if self.shutdown.borrow().is_none() {
                 self.model.borrow_mut().operation_reported(prepared.id);
                 self.start_list_passes();
                 hwnd.post(QUEUE_CHANGED);
+                if let Some(delete) = retry {
+                    // The copy replaces this window (DESIGN.md: File operations).
+                    self.created()
+                        .work
+                        .borrow_mut()
+                        .shell
+                        .start_as_administrator(
+                            AdministratorStart::Delete(delete),
+                            self.data_dir.clone(),
+                        );
+                    self.poll_work(hwnd);
+                }
             }
         }
+        self.administrator_delete_ended(hwnd, prepared.id);
         let mut retired = Retirement::default();
         retired.push(prepared, crate::core::work::INLINE_ITEMS + 1);
         self.created().work.borrow_mut().retire(retired);
@@ -4844,6 +4908,42 @@ impl MainWindow {
     /// Whether the window exited for Settings' Reset all.
     pub(super) fn resets_settings(&self) -> bool {
         self.ending.get() == Ending::ForReset
+    }
+
+    /// Has this copy, which runs as administrator, delete `delete`'s
+    /// sources once its queue is ready (DESIGN.md: File operations).
+    pub(super) fn delete_once_restored(&self, delete: DeleteAgain) {
+        self.administrator_delete
+            .replace(AdministratorDelete::Waiting(delete));
+    }
+
+    /// The delete after which Gozler starts again without administrator
+    /// rights.
+    fn returns_after(&self) -> Option<OperationId> {
+        match *self.administrator_delete.borrow() {
+            AdministratorDelete::Returning(id) => Some(id),
+            AdministratorDelete::None | AdministratorDelete::Waiting(_) => None,
+        }
+    }
+
+    fn administrator_delete_ended(&self, hwnd: Hwnd, id: OperationId) {
+        if self.returns_after() == Some(id) {
+            self.administrator_delete.replace(AdministratorDelete::None);
+            self.defer(hwnd, ModalStep::ReturnWithoutAdministrator);
+        }
+    }
+
+    /// Exits as File > Exit does, and [`super::run`] then starts Gozler
+    /// again without administrator rights. A person who keeps the running
+    /// file operations keeps this window.
+    fn return_without_administrator(&self, hwnd: Hwnd) {
+        self.exit(hwnd, Ending::WithoutAdministrator);
+    }
+
+    /// Whether the window exited to start again without administrator
+    /// rights.
+    pub(super) fn returns_without_administrator(&self) -> bool {
+        self.ending.get() == Ending::WithoutAdministrator
     }
 
     /// Saves what changed since the last save: from another window, only

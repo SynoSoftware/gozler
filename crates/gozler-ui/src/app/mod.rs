@@ -80,6 +80,24 @@ pub(crate) fn run() {
         compare_alone(files, &data_dir.join("ui.json"));
         return;
     }
+    // Read before this start can end, so the list never stays behind.
+    let delete =
+        arguments
+            .delete
+            .as_ref()
+            .and_then(|start| match work::read_delete_list(&start.list) {
+                Ok(sources) => Some(work::DeleteAgain {
+                    sources,
+                    keeps_administrator: start.keeps_administrator,
+                }),
+                Err(error) => {
+                    write_log(
+                        &data_dir.join("ui-error.log"),
+                        &format!("The items to delete as administrator did not read: {error}"),
+                    );
+                    None
+                }
+            });
     let suffix = arguments
         .data_dir
         .as_deref()
@@ -92,12 +110,30 @@ pub(crate) fn run() {
     let exit_message = win::instance::register_message(EXIT_MESSAGE);
     let mutex = format!("{INSTANCE_MUTEX}{suffix}");
     let mut waiting_since = Instant::now();
+    // The list file is gone by now, so a start that ends here without its
+    // own window says that the delete did not run.
+    let report_delete_not_run = || {
+        if delete.is_some() {
+            let strings = Strings::load(
+                settings
+                    .choices
+                    .language
+                    .resolve(&win::locale::display_languages()),
+            );
+            win::dialog::error_box(
+                None,
+                strings.text("file_operations.retry_not_run"),
+                strings.text("file_operations.delete"),
+            );
+        }
+    };
     let first = loop {
         let first = win::instance::claim(&mutex).expect("a named mutex can be created");
-        // A start at sign-in never opens a second window.
+        // A start at sign-in never opens a second window, and neither does
+        // a delete, which only the first window can run.
         if first.is_some()
             || arguments.new_window
-            || !(settings.choices.one_window || arguments.sign_in)
+            || !(settings.choices.one_window || arguments.sign_in || delete.is_some())
         {
             break first;
         }
@@ -125,6 +161,7 @@ pub(crate) fn run() {
                 && (runs_another_program(process)
                     || win::instance::is_elevated() && !process.is_elevated())
         }) else {
+            report_delete_not_run();
             hand_over(window, show_message, arguments.request.as_ref());
             return;
         };
@@ -136,13 +173,21 @@ pub(crate) fn run() {
                 process.wait_for_end();
                 waiting_since = Instant::now();
             }
-            Some(EXIT_STAYS) => return,
+            Some(EXIT_STAYS) => {
+                report_delete_not_run();
+                return;
+            }
             _ => {
+                report_delete_not_run();
                 hand_over(window, show_message, arguments.request.as_ref());
                 return;
             }
         }
     };
+    // Only the first window runs file operations.
+    if first.is_none() {
+        report_delete_not_run();
+    }
     let instance = match first {
         Some(_) => Instance::First,
         None => Instance::Another,
@@ -182,6 +227,9 @@ pub(crate) fn run() {
         arguments.sign_in,
         arguments.request,
     );
+    if let Some(delete) = delete.filter(|_| instance == Instance::First) {
+        window.delete_once_restored(delete);
+    }
     // The setup's update ends the loop before Gozler exits, and Exit can
     // wait for compare windows to save, which needs the loop again.
     loop {
@@ -200,6 +248,50 @@ pub(crate) fn run() {
             reset_and_start_again(&data_dir, given_data_dir.as_deref(), worker);
         })
         .join();
+    } else if window.returns_without_administrator() {
+        // As for Reset all, the new window must find no first one, because
+        // a start without administrator rights hands over to this window.
+        drop(first);
+        let given_data_dir = arguments.data_dir;
+        let _ = win::work::spawn(move |worker| {
+            start_without_administrator(&data_dir, given_data_dir.as_deref(), worker);
+        })
+        .join();
+    }
+}
+
+/// Starts the window again without administrator rights, after the delete
+/// that a failure report's Retry asked for (DESIGN.md: File operations).
+/// When Windows cannot, it starts the window as administrator, so the
+/// person is not left without a window.
+fn start_without_administrator(
+    data_dir: &Path,
+    given_data_dir: Option<&Path>,
+    worker: &win::work::OffThread,
+) {
+    let log = data_dir.join("ui-error.log");
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(error) => {
+            write_log(&log, &format!("Gozler did not find gozler-ui.exe: {error}"));
+            return;
+        }
+    };
+    let mut parameters = std::ffi::OsString::new();
+    work::push_data_dir(&mut parameters, given_data_dir);
+    let Err(error) = win::shell::start_as_desktop_user(&program, &parameters, worker) else {
+        return;
+    };
+    write_log(
+        &log,
+        &format!("Gozler did not start again without administrator rights: {error}"),
+    );
+    let mut command = std::process::Command::new(&program);
+    if let Some(folder) = given_data_dir {
+        command.arg("--data-dir").arg(folder);
+    }
+    if let Err(error) = command.spawn() {
+        write_log(&log, &format!("Gozler did not start again: {error}"));
     }
 }
 

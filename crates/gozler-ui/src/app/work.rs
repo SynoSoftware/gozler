@@ -43,7 +43,10 @@ pub(super) use queue::{
 #[cfg(test)]
 pub(crate) use settings::write_settings;
 pub(super) use settings::{RegistryAnswer, RegistryRead, Transparency, load_settings};
-pub(super) use shell::{OpenTarget, Opened, ShellPurpose, ShellTarget};
+pub(super) use shell::{
+    AdministratorStart, DeleteAgain, OpenTarget, Opened, ShellPurpose, ShellTarget, push_data_dir,
+    read_delete_list,
+};
 
 type Diagnostics = LinkedList<(PathBuf, String)>;
 
