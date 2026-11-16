@@ -660,8 +660,14 @@ impl VolumeIndex {
     /// and the entries of a folder whose descriptor they may list; a folder
     /// whose descriptor is not read hides its entries.
     pub(crate) fn is_seen(&self, idx: EntryIdx, seen_by: &SeenBy) -> bool {
-        let parent = self.entries.parent(idx);
-        idx == self.root || (parent != NIL && self.sees_into(parent, seen_by))
+        match seen_by {
+            // Reads no parent, because a search asks this of every match.
+            SeenBy::Everything => true,
+            SeenBy::Filtered(_) => {
+                let parent = self.entries.parent(idx);
+                idx == self.root || (parent != NIL && self.sees_into(parent, seen_by))
+            }
+        }
     }
 
     /// Whether `seen_by` sees the entries of folder `folder`: it may list the

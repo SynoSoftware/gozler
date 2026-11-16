@@ -961,7 +961,9 @@ impl Check {
             },
             Check::Length { target, range } => range.contains(match target {
                 LengthTarget::Name => crate::wtf8::utf16_len(entry.name()),
-                LengthTarget::FullPath => subject.path_length.expect("path clauses have a length"),
+                LengthTarget::FullPath => subject
+                    .path_length
+                    .expect("the scan counts path lengths for a length test"),
             } as u64),
             Check::Child { matcher, form } => {
                 entry.is_dir()
@@ -1996,11 +1998,8 @@ fn scan_with<'q, 'i>(
                 walked_all = false;
                 break;
             }
-            if scan.stopped() {
+            if !index.is_synthetic(idx) && !scan.visit(idx, None) {
                 return scan;
-            }
-            if !index.is_synthetic(idx) {
-                scan.visit(idx, None);
             }
         }
         if walked_all {
@@ -2013,12 +2012,9 @@ fn scan_with<'q, 'i>(
     // folded arena for each prefilter literal and verify the rest per hit.
     if !query.match_case && !query.prefilter.is_empty() {
         let mut on_name = |id: NameId| {
-            for idx in index.name_chain(id) {
-                if !index.is_synthetic(idx) {
-                    scan.visit(idx, scope);
-                }
-            }
-            !scan.stopped()
+            index
+                .name_chain(id)
+                .all(|idx| index.is_synthetic(idx) || scan.visit(idx, scope))
         };
         // A scope walk that priced this scan already found the names.
         match prefilter_names {
@@ -2068,13 +2064,9 @@ fn scan_with<'q, 'i>(
         scan.records.reserve_exact(index.len());
     }
     for idx in index.live_entries() {
-        if scan.stopped() {
+        if !index.is_synthetic(idx) && !scan.visit(idx, scope) {
             break;
         }
-        if index.is_synthetic(idx) {
-            continue;
-        }
-        scan.visit(idx, scope);
     }
     scan
 }
@@ -2234,6 +2226,18 @@ impl<'q, 'i> Scan<'q, 'i> {
                 })
                 .collect();
             paths.set_targets(targets);
+            let mut terms = query.clauses.iter().flat_map(|clause| &clause.terms);
+            if terms.any(|term| {
+                matches!(
+                    term.check,
+                    Check::Length {
+                        target: LengthTarget::FullPath,
+                        ..
+                    }
+                )
+            }) {
+                paths.count_lengths(mount_prefix);
+            }
         }
         Self {
             index,
@@ -2283,15 +2287,17 @@ impl<'q, 'i> Scan<'q, 'i> {
         })
     }
 
-    /// Keeps entry `idx` as a candidate if it passes every clause, unless
-    /// the request was stopped.
-    fn visit(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) {
+    /// Keeps entry `idx` as a candidate if it passes every clause. Returns
+    /// `false`, and tests nothing, once the request was stopped, so a loop
+    /// over entries ends without a stop check of its own.
+    fn visit(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> bool {
         if self.stopped() {
-            return;
+            return false;
         }
         if let Some(record) = self.evaluate(idx, scope) {
             self.records.push(record);
         }
+        true
     }
 
     /// Visits, each once, the candidates of the [`Check::Component`] at
@@ -2406,11 +2412,9 @@ impl<'q, 'i> Scan<'q, 'i> {
     fn evaluate(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> Option<SortRecord> {
         let index = self.index;
         let query = self.query;
-        let (entry_clauses, later) = query.clauses.split_at(query.component_clauses);
-        let (component_clauses, path_clauses) =
-            later.split_at(query.path_clauses - query.component_clauses);
+        let entry_clauses = &query.clauses[..query.component_clauses];
         let entry = index.entry(idx);
-        let mut subject = Subject {
+        let subject = Subject {
             index,
             idx,
             // The precomputed folded name serves a case-insensitive query.
@@ -2471,6 +2475,26 @@ impl<'q, 'i> Scan<'q, 'i> {
             return None;
         }
 
+        if self.component_bits.is_some() || self.query_paths.is_some() {
+            self.run_path_tests(subject)?;
+        }
+        Some(SortRecord::new(idx))
+    }
+
+    /// The component and path clauses of [`Self::evaluate`] for `subject`:
+    /// `None` when it fails one or has no path. Only a query with a path term
+    /// runs them, and out of line they leave [`Self::visit`] small for the
+    /// candidates of every other query.
+    #[inline(never)]
+    fn run_path_tests(&mut self, subject: Subject<'_>) -> Option<()> {
+        let index = self.index;
+        let query = self.query;
+        let idx = subject.idx;
+        let later = &query.clauses[query.component_clauses..];
+        let (component_clauses, path_clauses) =
+            later.split_at(query.path_clauses - query.component_clauses);
+        // A shorter lifetime, so the subject can borrow `self.path`.
+        let mut subject: Subject<'_> = subject;
         let in_name = query.names_decide_path
             && path_clauses[0].passes_in_name(subject.name, &mut self.scratch.code_points);
         if let Some(bits) = &mut self.component_bits {
@@ -2506,7 +2530,7 @@ impl<'q, 'i> Scan<'q, 'i> {
         if let Some(paths) = self.query_paths.as_mut().filter(|_| !in_name) {
             let path = paths.full_path_into(index, idx, &mut self.path)?;
             subject.path = Some(&self.path);
-            subject.path_length = Some(path.utf16_len);
+            subject.path_length = path.utf16_len;
             if !path_clauses
                 .iter()
                 .all(|clause| clause.passes(&subject, path.target, &mut self.scratch))
@@ -2514,8 +2538,7 @@ impl<'q, 'i> Scan<'q, 'i> {
                 return None;
             }
         }
-
-        Some(SortRecord::new(idx))
+        Some(())
     }
 }
 
@@ -2747,6 +2770,9 @@ pub fn resolve_scope(index: &VolumeIndex, path: &[u8], match_case: bool) -> Opti
     }
     Some(cur)
 }
+
+#[cfg(all(test, windows))]
+mod optimizations;
 
 #[cfg(test)]
 mod tests {

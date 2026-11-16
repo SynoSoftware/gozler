@@ -60,8 +60,9 @@ struct Folder {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Ancestry {
     depth: usize,
-    /// The raw spelling's length, even when the cached path is folded.
-    pub(crate) utf16_len: usize,
+    /// The raw spelling's length, even when the cached path is folded;
+    /// `None` unless the paths count it ([`DirPaths::count_lengths`]).
+    pub(crate) utf16_len: Option<usize>,
     pub(crate) target: Option<(usize, usize)>,
 }
 
@@ -108,7 +109,7 @@ impl DirPaths {
             end: arena.len(),
             ancestry: Ancestry {
                 depth: 1,
-                utf16_len: crate::wtf8::utf16_len(root_name(mount_prefix)),
+                utf16_len: None,
                 target: None,
             },
         };
@@ -133,6 +134,14 @@ impl DirPaths {
         }
     }
 
+    /// Set before paths are read, so every path counts its length in UTF-16
+    /// units. Only a query that tests that length asks, because counting
+    /// reads each entry's raw name again.
+    pub(crate) fn count_lengths(&mut self, mount_prefix: &str) {
+        self.root.1.ancestry.utf16_len = Some(crate::wtf8::utf16_len(root_name(mount_prefix)));
+        self.memo.insert(self.root.0, Some(self.root.1));
+    }
+
     pub(crate) fn targets(&self) -> impl Iterator<Item = (EntryIdx, usize)> + '_ {
         self.targets
             .iter()
@@ -151,12 +160,7 @@ impl DirPaths {
             // The entry's own walk is one entry longer than its folder's.
             Some(mut folder) if folder.depth < MAX_PATH_HOPS => {
                 folder.depth += 1;
-                if !out.is_empty() {
-                    out.push(b'\\');
-                    folder.utf16_len += 1;
-                }
-                out.extend_from_slice(self.form.name_of(index, idx));
-                folder.utf16_len += crate::wtf8::utf16_len(index.entry(idx).name());
+                self.push_name(index, idx, out, &mut folder);
                 if let Some(&number) = self.targets.get(&idx) {
                     folder.target = Some((number, out.len()));
                 }
@@ -222,12 +226,7 @@ impl DirPaths {
                 out.clear();
                 return None;
             }
-            if !out.is_empty() {
-                out.push(b'\\');
-                ancestry.utf16_len += 1;
-            }
-            out.extend_from_slice(self.form.name_of(index, folder));
-            ancestry.utf16_len += crate::wtf8::utf16_len(index.entry(folder).name());
+            self.push_name(index, folder, out, &mut ancestry);
             if let Some(&number) = self.targets.get(&folder) {
                 ancestry.target = Some((number, out.len()));
             }
@@ -246,6 +245,26 @@ impl DirPaths {
             }
         }
         Some(ancestry)
+    }
+
+    /// Appends entry `idx`'s name to the path in `out`, after a separator
+    /// unless the path is empty, and counts it in `ancestry`'s length when
+    /// the paths count lengths.
+    fn push_name(
+        &self,
+        index: &VolumeIndex,
+        idx: EntryIdx,
+        out: &mut Vec<u8>,
+        ancestry: &mut Ancestry,
+    ) {
+        let separator = !out.is_empty();
+        if separator {
+            out.push(b'\\');
+        }
+        out.extend_from_slice(self.form.name_of(index, idx));
+        if let Some(length) = &mut ancestry.utf16_len {
+            *length += usize::from(separator) + crate::wtf8::utf16_len(index.entry(idx).name());
+        }
     }
 }
 

@@ -968,6 +968,9 @@ impl gozler_core::query::IndexedVolume for VolumeState {
 }
 
 #[cfg(test)]
+mod optimizations;
+
+#[cfg(test)]
 mod tests {
     use super::{Snapshots, build_status, serve};
     use crate::access::{Access, Refusal, Visibility};
