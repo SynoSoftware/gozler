@@ -372,13 +372,20 @@ superset plan built a feature about every 25 minutes and the ReFS plan landed
 - **Truthful volume state.** A client must always be able to tell whether its
   results are complete. Read the coherence section of `docs/DESIGN.md` before
   you change how the index tracks a volume.
-- **The wire protocol.** **Owner ruling:** gozlerd serves only its own
-  protocol version, of gozler or of goz, and refuses any other at `Hello`,
-  because `gozler` and `gozlerd` install together from one build, and a
-  layout kept for an old client would bind every later change. So a payload
-  change raises `PROTO_VERSION` and keeps no old form. Read
-  `gozler_core::proto::types` and `gozler_core::proto::binary` before you
-  change a payload; no result carries its full path, because a path grows
+- **The wire protocol.** **Owner ruling:** an addition to a request or a
+  reply keeps `PROTO_VERSION`, and only a break raises it, because each new
+  version stops a newly built client from talking to the installed service.
+  The daemon is to run the parts of a newer client's request that it can
+  read and tell the client what it skipped, so the client shows the partial
+  answer. gozlerd still serves only its own version, of gozler or of goz,
+  and keeps no old layout, because `gozler` and `gozlerd` install together
+  from one build, and a layout kept for an old client would bind every
+  later change. `docs/plans/compatible-protocol.md` says what counts as an
+  addition. No daemon skips yet: until that plan's stage 1 lands, every
+  payload change still raises `PROTO_VERSION`, because a daemon of protocol
+  21 or older cannot skip what it cannot read.
+  Read `gozler_core::proto::types` and `gozler_core::proto::binary` before
+  you change a payload; no result carries its full path, because a path grows
   with the folder depth.
 - **The pipe trust check.** Read `docs/SECURITY.md` before you change the pipe,
   elevation or the server-owner check.
