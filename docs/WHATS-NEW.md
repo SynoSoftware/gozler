@@ -1,12 +1,75 @@
 # What's new
 
-## Gozler 0.5.10
+## Gozler 0.6.1
 
-### Know files again after a rename
+### Multi-Rename, Compare and faster search
+
+#### Rename many files at once
+
+- **Multi-Rename.** Select entries in Search or Commander and press Ctrl+M. Build the new names with masks, a counter, search and replace, and case changes, or edit the names as text. The list shows every new name before anything changes, and Undo puts the old names back.
+
+#### Compare two files
+
+- **Compare by content.** Select two files and choose **File > Compare by content…** (Ctrl+Shift+C). The files show side by side, with the changed lines and words marked. Go from difference to difference, or turn on Edit mode to change either side and save it. Typing and Find stay quick in large files.
+- **Use it from Git.** `gozler-ui --compare <a> <b>` opens only the compare window, so Git and other tools can use it as their diff program. To compare with another program instead, set **Comparison tool** in **File > Settings > Context menu**.
+
+#### Work without waiting
+
+- **Open folders at once.** In a panel sorted by Size, going into a folder or up from one is now instant. The folder sizes fill in afterwards, and the panel sorts again while the entry you're on stays on the same row of the screen. Before, the panel waited for the sizes, and showed "Reading…" when that took long.
+- **Select large ranges.** Shift+End, Shift+Home and other Shift selections over a large list no longer hold the window.
+- **See new file types without a pause.** The first time a file type shows, its icon fills in a moment later instead of holding the window.
+- **Copy while another program holds the clipboard.** Copy from the search box, the inspector, the service report and the compare window no longer waits for that program.
+
+#### Find exactly what you're looking for
+
+These work in Search and on the command line.
+
+- **Get results faster.** Searches for several names, such as `report|notes` or `*.pdf|*.jpg`, searches with a regular expression or **Match path**, and searches in a large folder are faster. A search you stop waiting for, such as during a fast scroll, stops.
+- **Ignore accents.** `cafe` finds Café, `strasse` finds Straße and `kirmizi` finds kırmızı.
+- **Find folders by what's in them.** `child-count:` counts the entries directly in a folder, and `empty:` finds empty folders.
+- **Write dates the short way.** `dm:7d` finds items changed in the last 7 days. `dm:2025` finds a year and `dm:2025-06` a month.
+
+#### Read files in the Viewer
+
+- **View several files.** Press F3 with several files selected, and go through them with **Next file** and **Previous file**.
+- **Find, select and zoom.** F7 finds text or hex bytes. Select text with the mouse, as in Notepad, and zoom with Ctrl+wheel. The **Encoding** menu reads the text in another code page. Total Commander's Lister keys also work, and Alt+F3 opens the file in the **External viewer** set in **File > Settings > Context menu**.
+
+#### Open and delete what Windows protects
+
+- **Open a protected folder.** When Windows refuses a folder for lack of permission, select **Continue** to open it as administrator, as File Explorer offers.
+- **Delete what Windows denied.** A delete now goes on past each item that Windows refuses. Select **Retry** in the report to delete what's left as administrator.
+- **See how much a delete removed.** The status bar shows the size, as in "Deleted 3 items (4.2 GB)".
+
+#### See links
+
+- **Link arrows.** Junctions and symbolic links show File Explorer's link arrow, so a link no longer looks like the folder or file it points to. When a link's target is gone, Gozler names the missing target.
+
+#### Fit the columns
+
+- **Auto fit.** The columns now fill the list's width by themselves. Right-click a column header and turn off **Auto fit** to keep your own widths.
 
 #### Use Gozler from scripts and AI agents
 
 - **Identify each file.** `--file-id` adds each result's volume and file ID to `--json` output. A file keeps both when it's renamed or moved on its drive, so a script can tell a renamed file from a new one. See the [JSON guide](https://github.com/SynoSoftware/gozler/blob/main/docs/JSON.md#know-a-file-again-after-a-rename).
+- **See where the service's memory goes.** `--status` now splits gozlerd's memory into the indexes, the kept results and the rest.
+- **Read the help faster.** Each option shows one name, with its other names below it, so the help fits 80 columns.
+
+#### Fixed
+
+- **Safely Remove Hardware** failed for any indexed disk. Gozler now lets go of the disk.
+- A folder's **Date modified** didn't change when a file in it was created, deleted or renamed.
+- With **Adjust for daylight saving time automatically** off in Windows, every date was an hour off in summer.
+- A drive whose change journal couldn't be read for a moment, such as a full or waking disk, stayed out of date until the service restarted.
+- A search you stopped waiting for, or a sort of results you'd left, could make the service drop the results you were scrolling, so they had to be searched again.
+- `foo| /ad` found foo or any folder, because a `/a` switch joined the end of the search text. The switches now apply to the whole search.
+- The service kept the memory of its last search while idle, and the index kept memory it no longer used after it shrank. Both now go back to Windows.
+- Windows sometimes reported that the service didn't respond while it stopped.
+- The service log could grow without limit when programs failed to connect again and again.
+- The service restarted about once a minute while another program held its pipe name. It now waits for the name.
+
+The installer upgrades Gozler 0.5.9 in place. Keep `gozler.exe`, `gozlerd.exe` and `gozler-ui.exe` from the same release, because the service and its programs must match.
+
+[Full changelog](https://github.com/SynoSoftware/gozler/compare/v0.5.9...v0.6.1)
 
 ## Gozler 0.5.9
 
