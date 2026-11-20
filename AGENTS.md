@@ -387,10 +387,6 @@ superset plan built a feature about every 25 minutes and the ReFS plan landed
   with the folder depth.
 - **The pipe trust check.** Read `docs/SECURITY.md` before you change the pipe,
   elevation or the server-owner check.
-- **The installed goz.** The goz on this machine (service `goz`, pipe
-  `\\.\pipe\goz-v1`) is the upstream author's software, and every agent
-  finds files through it. Never stop, replace or re-point it. gozler has its
-  own service and pipe, so it installs and is tested beside goz.
 
 ## Building and finishing
 
@@ -410,12 +406,14 @@ is verified by running it.
 batches: finish the agreed change, replace or delete its temporary paths, and
 review it before you compile. Reuse valid review and verification evidence.
 
-**Owner ruling: compile at the end, and only for a reason that survives a
-challenge.** The owner stops a build whose reason they cannot see. During
-development, read the code and use existing binaries. This covers every
-compile: `build.ps1` in any mode, tests, benchmarks, probes, experiments and
-release packages. Take these steps in order, and stop at the first that
-fails.
+**Owner ruling: the owner starts every compile.** Compile only when the owner
+asks for it; a step in a plan is not that request. During development, read
+the code and use existing binaries. This covers every compile: `build.ps1` in
+any mode, tests, benchmarks, probes, experiments and release packages. Work
+ends at source review, and the report names each question that only a compile
+can settle as unverified, so the owner decides whether a build is worth its
+minutes. The owner refuses a build whose reason they cannot see, so before
+you ask for one, take these steps in order, and stop at the first that fails.
 
 1. **Need.** Try to answer the question without a build. Read the code, the
    compiler's guarantees, documented Windows behavior, and the record:
@@ -424,7 +422,7 @@ fails.
    narrower form of it, such as the same window style turned on for one
    frame. Reassurance, a small edit, a harness change and a skill's test
    loop are not a need.
-2. **Justify.** In the message that will start the build, write the one
+2. **Justify.** In the message that asks for the build, write the one
    question it answers, what the record says about it, two results the
    build can give with the different next edit each one leads to, and that
    every edit a build can answer is in the tree, so one build answers them
@@ -433,15 +431,15 @@ fails.
    code or the record, predict the result, or show that both results lead
    to the same edit. Where the host can launch one, give the justification
    to a fresh agent that did not write it, because an author approves its
-   own reasons. A justification that loses any part stops the build.
+   own reasons. A justification that loses any part stops the request.
 4. **Nobody built it.** Check that no other session has built your code, as
    the next ruling says.
 
-Then run the smallest check that answers the question, such as
-`-Test <name filter>`, and return to development. An explicit request from
-the owner, such as an exe to try, and the final verification below skip
-steps 1 to 3 and still take step 4. A build the owner stops stays
-stopped: start it again only with a new reason that passes these steps,
+When the owner agrees, run the smallest check that answers the question, such
+as `-Test <name filter>`, and return to development. An explicit request from
+the owner, such as an exe to try or the final verification below, skips
+steps 1 to 3 and still takes step 4. A build the owner stops stays
+stopped: ask for it again only with a new reason that passes these steps,
 and say what changed.
 
 **Owner ruling: never compile what another session already compiled.** All
@@ -463,8 +461,11 @@ the code free of unused and commented-out lines, check each new comment
 against `docs/COMMENTS.md`, and for a changed contract (the wire protocol,
 command-line output, saved settings) name every consumer and what it needs.
 
-Final verification starts when you have done that, traced each changed
-behavior from its callers, and named the failure each new test watches.
+Final verification is a full `build.ps1` run, and the owner starts it. The
+work is ready for it when you have done that, traced each changed behavior
+from its callers, and named the failure each new test watches. Report it
+ready, and name what the run would settle as unverified. When the owner asks
+for the run:
 
 1. Run `pwsh ./build.ps1`, unless another session's build already covers
    your change.
@@ -484,8 +485,9 @@ reported as left to CI. When you add a dependency and `cargo deny --version`
 answers, also run `cargo deny check advisories bans licenses sources`. Use the
 tools already installed; the owner installs new ones.
 
-Report, in this order: `build.ps1` green and the number of full runs, or the
-step it stopped at; each `-Test` and `-Bench` run; each new test with the
+Report, in this order: `build.ps1` green and the number of full runs, the
+step it stopped at, or that no build ran and what that leaves unverified;
+each `-Test` and `-Bench` run; each new test with the
 failure it watches; each CI check left to CI that your change can affect.
 
 Commit subjects follow the log: `type(scope): imperative summary`, with the
