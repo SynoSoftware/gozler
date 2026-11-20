@@ -20,6 +20,7 @@ pub(super) mod drops;
 pub(super) mod elevated;
 pub(super) mod fixes;
 pub(super) mod folders;
+mod icons;
 pub(super) mod indexed;
 mod links;
 mod lists;
@@ -100,6 +101,8 @@ pub(super) struct Poll {
     pub(super) active: bool,
     pub(super) expired_requests: Vec<(Purpose, Generation)>,
     pub(super) expired_hover: Vec<drops::Expired>,
+    /// Whether the work gave up on the extensions' icon lookups.
+    pub(super) expired_icons: bool,
 }
 
 pub(super) struct Work {
@@ -110,6 +113,7 @@ pub(super) struct Work {
     pub(super) fixes: fixes::Fixes,
     pub(super) elevated: elevated::Saves,
     pub(super) indexed: indexed::Work,
+    pub(super) icons: icons::Work,
     pub(super) links: links::Work,
     pub(super) paste: paste::Work,
     pub(super) tray: Option<tray::Work>,
@@ -146,6 +150,7 @@ impl Work {
             fixes: fixes::Fixes::new(waker.clone()),
             elevated: elevated::Saves::new(waker.clone()),
             indexed: indexed::Work::new(waker.clone()),
+            icons: icons::Work::new(waker.clone()),
             links: links::Work::new(waker.clone()),
             paste: paste::Work::new(waker.clone()),
             tray: tray::Work::new(waker.clone(), crate::core::ids::IconId::Gozler.id()).ok(),
@@ -198,6 +203,8 @@ impl Work {
         active |= self.fixes.tick(now);
         active |= self.elevated.tick(now);
         active |= self.indexed.tick(now);
+        let icons = self.icons.tick(now);
+        active |= icons.is_some_and(|waiting| waiting != Waiting::Expired);
         active |= self.links.tick(now);
         for task in &mut self.releases {
             active |= task.tick(now).is_some();
@@ -207,6 +214,7 @@ impl Work {
             active,
             expired_requests,
             expired_hover,
+            expired_icons: icons == Some(Waiting::Expired),
         }
     }
 
@@ -347,6 +355,7 @@ impl Work {
         retired.append(self.fixes.take_retired());
         retired.append(self.elevated.take_retired());
         retired.append(self.indexed.take_retired());
+        retired.append(self.icons.take_retired());
         retired.append(self.links.take_retired());
         self.retire(retired);
     }
@@ -377,6 +386,7 @@ impl Work {
         let mut retired = self.programs.close();
         retired.append(self.folders.close());
         retired.append(self.indexed.close());
+        retired.append(self.icons.close());
         retired.append(self.links.close());
         retired.append(self.lists.close());
         retired.append(self.panels.close());

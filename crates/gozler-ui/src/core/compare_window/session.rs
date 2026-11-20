@@ -19,7 +19,7 @@
 //!   answered about every change.
 
 use super::{CompareCommand, Note};
-use crate::core::compare::{self, History, Matching, Pane, Refused, ShownRows, Text};
+use crate::core::compare::{self, EditedRows, History, Matching, Pane, Refused, ShownRows, Text};
 use crate::core::panel::Side;
 use crate::core::text;
 use crate::core::viewer::{Encoding, Mode};
@@ -60,13 +60,11 @@ pub(crate) struct Request {
     pub(crate) rows: RowOptions,
 }
 
-/// The rows that show, and the RTF of the sides and of their line numbers.
+/// The rows that show. The worker's Find reads them too.
 #[derive(Debug, Default)]
 pub(crate) struct View {
-    pub(crate) rows: ShownRows,
+    pub(crate) rows: Arc<ShownRows>,
     pub(crate) differences: usize,
-    pub(crate) sides: [String; 2],
-    pub(crate) numbers: [String; 2],
 }
 
 /// What a Hex comparison found, from which other options build the rows
@@ -143,6 +141,14 @@ impl Showing {
         }
     }
 
+    /// Both sides' text, in Text, as the worker's Find shares it.
+    pub(crate) fn texts(&self) -> Option<&[Arc<Text>; 2]> {
+        match &self.content {
+            Content::Text(texts) => Some(texts),
+            Content::Hex(_) => None,
+        }
+    }
+
     /// `side`'s text, in Text.
     pub(crate) fn text(&self, side: Side) -> Option<&Text> {
         match &self.content {
@@ -185,9 +191,8 @@ impl Showing {
         if let Content::Text(texts) = &mut self.content {
             texts.swap(0, 1);
         }
-        self.view.rows = std::mem::take(&mut self.view.rows).swapped();
-        self.view.sides.swap(0, 1);
-        self.view.numbers.swap(0, 1);
+        let rows = Arc::unwrap_or_clone(std::mem::take(&mut self.view.rows));
+        self.view.rows = Arc::new(rows.swapped());
         for anchor in &mut self.anchors {
             *anchor = (anchor.1, anchor.0);
         }
@@ -346,11 +351,10 @@ pub(crate) enum Effect {
     Wait,
     /// Gives the controls the rows that show.
     Present(Caret),
-    /// Reads both sides' text back as [`Event::Panes`].
-    ReadPanes(Fresh),
     /// Runs a command that reads the rows.
     Run(CompareCommand, Fresh),
-    /// The files changed sides, so the path boxes swap too.
+    /// The files changed sides, so the path boxes and the sides' controls
+    /// swap too.
     Swapped,
     /// Asks Save's question about the changes of these sides, and answers
     /// with [`Event::Answered`].
@@ -393,13 +397,14 @@ pub(crate) enum Event {
     Colours,
     /// `Esc` or Cancel while a comparison runs.
     Cancel,
-    /// The person typed in `side`, whose control now holds `text` with the
-    /// caret at `caret`.
+    /// The person typed in `side`, which changed its control's `rows`.
     Edited {
         side: Side,
-        text: Vec<u16>,
-        caret: usize,
+        rows: EditedRows,
     },
+    /// A side's control no longer shows the rows: the person changed it
+    /// where the window could not read, or a patch left other rows.
+    Outdated,
     /// The timer after typing.
     Timer,
     Undo,
@@ -418,11 +423,6 @@ pub(crate) enum Event {
     },
     Swap(Fresh),
     EditMode(Fresh),
-    /// Both sides' text, as [`Effect::ReadPanes`] asked.
-    Panes {
-        fresh: Fresh,
-        texts: [Vec<u16>; 2],
-    },
     Compared(Box<Compared>),
     Realigned {
         generation: u64,
@@ -646,7 +646,11 @@ impl Session {
                     effects.push(Effect::Cancel);
                 }
             }
-            Event::Edited { side, text, caret } => self.edited(side, text, caret, &mut effects),
+            Event::Edited { side, rows } => self.edited(side, rows, &mut effects),
+            Event::Outdated => {
+                self.generation += 1;
+                self.controls_outdated();
+            }
             Event::Timer => {
                 if matches!(self.job, Job::Due) {
                     self.job = Job::Idle;
@@ -671,22 +675,7 @@ impl Session {
             }
             Event::EditMode(fresh) => {
                 if self.holds(&fresh) {
-                    self.toggle_edit(&mut effects);
-                }
-            }
-            Event::Panes {
-                fresh,
-                texts: [left, right],
-            } => {
-                if self.holds(&fresh)
-                    && self.editing
-                    && let Some(showing) = &self.showing
-                {
-                    let rows = &showing.view.rows.rows;
-                    self.panes = Some([
-                        Pane::new(rows, Side::Left, left),
-                        Pane::new(rows, Side::Right, right),
-                    ]);
+                    self.toggle_edit();
                 }
             }
             Event::Compared(compared) => self.compared(*compared, &mut effects),
@@ -740,8 +729,8 @@ impl Session {
     }
 
     /// Whether `fresh` still proves it, because a token can be kept past
-    /// the event that gave it.
-    fn holds(&self, fresh: &Fresh) -> bool {
+    /// the event that gave it, as the worker's Find keeps it.
+    pub(crate) fn holds(&self, fresh: &Fresh) -> bool {
         fresh.0 == self.generation && self.fresh()
     }
 
@@ -816,14 +805,21 @@ impl Session {
         }));
     }
 
-    /// The controls show the rows again; edit mode reads its panes back
-    /// from them.
+    /// The controls show the rows again, which edit mode's panes follow.
     fn present(&mut self, caret: Caret, effects: &mut Vec<Effect>) {
         self.panes = None;
         effects.push(Effect::Present(caret));
         if self.editing && self.fresh() {
-            effects.push(Effect::ReadPanes(Fresh(self.generation)));
+            self.read_panes();
         }
+    }
+
+    /// Edit mode's panes for the rows that show, which the controls show.
+    fn read_panes(&mut self) {
+        self.panes = self.showing.as_ref().map(|showing| {
+            let rows = &showing.view.rows.rows;
+            [Pane::new(rows, Side::Left), Pane::new(rows, Side::Right)]
+        });
     }
 
     /// An edit changed the lines; it forgets Resync from here.
@@ -851,7 +847,7 @@ impl Session {
         Some(&mut Arc::make_mut(&mut texts[side.index()]).lines)
     }
 
-    fn edited(&mut self, side: Side, text: Vec<u16>, caret: usize, effects: &mut Vec<Effect>) {
+    fn edited(&mut self, side: Side, rows: EditedRows, effects: &mut Vec<Effect>) {
         if !self.typing(side) {
             return;
         }
@@ -863,7 +859,7 @@ impl Session {
             return;
         };
         let text_of_side = &mut texts[side.index()];
-        match panes[side.index()].edited(side, &text_of_side.lines, text, caret) {
+        match panes[side.index()].edited(side, &text_of_side.lines, rows) {
             Ok(None) => return,
             Ok(Some(change)) => {
                 if change.apply(&mut Arc::make_mut(text_of_side).lines) {
@@ -913,8 +909,8 @@ impl Session {
             if command == CompareCommand::Swap && self.showing.is_none() {
                 request.paths.swap(0, 1);
                 request.encodings.swap(0, 1);
-                effects.push(Effect::Compare(request.clone()));
                 effects.push(Effect::Swapped);
+                effects.push(Effect::Compare(request.clone()));
             }
             return;
         }
@@ -994,22 +990,23 @@ impl Session {
         self.saves.swap();
         self.generation += 1;
         showing.generation = self.generation;
+        // The controls swap before a comparison starts from what they show.
+        effects.push(Effect::Swapped);
         if let Job::Comparing(request) = &mut self.job {
             request.paths.swap(0, 1);
             request.encodings.swap(0, 1);
             effects.push(Effect::Compare(request.clone()));
         }
-        effects.push(Effect::Swapped);
         self.present(Caret::Kept, effects);
     }
 
-    fn toggle_edit(&mut self, effects: &mut Vec<Effect>) {
+    fn toggle_edit(&mut self) {
         if self.editing {
             self.editing = false;
             self.panes = None;
         } else if self.can_edit() {
             self.editing = true;
-            effects.push(Effect::ReadPanes(Fresh(self.generation)));
+            self.read_panes();
         }
     }
 
@@ -1287,23 +1284,21 @@ mod tests {
             match_lines(left, right, rows.matching, anchors, &|| false).expect("nothing cancels");
         View {
             differences: count_differences(matched.iter().map(|row| row.differs)),
-            rows: shown_rows(&matched, rows.only_differences, SHOWN_LIMIT),
-            ..View::default()
+            rows: Arc::new(shown_rows(&matched, rows.only_differences, SHOWN_LIMIT)),
         }
     }
 
     /// The files' rows stand in for hex rows.
     fn hex_view(sizes: [u64; 2], found: &HexFound, rows: RowOptions) -> View {
         View {
-            rows: hex_shown_rows(
+            rows: Arc::new(hex_shown_rows(
                 sizes,
                 &found.differing,
                 found.complete,
                 rows.only_differences,
                 SHOWN_LIMIT,
-            ),
+            )),
             differences: found.differences,
-            ..View::default()
         }
     }
 
@@ -1443,10 +1438,6 @@ mod tests {
                 Effect::Align(align) => self.job = Some(Pending::Align(align)),
                 Effect::Cancel => self.job = None,
                 Effect::Present(_) => self.controls = Side::BOTH.map(|side| self.rendered(side)),
-                Effect::ReadPanes(fresh) => {
-                    let texts = self.controls.clone();
-                    self.send(Event::Panes { fresh, texts });
-                }
                 Effect::Run(command, fresh) => {
                     assert!(self.session.fresh(), "{command:?} runs on fresh rows");
                     self.run(command, fresh);
@@ -1676,6 +1667,7 @@ mod tests {
                 return;
             }
             let text = &mut self.controls[side.index()];
+            let old = text.clone();
             let at = usize::from(at) % (text.len() + 1);
             let caret = match key % 3 {
                 0 => {
@@ -1693,8 +1685,8 @@ mod tests {
                     at
                 }
             };
-            let text = text.clone();
-            self.send(Event::Edited { side, text, caret });
+            let rows = EditedRows::between(&old, text, caret);
+            self.send(Event::Edited { side, rows });
         }
 
         fn step(&mut self, step: Step) {
@@ -1804,11 +1796,6 @@ mod tests {
                         .panes
                         .as_ref()
                         .expect("typing reads back through panes");
-                    assert_eq!(
-                        panes[side.index()].text(),
-                        &self.controls[side.index()][..],
-                        "the panes match the controls"
-                    );
                     assert_eq!(
                         panes[side.index()].row_count(),
                         self.controls[side.index()]

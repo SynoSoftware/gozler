@@ -173,11 +173,15 @@ impl DialogProc for SearchSyntax {
 /// The service's report (DESIGN.md: The Drives and service page): the text
 /// that `gozler --status` prints, in English, as `gozler` prints it, with
 /// Copy and Close.
-pub(super) struct ServiceReport {
+pub(super) struct ServiceReport<'a> {
     pub(super) text: String,
+    /// The main window, whose clipboard worker publishes the copy, and its
+    /// window, which times the worker's retries.
+    pub(super) main: &'a MainWindow,
+    pub(super) window: Hwnd,
 }
 
-impl DialogProc for ServiceReport {
+impl DialogProc for ServiceReport<'_> {
     fn init(&self, dialog: Hwnd) -> Opened {
         let mut fonts = Vec::new();
         if let Some(text) = dialog::item(dialog, ControlId::ServiceReportText.id()) {
@@ -204,7 +208,7 @@ impl DialogProc for ServiceReport {
                 // copy, selected so the person sees what was copied.
                 if let Some(text) = Edit::of_dialog(dialog, ControlId::ServiceReportText.id()) {
                     text.select_all();
-                    text.copy();
+                    self.main.copy_text(self.window, text.selected_text());
                 }
                 true
             }

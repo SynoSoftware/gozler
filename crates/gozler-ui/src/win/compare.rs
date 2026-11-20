@@ -8,8 +8,9 @@ use super::controls::{child, send};
 use super::gdi::{high_contrast, system_color};
 use super::notify::{ControlEvent, Notification};
 use super::work::OffThread;
+use crate::core::compare::EditedRows;
 use crate::core::compare::rtf::{Font as RtfFont, Palette, Rgb};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
@@ -36,24 +37,26 @@ use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::System::SystemServices::MK_CONTROL;
 use windows::Win32::UI::Controls::RichEdit::{
     CHARRANGE, ECO_READONLY, EDITSTREAM, EM_EXGETSEL, EM_EXLIMITTEXT, EM_EXLINEFROMCHAR,
-    EM_EXSETSEL, EM_FINDTEXTEXW, EM_GETEVENTMASK, EM_GETOPTIONS, EM_GETSCROLLPOS, EM_GETTEXTEX,
-    EM_GETTEXTLENGTHEX, EM_GETTEXTRANGE, EM_PASTESPECIAL, EM_SETEVENTMASK, EM_SETSCROLLPOS,
-    EM_SETTARGETDEVICE, EM_SETUNDOLIMIT, EM_SETZOOM, EM_STREAMIN, EN_SELCHANGE, ENM_CHANGE,
-    ENM_SELCHANGE, ES_DISABLENOSCROLL, ES_NOOLEDRAGDROP, FINDTEXTEXW, GETTEXTEX, GETTEXTLENGTHEX,
-    GT_DEFAULT, GTL_NUMCHARS, GTL_PRECISE, SF_RTF, TEXTRANGEW,
+    EM_EXSETSEL, EM_GETEVENTMASK, EM_GETOPTIONS, EM_GETSCROLLPOS, EM_GETTEXTLENGTHEX,
+    EM_GETTEXTRANGE, EM_PASTESPECIAL, EM_REDO, EM_SETEVENTMASK, EM_SETSCROLLPOS,
+    EM_SETTARGETDEVICE, EM_SETTEXTEX, EM_SETUNDOLIMIT, EM_SETZOOM, EM_STREAMIN, EN_SELCHANGE,
+    ENM_CHANGE, ENM_SELCHANGE, ES_DISABLENOSCROLL, ES_NOOLEDRAGDROP, GETTEXTLENGTHEX, GTL_NUMCHARS,
+    GTL_PRECISE, SF_RTF, SFF_SELECTION, TEXTRANGEW,
 };
 use windows::Win32::UI::Controls::{
-    EM_GETFIRSTVISIBLELINE, EM_LINEINDEX, EM_LINELENGTH, EM_LINESCROLL, EM_SCROLLCARET,
-    EM_SETREADONLY,
+    EM_GETFIRSTVISIBLELINE, EM_GETLINECOUNT, EM_LINEINDEX, EM_LINELENGTH, EM_LINESCROLL,
+    EM_REPLACESEL, EM_SCROLLCARET, EM_SETREADONLY, EM_UNDO,
 };
 use windows::Win32::UI::HiDpi::SystemParametersInfoForDpi;
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     EN_CHANGE, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_READONLY, GetParent,
-    NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS, SendMessageW, WINDOW_EX_STYLE, WM_CHAR, WM_COPY,
-    WM_HSCROLL, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_RBUTTONDOWN, WM_SIZE,
-    WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WS_EX_CLIENTEDGE, WS_HSCROLL, WS_TABSTOP, WS_VSCROLL,
+    NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS, SendMessageW, WINDOW_EX_STYLE, WM_CHAR, WM_CLEAR,
+    WM_CUT, WM_HSCROLL, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY, WM_PASTE,
+    WM_RBUTTONDOWN, WM_SETTEXT, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_UNDO, WM_UNICHAR,
+    WM_VSCROLL, WS_EX_CLIENTEDGE, WS_HSCROLL, WS_TABSTOP, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -61,6 +64,119 @@ use windows::core::{PCWSTR, PWSTR, w};
 /// have scrolled, by any means, so the other side and the line numbers
 /// follow it.
 pub(crate) const SIDE_SCROLLED: u32 = super::wake::WAKE + 14;
+
+/// Where an edit of a side can change its text: not in the `before` units
+/// before the selection that the edit replaces, nor in the `after` units
+/// after it. An edit replaces the selection, so the window reads only the
+/// rows between them, and not the whole side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EditBounds {
+    before: usize,
+    after: usize,
+}
+
+impl EditBounds {
+    /// The bounds of both edits.
+    fn and(self, other: EditBounds) -> EditBounds {
+        EditBounds {
+            before: self.before.min(other.before),
+            after: self.after.min(other.after),
+        }
+    }
+}
+
+/// The edits that run in a side, which its subclass records.
+struct Editing {
+    side: Hwnd,
+    /// The message that can change the text and runs now.
+    message: Option<EditBounds>,
+    /// An IME composition, which changes the text over several messages
+    /// from where it started; `Some(None)` once the window replaced the
+    /// text under it, which leaves its start unknown.
+    composition: Option<Option<EditBounds>>,
+}
+
+thread_local! {
+    static EDITING: RefCell<Vec<Editing>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Whether `msg` can change a side's text, as typing, pasting, cutting,
+/// deleting or an IME does.
+fn changes_text(msg: u32) -> bool {
+    matches!(
+        msg,
+        WM_CHAR
+            | WM_SYSCHAR
+            | WM_UNICHAR
+            | WM_IME_CHAR
+            | WM_IME_COMPOSITION
+            | WM_KEYDOWN
+            | WM_SYSKEYDOWN
+            | WM_PASTE
+            | WM_CUT
+            | WM_CLEAR
+            | WM_UNDO
+            | WM_SETTEXT
+            | EM_UNDO
+            | EM_REDO
+            | EM_PASTESPECIAL
+            | EM_REPLACESEL
+            | EM_SETTEXTEX
+    )
+}
+
+/// Runs `change` on the record of `side`'s edits, when it has one.
+fn with_editing<T>(side: Hwnd, change: impl FnOnce(&mut Editing) -> T) -> Option<T> {
+    EDITING.with_borrow_mut(|editing| {
+        (editing.iter_mut())
+            .find(|each| each.side == side)
+            .map(change)
+    })
+}
+
+/// Records that a message that can change `side`'s text starts, or with
+/// `composition` that an IME composition starts, within `bounds`; `false`
+/// when one runs already, whose bounds hold this one's.
+fn edit_starts(side: Hwnd, bounds: EditBounds, composition: bool) -> bool {
+    EDITING.with_borrow_mut(|editing| {
+        let index = match editing.iter().position(|each| each.side == side) {
+            Some(index) => index,
+            None => {
+                editing.push(Editing {
+                    side,
+                    message: None,
+                    composition: None,
+                });
+                editing.len() - 1
+            }
+        };
+        let record = &mut editing[index];
+        if composition {
+            if record.composition.is_some() {
+                return false;
+            }
+            record.composition = Some(Some(bounds));
+        } else {
+            if record.message.is_some() {
+                return false;
+            }
+            record.message = Some(bounds);
+        }
+        true
+    })
+}
+
+/// Records that the message, or with `composition` the IME composition,
+/// that changed `side`'s text ended.
+fn edit_ends(side: Hwnd, composition: bool) {
+    with_editing(side, |editing| {
+        if composition {
+            editing.composition = None;
+        } else {
+            editing.message = None;
+        }
+    });
+}
 
 /// The RichEdit class of `Msftedit.dll`, which [`RichText::create`] loads.
 const RICH_EDIT_CLASS: PCWSTR = w!("RICHEDIT50W");
@@ -156,6 +272,56 @@ impl RichText {
     /// Replaces the text with `rtf`. The control tells nothing of the
     /// change, which is no edit of the person's.
     pub(crate) fn set_rtf(self, rtf: &str) {
+        self.quietly(|| self.stream_in(rtf, SF_RTF));
+    }
+
+    /// Replaces `rows`, which are not empty, with the rows of `rtf`, which
+    /// holds one row or more and ends without a paragraph mark, as
+    /// [`crate::core::compare::rtf::Patch`] gives them. The control tells
+    /// nothing of the change, and the selection ends after the new rows.
+    pub(crate) fn replace_rows(self, rows: Range<usize>, rtf: &str) {
+        let last = rows.end.saturating_sub(1).max(rows.start);
+        let start = self.row_start(rows.start).unwrap_or_else(|| self.length());
+        let end = self
+            .row_start(last)
+            .map_or(start, |at| at + self.row_length(last))
+            .max(start);
+        let range = CHARRANGE {
+            cpMin: i32::try_from(start).unwrap_or(i32::MAX),
+            cpMax: i32::try_from(end).unwrap_or(i32::MAX),
+        };
+        self.quietly(|| {
+            // SAFETY: `range` outlives the call.
+            unsafe {
+                SendMessageW(
+                    self.0.0,
+                    EM_EXSETSEL,
+                    None,
+                    Some(LPARAM(&raw const range as isize)),
+                )
+            };
+            self.stream_in(rtf, SF_RTF | SFF_SELECTION);
+        });
+    }
+
+    /// Runs `change`, which replaces text, without telling the window of
+    /// the change or of the selection it moves, because neither is the
+    /// person's.
+    fn quietly(self, change: impl FnOnce()) {
+        let mask = send(self.0, EM_GETEVENTMASK, 0, 0);
+        send(self.0, EM_SETEVENTMASK, 0, 0);
+        super::present::mark_after(self.0, change);
+        send(self.0, EM_SETEVENTMASK, 0, mask);
+        // A composition no longer knows where its text starts.
+        with_editing(self.0, |editing| {
+            if let Some(composition) = &mut editing.composition {
+                *composition = None;
+            }
+        });
+    }
+
+    /// Streams `rtf` in as `format` says.
+    fn stream_in(self, rtf: &str, format: u32) {
         struct Source<'a> {
             bytes: &'a [u8],
             at: usize,
@@ -189,20 +355,69 @@ impl RichText {
             dwError: 0,
             pfnCallback: Some(read),
         };
-        let mask = send(self.0, EM_GETEVENTMASK, 0, 0);
-        send(self.0, EM_SETEVENTMASK, 0, 0);
-        super::present::mark_after(self.0, || {
-            // SAFETY: the stream and its source outlive the call.
-            unsafe {
-                SendMessageW(
-                    self.0.0,
-                    EM_STREAMIN,
-                    Some(WPARAM(SF_RTF as usize)),
-                    Some(LPARAM(&raw mut stream as isize)),
-                )
-            };
-        });
-        send(self.0, EM_SETEVENTMASK, 0, mask);
+        // SAFETY: the stream and its source outlive the call.
+        unsafe {
+            SendMessageW(
+                self.0.0,
+                EM_STREAMIN,
+                Some(WPARAM(format as usize)),
+                Some(LPARAM(&raw mut stream as isize)),
+            )
+        };
+    }
+
+    /// The rows that the edit that runs now changed, between the selection
+    /// that it replaced and the caret after it; `None` when no message that
+    /// edits runs, or where the edit started is not known.
+    pub(crate) fn edited_rows(self) -> Option<EditedRows> {
+        let bounds = self.edit_bounds()?;
+        let length = self.length();
+        let caret = self.selection().start.min(length);
+        let start = bounds.before.min(caret);
+        let end = length - bounds.after.min(length - caret);
+        let first = self.row_of(start);
+        let last = self.row_of(end).max(first);
+        let from = self.row_start(first).unwrap_or(0).min(start);
+        let to = self
+            .row_start(last)
+            .map_or(length, |at| at + self.row_length(last))
+            .max(end);
+        Some(EditedRows {
+            first,
+            last,
+            count: self.row_count(),
+            text: self.text_of(from..to),
+            caret: caret - from,
+        })
+    }
+
+    /// Where the edit that runs now can change the text, or `None` when no
+    /// message that edits runs, or an edit's start is not known.
+    fn edit_bounds(self) -> Option<EditBounds> {
+        with_editing(self.0, |editing| match editing.composition {
+            Some(None) => None,
+            Some(Some(composition)) => {
+                Some((editing.message).map_or(composition, |message| message.and(composition)))
+            }
+            None => editing.message,
+        })
+        .flatten()
+    }
+
+    /// The edit's bounds at the selection of now.
+    fn bounds_now(self) -> EditBounds {
+        let selection = self.selection();
+        EditBounds {
+            before: selection.start,
+            after: self.length().saturating_sub(selection.end),
+        }
+    }
+
+    /// The rows the control holds; an empty control holds one.
+    pub(crate) fn row_count(self) -> usize {
+        usize::try_from(send(self.0, EM_GETLINECOUNT, 0, 0))
+            .unwrap_or(1)
+            .max(1)
     }
 
     /// The length of the text in characters, its row breaks included.
@@ -223,25 +438,29 @@ impl RichText {
         usize::try_from(units.0).unwrap_or(0)
     }
 
-    /// The text as the control holds it, its rows separated by CR.
-    pub(crate) fn text(self) -> Vec<u16> {
-        let mut buffer = vec![0u16; self.length() + 1];
-        let get = GETTEXTEX {
-            cb: u32::try_from(buffer.len() * 2).unwrap_or(u32::MAX),
-            flags: GT_DEFAULT,
-            codepage: 1200,
-            ..Default::default()
+    /// The text of `range`, with the rows separated by CR.
+    pub(crate) fn text_of(self, range: Range<usize>) -> Vec<u16> {
+        let length = range.len();
+        let mut buffer = vec![0u16; length + 1];
+        let position = |at: usize| i32::try_from(at).unwrap_or(i32::MAX);
+        let mut range = TEXTRANGEW {
+            chrg: CHARRANGE {
+                cpMin: position(range.start),
+                cpMax: position(range.end),
+            },
+            lpstrText: PWSTR(buffer.as_mut_ptr()),
         };
-        // SAFETY: the buffer holds `cb` bytes, and both outlive the call.
+        // SAFETY: the buffer holds the range's characters and a NUL, and
+        // both outlive the call.
         let copied = unsafe {
             SendMessageW(
                 self.0.0,
-                EM_GETTEXTEX,
-                Some(WPARAM(&raw const get as usize)),
-                Some(LPARAM(buffer.as_mut_ptr() as isize)),
+                EM_GETTEXTRANGE,
+                None,
+                Some(LPARAM(&raw mut range as isize)),
             )
         };
-        buffer.truncate(usize::try_from(copied.0).unwrap_or(0).min(buffer.len()));
+        buffer.truncate(usize::try_from(copied.0).unwrap_or(0).min(length));
         buffer
     }
 
@@ -259,27 +478,7 @@ impl RichText {
             return String::new();
         };
         let length = self.row_length(row).min(ROW_TEXT_LIMIT);
-        let mut buffer = vec![0u16; length + 1];
-        let position = |at: usize| i32::try_from(at).unwrap_or(i32::MAX);
-        let mut range = TEXTRANGEW {
-            chrg: CHARRANGE {
-                cpMin: position(start),
-                cpMax: position(start + length),
-            },
-            lpstrText: PWSTR(buffer.as_mut_ptr()),
-        };
-        // SAFETY: the buffer holds the range's characters and a NUL, and
-        // both outlive the call.
-        let copied = unsafe {
-            SendMessageW(
-                self.0.0,
-                EM_GETTEXTRANGE,
-                None,
-                Some(LPARAM(&raw mut range as isize)),
-            )
-        };
-        buffer.truncate(usize::try_from(copied.0).unwrap_or(0).min(length));
-        String::from_utf16_lossy(&buffer)
+        String::from_utf16_lossy(&self.text_of(start..start + length))
     }
 
     /// The selection, as character positions; empty at the caret.
@@ -411,9 +610,16 @@ impl RichText {
         });
     }
 
-    /// Puts the selection on the clipboard as the control does.
-    pub(crate) fn copy(self) {
-        send(self.0, WM_COPY, 0, 0);
+    /// The selected text with its rows separated by CR LF, as a text box
+    /// copies it, or `None` while nothing is selected. The caller publishes
+    /// it through the clipboard worker, because `WM_COPY` makes the
+    /// window's thread wait for the program whose clipboard it replaces.
+    pub(crate) fn selected_text(self) -> Option<String> {
+        let selection = self.selection();
+        if selection.is_empty() {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&self.text_of(selection)).replace('\r', "\r\n"))
     }
 
     /// Pastes the clipboard's text without its formatting.
@@ -421,49 +627,6 @@ impl RichText {
         super::present::mark_after(self.0, || {
             send(self.0, EM_PASTESPECIAL, usize::from(CF_UNICODETEXT.0), 0)
         });
-    }
-
-    /// The next match of `text` from `from`, or with `backward` the one
-    /// before it.
-    pub(crate) fn find(
-        self,
-        text: &str,
-        from: usize,
-        backward: bool,
-        match_case: bool,
-        whole_words: bool,
-    ) -> Option<Range<usize>> {
-        // The flags of EM_FINDTEXTEXW, from commdlg.h.
-        const FR_DOWN: usize = 0x1;
-        const FR_WHOLEWORD: usize = 0x2;
-        const FR_MATCHCASE: usize = 0x4;
-        let wide: Vec<u16> = text.encode_utf16().chain([0]).collect();
-        let from = i32::try_from(from).unwrap_or(i32::MAX);
-        let mut find = FINDTEXTEXW {
-            chrg: CHARRANGE {
-                cpMin: from,
-                cpMax: if backward { 0 } else { -1 },
-            },
-            lpstrText: PCWSTR(wide.as_ptr()),
-            chrgText: CHARRANGE::default(),
-        };
-        let flags = if backward { 0 } else { FR_DOWN }
-            | if match_case { FR_MATCHCASE } else { 0 }
-            | if whole_words { FR_WHOLEWORD } else { 0 };
-        // SAFETY: the text and the structure outlive the call.
-        let found = unsafe {
-            SendMessageW(
-                self.0.0,
-                EM_FINDTEXTEXW,
-                Some(WPARAM(flags)),
-                Some(LPARAM(&raw mut find as isize)),
-            )
-        };
-        let range = find.chrgText;
-        (found.0 >= 0).then(|| {
-            let at = |position: i32| usize::try_from(position).unwrap_or(0);
-            at(range.cpMin)..at(range.cpMax)
-        })
     }
 
     /// Whether `event` says that the person changed the text.
@@ -529,13 +692,33 @@ unsafe extern "system" fn procedure(
             return LRESULT(0);
         }
         WM_NCDESTROY => {
+            EDITING.with_borrow_mut(|editing| editing.retain(|each| each.side.0 != hwnd));
             // SAFETY: the subclass that `create` set.
             let _ = unsafe { RemoveWindowSubclass(hwnd, Some(procedure), kind) };
         }
         _ => {}
     }
+    // The window reads an edit's rows between the selection that the edit
+    // replaces and the caret after it, so a side records the selection
+    // before a message that can change its text.
+    let side = (kind == RichKind::Side as usize).then_some(RichText(Hwnd(hwnd)));
+    let composition = msg == WM_IME_STARTCOMPOSITION;
+    let started = match side {
+        Some(side) if composition || changes_text(msg) => {
+            edit_starts(side.0, side.bounds_now(), composition) && !composition
+        }
+        _ => false,
+    };
     // SAFETY: the parameters are the ones Windows passed.
     let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+    if let Some(side) = side {
+        if started {
+            edit_ends(side.0, false);
+        }
+        if msg == WM_IME_ENDCOMPOSITION {
+            edit_ends(side.0, true);
+        }
+    }
     let scrolls = matches!(
         msg,
         WM_VSCROLL

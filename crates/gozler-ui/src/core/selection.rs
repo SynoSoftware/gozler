@@ -505,6 +505,37 @@ pub(crate) fn passed(
     Some((rows, to))
 }
 
+/// `selected`, sorted rows as ranges that do not touch, with `rows`
+/// selected, or cleared when `mark` is false, as ranges of the same form.
+/// One copy of the ranges, so a run over many rows costs no work per row.
+pub(crate) fn marked(selected: &[Range<u64>], rows: Range<u64>, mark: bool) -> Vec<Range<u64>> {
+    if rows.is_empty() {
+        return selected.to_vec();
+    }
+    // The ranges that `rows` overlaps, and when it selects also those it
+    // touches, which merge with it.
+    let first = selected
+        .partition_point(|range| range.end < rows.start || (!mark && range.end == rows.start));
+    let last = selected
+        .partition_point(|range| range.start < rows.end || (mark && range.start == rows.end));
+    let met = &selected[first..last];
+    let start = met.first().map_or(rows.start, |range| range.start);
+    let end = met.last().map_or(rows.end, |range| range.end);
+    let mut ranges = Vec::with_capacity(selected.len() + 1);
+    ranges.extend_from_slice(&selected[..first]);
+    if mark {
+        ranges.push(start.min(rows.start)..end.max(rows.end));
+    } else {
+        ranges.extend(
+            [start..rows.start, rows.end..end]
+                .into_iter()
+                .filter(|range| !range.is_empty()),
+        );
+    }
+    ranges.extend_from_slice(&selected[last..]);
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,6 +587,33 @@ mod tests {
             prop_assert_eq!(rows, expected);
             let runs = told.rows(u64::MAX);
             prop_assert!(runs.windows(2).all(|pair| pair[0].end < pair[1].start));
+        }
+
+        /// A run of `Shift` over many rows writes these ranges to the
+        /// list, so a range that gains or loses a row at its edge, or
+        /// two ranges that touch, select a file the person did not mark
+        /// or confuse the bounded writes.
+        #[test]
+        fn marked_sets_exactly_the_run(
+            selected in proptest::collection::btree_set(0..40u64, 0..30),
+            start in 0..40u64,
+            len in 0..12u64,
+            mark in any::<bool>(),
+        ) {
+            let mut ranges = Vec::new();
+            for row in &selected {
+                push_rows(&mut ranges, *row..row + 1);
+            }
+            let rows = start..start + len;
+            let mut expected = selected;
+            for row in rows.clone() {
+                if mark { expected.insert(row); } else { expected.remove(&row); }
+            }
+            let after = marked(&ranges, rows, mark);
+            prop_assert!(after.windows(2).all(|pair| pair[0].end < pair[1].start));
+            prop_assert!(after.iter().all(|range| !range.is_empty()));
+            let rows: Vec<u64> = after.into_iter().flatten().collect();
+            prop_assert_eq!(rows, expected.into_iter().collect::<Vec<_>>());
         }
     }
 

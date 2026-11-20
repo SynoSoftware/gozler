@@ -56,9 +56,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ES_AUTOHSCROLL, ES_NUMBER, ES_READONLY, GWL_STYLE, GetWindowLongPtrW, HICON, HMENU, IMAGE_ICON,
     LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_RESETCONTENT,
     LB_SETCURSEL, SM_CXVSCROLL, STM_GETIMAGE, STM_SETIMAGE, SendMessageW, SetWindowLongPtrW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_COPY, WM_GETTEXTLENGTH, WM_KILLFOCUS, WM_NCDESTROY,
-    WM_SETTEXT, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
-    WS_VISIBLE, WS_VSCROLL,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_GETTEXTLENGTH, WM_KILLFOCUS, WM_NCDESTROY, WM_SETTEXT,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -310,9 +310,27 @@ impl Edit {
         super::present::mark_after(self.0, || send(self.0, EM_SETSEL, end, end as isize));
     }
 
-    /// Copies the selected text, as `Ctrl+C` does in a text box.
-    pub(crate) fn copy(self) {
-        send(self.0, WM_COPY, 0, 0);
+    /// The selected text, which `Ctrl+C` copies, or `None` while nothing is
+    /// selected. The caller publishes it through the clipboard worker,
+    /// because `WM_COPY` makes the window's thread wait for the program
+    /// whose clipboard it replaces.
+    pub(crate) fn selected_text(self) -> Option<String> {
+        let (mut start, mut end) = (0u32, 0u32);
+        // SAFETY: EM_GETSEL writes both positions through the pointers,
+        // which outlive the call.
+        unsafe {
+            SendMessageW(
+                self.0.0,
+                EM_GETSEL,
+                Some(WPARAM(&raw mut start as usize)),
+                Some(LPARAM(&raw mut end as isize)),
+            )
+        };
+        // A lone surrogate becomes one replacement character, so the
+        // positions still count the same units.
+        let units: Vec<u16> = self.0.text().encode_utf16().collect();
+        let selected = units.get(start as usize..end as usize)?;
+        (!selected.is_empty()).then(|| String::from_utf16_lossy(selected))
     }
 
     pub(crate) fn text(self) -> String {

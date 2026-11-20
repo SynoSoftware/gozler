@@ -301,7 +301,7 @@ impl Pattern {
 
 /// `c` and, unless the case must match, its lowercase and uppercase forms
 /// that are one character each.
-fn cases(c: char, match_case: bool) -> Vec<char> {
+pub(crate) fn cases(c: char, match_case: bool) -> Vec<char> {
     let mut cases = vec![c];
     if !match_case {
         let mut lower = c.to_lowercase();

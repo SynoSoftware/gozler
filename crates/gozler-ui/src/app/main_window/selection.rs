@@ -3,10 +3,10 @@
 
 use super::*;
 use crate::core::commands::SelectKey;
-use crate::core::panel::{Place, QuickAction};
+use crate::core::panel::{Place, QuickAction, Row};
 use crate::core::selection::changes::{Changes, Write};
 use crate::core::selection::{
-    CaptureKey, Capturing, Movement, RowsChange, moved, passed, push_rows, row_count,
+    CaptureKey, Capturing, Movement, RowsChange, marked, moved, passed, push_rows, row_count,
 };
 use crate::core::work::INLINE_ITEMS;
 use std::collections::LinkedList;
@@ -61,6 +61,31 @@ struct ShiftRun {
 struct Unhighlight {
     key: CaptureKey,
     after: Option<u64>,
+    /// The row before which the walk over the selected rows stops.
+    end: u64,
+}
+
+/// Who chose the place that [`MainWindow::show_native_place`] shows.
+#[derive(Clone, Copy)]
+pub(super) enum Chosen {
+    /// A change of the rows: a panel's model holds the place already, and
+    /// `keep_action` keeps a selection command that waits.
+    Remap { keep_action: bool },
+    /// A key of the person: the list tells its model when the writes end,
+    /// as it tells a click.
+    Key,
+}
+
+/// Where [`MainWindow::show_native_place`] leaves the list's scroll.
+#[derive(Clone, Copy)]
+pub(super) enum Scroll {
+    /// Another folder, or a new order: the focused row scrolls into view.
+    ToFocus,
+    /// The same rows changed, which stay where the person sees them.
+    Keep,
+    /// The rows took a new order while the person looked at the focused
+    /// entry: it stays `offset` rows below the top row, where it showed.
+    FocusAt { offset: u64 },
 }
 
 struct NativeUpdate {
@@ -70,7 +95,8 @@ struct NativeUpdate {
     changes: Option<Changes>,
     focused: Option<u64>,
     anchor: Option<u64>,
-    to_focus: bool,
+    scroll: Scroll,
+    chosen: Chosen,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +112,14 @@ enum SelectionAction {
     Command(MenuItem, CommandContext),
     SearchMenu(Option<(i32, i32)>, CommandContext),
     PanelMenu(Side, Option<(i32, i32)>, CommandContext),
+    /// A key of `run` over the rows `start..end`, which waits for the
+    /// list's selection ([`MainWindow::mark_rows`]).
+    Mark {
+        start: u64,
+        end: u64,
+        run: ShiftRun,
+        context: CommandContext,
+    },
 }
 
 impl SelectionAction {
@@ -93,17 +127,21 @@ impl SelectionAction {
         match self {
             Self::Command(_, context)
             | Self::SearchMenu(_, context)
-            | Self::PanelMenu(_, _, context) => context,
+            | Self::PanelMenu(_, _, context)
+            | Self::Mark { context, .. } => context,
         }
     }
 
-    fn remapped(self, key: CaptureKey) -> Self {
+    /// The action after a remap gave the list `key`. A run of `Shift` ends,
+    /// because it names its rows by position, which the remap moved.
+    fn remapped(self, key: CaptureKey) -> Option<Self> {
         let mut context = self.context();
         context.key = key;
         match self {
-            Self::Command(item, _) => Self::Command(item, context),
-            Self::SearchMenu(point, _) => Self::SearchMenu(point, context),
-            Self::PanelMenu(side, point, _) => Self::PanelMenu(side, point, context),
+            Self::Command(item, _) => Some(Self::Command(item, context)),
+            Self::SearchMenu(point, _) => Some(Self::SearchMenu(point, context)),
+            Self::PanelMenu(side, point, _) => Some(Self::PanelMenu(side, point, context)),
+            Self::Mark { .. } => None,
         }
     }
 }
@@ -422,10 +460,12 @@ impl MainWindow {
             let context = action.context();
             let current = self.selection_context_current(context);
             if current {
-                if !self.read_target_selection(hwnd, list) {
-                    continue;
-                }
-                if self.selection_waiting(list) {
+                // A run of `Shift` needs the selected rows, not their files.
+                let ready = match action {
+                    SelectionAction::Mark { .. } => self.selected_rows(list).is_some(),
+                    _ => self.read_target_selection(hwnd, list) && !self.selection_waiting(list),
+                };
+                if !ready {
                     continue;
                 }
             }
@@ -448,6 +488,9 @@ impl MainWindow {
                         .controls()
                         .panels
                         .panel_menu_ready(self, hwnd, side, point, context),
+                    SelectionAction::Mark {
+                        start, end, run, ..
+                    } => self.mark_rows(list, start..end, run),
                 }
             }
             if self.shutdown.borrow().is_some() {
@@ -795,17 +838,25 @@ impl MainWindow {
                     Some(run) if run.press == press && focused == Some(run.focus) => run.mark,
                     _ => !control.row_state(rows.start).1,
                 };
+                let run = ShiftRun {
+                    focus: to,
+                    mark,
+                    press,
+                };
+                self.native_selection(list).borrow_mut().shift_run = Some(run);
+                // Each row written alone is a message and a notification,
+                // so a longer run goes through the bounded writes.
+                if rows.end - rows.start > INLINE_ITEMS as u64 {
+                    control.set_focused(Some(to));
+                    self.mark_rows(list, rows, run);
+                    return;
+                }
                 for row in rows {
                     let selectable = self.model.borrow().selectable(list, row);
                     if selectable && control.row_state(row).1 != mark {
                         control.select(row, mark);
                     }
                 }
-                self.native_selection(list).borrow_mut().shift_run = Some(ShiftRun {
-                    focus: to,
-                    mark,
-                    press,
-                });
                 control.set_focused(Some(to));
             }
             SelectKey::Restore => {
@@ -818,9 +869,51 @@ impl MainWindow {
                         selected: Arc::default(),
                     };
                     let place = Place { focused, selected };
-                    self.show_native_place(list, &before, &place, false, false);
+                    self.show_native_place(list, &before, &place, Scroll::Keep, Chosen::Key);
                 }
             }
+        }
+    }
+
+    /// Gives the rows `rows` of `list` the state of `run`, `..` left out,
+    /// through [`Self::show_native_place`]'s bounded writes, and then
+    /// unhighlights the taken rows among them. While the list's selection
+    /// is not known yet, the run waits for it as a command does.
+    fn mark_rows(&self, list: List, rows: Range<u64>, run: ShiftRun) {
+        let Some(selected) = self.selected_rows(list) else {
+            let mut context = self.command_context();
+            context.list = list;
+            context.key = self.native_key(list);
+            self.defer_selection_action(SelectionAction::Mark {
+                start: rows.start,
+                end: rows.end,
+                run,
+                context,
+            });
+            return;
+        };
+        let (up, taken) = {
+            let model = self.model.borrow();
+            let up = match list {
+                List::Panel(side) => matches!(model.panels().row(side, 0), Some(Row::Up)),
+                List::Search => false,
+            };
+            let taken = model.list(list).is_some() && !model.panels().taken().is_empty();
+            (up, taken)
+        };
+        let rows = rows.start.max(u64::from(up))..rows.end;
+        let focused = Some(run.focus);
+        let place = Place {
+            focused,
+            selected: Arc::new(marked(&selected.positions, rows.clone(), run.mark)),
+        };
+        let before = Place {
+            focused,
+            selected: selected.positions,
+        };
+        self.show_native_place(list, &before, &place, Scroll::Keep, Chosen::Key);
+        if run.mark && taken {
+            self.request_taken_deselection(list, rows);
         }
     }
 
@@ -857,10 +950,15 @@ impl MainWindow {
         native.unhighlight.is_some() || native.unhighlighting
     }
 
-    pub(super) fn request_taken_deselection(&self, list: List) {
+    /// Unhighlights, in bounded turns, the selected rows among `rows` whose
+    /// entries a delete or a move took.
+    pub(super) fn request_taken_deselection(&self, list: List, rows: Range<u64>) {
         let key = self.native_key(list);
-        self.native_selection(list).borrow_mut().unhighlight =
-            Some(Unhighlight { key, after: None });
+        self.native_selection(list).borrow_mut().unhighlight = Some(Unhighlight {
+            key,
+            after: rows.start.checked_sub(1),
+            end: rows.end,
+        });
         if let List::Panel(side) = list {
             self.model
                 .borrow_mut()
@@ -898,7 +996,7 @@ impl MainWindow {
             let mut finished = false;
             for _ in 0..INLINE_ITEMS {
                 match control.next_selected(pending.after) {
-                    Some(row) if current() => {
+                    Some(row) if row < pending.end && current() => {
                         selected.push(row..row + 1);
                         pending.after = Some(row);
                     }
@@ -958,32 +1056,34 @@ impl MainWindow {
     }
 
     /// Shows `place` in `list`, which showed `before`, writing the rows
-    /// that change in bounded slices. A panel's model holds `place` already;
-    /// Search's list tells its model when the writes end, as a person's
-    /// selection does.
+    /// that change in bounded slices. A panel's model holds a remap's
+    /// `place` already; otherwise the list tells its model when the writes
+    /// end, as a person's selection does.
     pub(super) fn show_native_place(
         &self,
         list: List,
         before: &Place,
         place: &Place,
-        to_focus: bool,
-        keep_action: bool,
+        scroll: Scroll,
+        chosen: Chosen,
     ) {
         self.end_matching_selection(list);
-        let (count, selected_count) = match list {
-            List::Panel(side) => {
+        let control = self.list_control(list);
+        let (count, selected_count, anchor) = match (list, chosen) {
+            (List::Panel(side), Chosen::Remap { .. }) => {
                 let model = self.model.borrow();
                 (
                     model.panels().panel(side).count(),
                     model.panels().selected_count(side),
+                    model.panels().anchor(side),
                 )
             }
-            List::Search => (self.list_control(list).count(), row_count(&place.selected)),
-        };
-        let anchor = match list {
-            List::Panel(side) => self.model.borrow().panels().anchor(side),
-            List::Search if keep_action => self.list_control(list).selection_mark(),
-            List::Search => place.focused,
+            (List::Search, Chosen::Remap { keep_action: true }) => (
+                control.count(),
+                row_count(&place.selected),
+                control.selection_mark(),
+            ),
+            _ => (control.count(), row_count(&place.selected), place.focused),
         };
         let mut retired = Retirement::default();
         {
@@ -995,9 +1095,9 @@ impl MainWindow {
                 (!native.applying && native.unhighlight.is_none() && !native.unhighlighting)
                     .then(|| Arc::clone(&before.selected));
             native.unhighlight = None;
-            if keep_action {
+            if let Chosen::Remap { keep_action: true } = chosen {
                 let key = native.capture.key(count);
-                native.action = native.action.map(|action| action.remapped(key));
+                native.action = native.action.and_then(|action| action.remapped(key));
             } else {
                 native.action = None;
             }
@@ -1012,7 +1112,8 @@ impl MainWindow {
                 changes: None,
                 focused: place.focused,
                 anchor,
-                to_focus,
+                scroll,
+                chosen,
             });
         }
         if let List::Panel(side) = list {
@@ -1022,9 +1123,9 @@ impl MainWindow {
                 .native_selection_pending(side, true);
         }
         self.created().work.borrow_mut().retire(retired);
-        if let List::Panel(_) = list {
+        if let (List::Panel(_), Chosen::Remap { .. }) = (list, chosen) {
             // The panel's rows may have changed with the place.
-            self.list_control(list).set_count(count);
+            control.set_count(count);
         }
         self.apply_native_place(list);
     }
@@ -1100,25 +1201,36 @@ impl MainWindow {
         }
         control.focus_in_place(update.focused);
         control.set_selection_mark(update.anchor);
-        if update.to_focus
-            && let Some(row) = update.focused
-        {
-            control.ensure_visible(row);
+        match (update.scroll, update.focused) {
+            (Scroll::ToFocus, Some(row)) => control.ensure_visible(row),
+            (Scroll::FocusAt { offset }, Some(row)) => control.show_row_at(row, offset),
+            _ => {}
         }
         if !current() {
             self.retire_selection(update);
             return;
         }
         let focused = control.focused();
-        match list {
-            List::Panel(side) => {
+        let hwnd = control.hwnd().parent();
+        match (list, update.chosen) {
+            (List::Panel(side), Chosen::Remap { .. }) => {
                 self.model
                     .borrow_mut()
                     .panels_mut()
                     .set_focused(side, focused);
                 self.panel(side).changed.set(panels::ListChanged::Nothing);
             }
-            List::Search => self.controls().search.selection_pending.set(true),
+            // The model reads a key's place as it reads a click's, on a turn
+            // of its own, because a read during the writes found the list
+            // busy and left no turn waiting.
+            (List::Panel(side), Chosen::Key) => {
+                self.panel(side).changed.set(panels::ListChanged::Selection);
+                hwnd.post_deferred();
+            }
+            (List::Search, _) => {
+                self.controls().search.selection_pending.set(true);
+                hwnd.post_deferred();
+            }
         }
         let count = control.count();
         let input = {
@@ -1147,7 +1259,7 @@ impl MainWindow {
             self.controls().panels.show_panel(self, side);
         }
         self.controls().key_bar.update_key_bar(self);
-        self.resume_selection_actions(control.hwnd().parent());
+        self.resume_selection_actions(hwnd);
         self.start_list_passes();
     }
 }

@@ -1,12 +1,14 @@
 //! The compare window's worker (DESIGN.md: Compare by content): it chooses
-//! the two files, reads and compares them, builds the RTF that the sides
-//! show, runs the comparison tool, and saves edited files. The window's
-//! thread never reads a file.
+//! the two files, reads and compares them, builds the RTF of the sides'
+//! rows that changed, runs the comparison tool, saves edited files, and
+//! runs Find. The window's thread never reads a file.
 
-use crate::core::compare::rtf::{Font, Palette, Rtf, Style};
-use crate::core::compare::{self, Chosen, LINES_LIMIT, Matching, SHOWN_LIMIT, Shown};
+use crate::core::compare::rtf::{self, Font, Palette, Patch, Style, row_rtf};
+use crate::core::compare::{
+    self, Chosen, LINES_LIMIT, Matching, Needle, SHOWN_LIMIT, Shown, ShownRows, Text,
+};
 use crate::core::compare_window::session::{
-    AlignInput, Compared, Content, HexFound, SaveFile, View,
+    AlignInput, Compared, Content, Fresh, HexFound, SaveFile, View,
 };
 use crate::core::compare_window::{Note, fold_text};
 use crate::core::open::{Entries, compare_command};
@@ -20,8 +22,10 @@ use crate::win::shell::Session;
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task, spawn};
 use gozler_client::CancelToken;
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{self, Read as _};
+use std::ops::Range;
 use std::os::windows::fs::FileExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,6 +83,9 @@ pub(in crate::app) struct Options {
     /// Show only differences, with its extra lines.
     pub(in crate::app) only_differences: Option<u32>,
     pub(in crate::app) look: Look,
+    /// The fingerprints of the rows that each side's control shows, which
+    /// the rows built patch.
+    pub(in crate::app) shown: [Arc<Vec<u64>>; 2],
 }
 
 /// How much of the two files a comparison has read.
@@ -146,19 +153,74 @@ pub(in crate::app) enum Outcome {
         error: io::Error,
     },
     Cancelled,
-    Compared(Box<Compared>),
+    Compared(Box<Compared>, Rendering),
     Realigned {
         generation: u64,
         view: View,
+        rendering: Rendering,
     },
+}
+
+/// The sides' rows as their controls take them: each side's patch, `None`
+/// when its control shows the rows already, and the fingerprints of the
+/// rows that its control then shows.
+pub(in crate::app) struct Rendering {
+    pub(in crate::app) patches: [Option<Patch>; 2],
+    pub(in crate::app) prints: [Vec<u64>; 2],
 }
 
 /// Each file that Save wrote, or why not.
 pub(in crate::app) type Saved = Vec<(Side, Vec<u16>, Result<(), SaveFailure>)>;
 
+/// What Find reads besides the rows that show.
+pub(in crate::app) enum Searched {
+    /// Each side's text, whose lines the rows show.
+    Text([Arc<Text>; 2]),
+    /// The files, of `sizes` bytes, whose hex rows the rows show.
+    Hex {
+        paths: [Vec<u16>; 2],
+        sizes: [u64; 2],
+    },
+}
+
+/// Find, from `side`'s `row` at `column`, through the rows that `fresh`
+/// proves to be the rows that show.
+pub(in crate::app) struct Find {
+    pub(in crate::app) needle: Needle,
+    pub(in crate::app) backward: bool,
+    pub(in crate::app) side: Side,
+    pub(in crate::app) row: usize,
+    pub(in crate::app) column: usize,
+    pub(in crate::app) rows: Arc<ShownRows>,
+    pub(in crate::app) searched: Searched,
+    /// The words of the rows that Show only differences hides.
+    pub(in crate::app) look: Look,
+    pub(in crate::app) fresh: Fresh,
+}
+
+pub(in crate::app) enum Found {
+    /// `columns` of `side`'s `row`, in the rows that `fresh` proved.
+    Match {
+        fresh: Fresh,
+        side: Side,
+        row: usize,
+        columns: Range<usize>,
+    },
+    Nothing,
+    /// A Hex file could not be read for its rows.
+    Failed {
+        path: Vec<u16>,
+        error: io::Error,
+    },
+    Cancelled,
+}
+
 pub(in crate::app) struct Work {
     task: Task<Job, Outcome>,
     saving: Task<Vec<SaveFile>, Saved>,
+    finding: Task<Find, Found>,
+    /// Publishes the text that the window copies.
+    pub(in crate::app) clipboard: super::clipboard::Work,
 }
 
 impl Work {
@@ -167,8 +229,22 @@ impl Work {
             // The shell's thread starts the comparison tool.
             task: Task::shell(waker.clone(), Replacement::Cancel, run),
             // A save that started always ends.
-            saving: Task::new(waker, Replacement::Finish, save),
+            saving: Task::new(waker.clone(), Replacement::Finish, save),
+            finding: Task::new(waker.clone(), Replacement::Cancel, search),
+            clipboard: super::clipboard::Work::new(waker),
         }
+    }
+
+    /// Starts `find` in place of the Find that runs.
+    pub(in crate::app) fn find(&mut self, find: Find) {
+        self.finding.replace(find);
+        retire(self.finding.take_retired());
+    }
+
+    pub(in crate::app) fn take_found(&mut self) -> Option<Found> {
+        let found = self.finding.take().map(|(_, found)| found);
+        retire(self.finding.take_retired());
+        found
     }
 
     /// Starts `job` in place of the one that runs.
@@ -199,12 +275,15 @@ impl Work {
         self.saving.take().map(|(_, saved)| saved)
     }
 
-    /// Ends both tasks as the window closes, and hands over an outcome
+    /// Ends the tasks as the window closes, and hands over an outcome
     /// that nobody took, which can hold whole files.
     pub(in crate::app) fn close(mut self) -> Retirement {
         self.task.cancel();
+        self.finding.cancel();
         let mut retired = self.task.close_delivery();
         retired.append(self.saving.close_delivery());
+        retired.append(self.finding.close_delivery());
+        retired.append(self.clipboard.close());
         retired
     }
 }
@@ -251,7 +330,11 @@ fn run(job: Job, session: &Session, worker: &OffThread, cancel: &CancelToken) ->
         } => {
             let lines = [texts[0].lines.as_slice(), texts[1].lines.as_slice()];
             match realign(lines, &anchors, &options, cancel) {
-                Some(view) => Outcome::Realigned { generation, view },
+                Some((view, rendering)) => Outcome::Realigned {
+                    generation,
+                    view,
+                    rendering,
+                },
                 None => Outcome::Cancelled,
             }
         }
@@ -265,7 +348,11 @@ fn run(job: Job, session: &Session, worker: &OffThread, cancel: &CancelToken) ->
                 },
             options,
         } => match rebuild_hex(&paths, sizes, &found, &options, worker, cancel) {
-            Ok(Some(view)) => Outcome::Realigned { generation, view },
+            Ok(Some((view, rendering))) => Outcome::Realigned {
+                generation,
+                view,
+                rendering,
+            },
             Ok(None) => Outcome::Cancelled,
             Err((side, error)) => Outcome::Failed {
                 path: paths[side].clone(),
@@ -376,16 +463,17 @@ fn compare_files(
         );
     };
     let lines = [left.lines.as_slice(), right.lines.as_slice()];
-    let Some(view) = realign(lines, &[], options, cancel) else {
+    let Some((view, rendering)) = realign(lines, &[], options, cancel) else {
         return Outcome::Cancelled;
     };
-    Outcome::Compared(Box::new(Compared {
+    let compared = Compared {
         paths,
         sizes,
         content: Content::Text([Arc::new(left), Arc::new(right)]),
         view,
         identical,
-    }))
+    };
+    Outcome::Compared(Box::new(compared), rendering)
 }
 
 /// Reads `file`, of `size` bytes, whole; `None` when cancelled. A file that
@@ -453,19 +541,20 @@ fn compare_hex(
         Ok(None) => return Outcome::Cancelled,
         Err(failure) => return failed(failure),
     };
-    let view = match hex_view(files, sizes, &found, options, cancel) {
-        Ok(Some(view)) => view,
+    let (view, rendering) = match hex_view(files, sizes, &found, options, cancel) {
+        Ok(Some(built)) => built,
         Ok(None) => return Outcome::Cancelled,
         Err(failure) => return failed(failure),
     };
-    Outcome::Compared(Box::new(Compared {
+    let compared = Compared {
         // Hex compares every byte, and a longer file's rest differs.
         identical: found.differences == 0,
         paths,
         sizes,
         content: Content::Hex(Arc::new(found)),
         view,
-    }))
+    };
+    Outcome::Compared(Box::new(compared), rendering)
 }
 
 /// Builds the rows of a Hex comparison again for other options, reading
@@ -477,12 +566,17 @@ fn rebuild_hex(
     options: &Options,
     worker: &OffThread,
     cancel: &CancelToken,
-) -> Result<Option<View>, ReadFailure> {
+) -> Result<Option<(View, Rendering)>, ReadFailure> {
+    let files = open_both(paths, worker)?;
+    hex_view([&files[0], &files[1]], sizes, found, options, cancel)
+}
+
+fn open_both(paths: &[Vec<u16>; 2], worker: &OffThread) -> Result<Vec<File>, ReadFailure> {
     let mut files = Vec::with_capacity(2);
     for (side, path) in paths.iter().enumerate() {
         files.push(open_shared(path, worker).map_err(|error| (side, error))?);
     }
-    hex_view([&files[0], &files[1]], sizes, found, options, cancel)
+    Ok(files)
 }
 
 /// Finds the hex rows where the files differ, reading both a chunk at a
@@ -553,7 +647,7 @@ fn hex_view(
     found: &HexFound,
     options: &Options,
     cancel: &CancelToken,
-) -> Result<Option<View>, ReadFailure> {
+) -> Result<Option<(View, Rendering)>, ReadFailure> {
     let row_bytes = HEX_ROW_BYTES as u64;
     let rows = sizes.map(|size| size.div_ceil(row_bytes));
     let shown = compare::hex_shown_rows(
@@ -564,8 +658,7 @@ fn hex_view(
         SHOWN_LIMIT,
     );
     let look = &options.look;
-    let mut sides = [0, 1].map(|_| Rtf::new(&look.palette, look.font));
-    let mut numbers = [0, 1].map(|_| Rtf::new(&look.palette, look.font));
+    let mut sides = [0, 1].map(|_| Vec::with_capacity(shown.rows.len()));
     let mut readers = [0, 1].map(|side| RowReader::new(files[side]));
     let length = sizes[0].max(sizes[1]);
     let digits = offset_digits(length);
@@ -597,27 +690,34 @@ fn hex_view(
                         (Some(row), Some(bytes)) => hex_row(length, row * row_bytes, bytes),
                         _ => String::new(),
                     };
-                    sides[side].row(&text, Style::Text, &marks[side]);
-                    numbers[side].row(" ", number_style(row.is_some(), *differs), &[]);
+                    sides[side].push(row_rtf(&text, Style::Text, &marks[side]));
                 }
             }
             Shown::Fold { .. } => {
                 let text = fold_text(&look.strings, &look.numbers, each.hidden().unwrap_or(0));
-                for side in 0..2 {
-                    sides[side].row(&text, Style::Muted, &[]);
-                    numbers[side].row(" ", Style::Gap, &[]);
-                }
+                let row = row_rtf(&text, Style::Muted, &[]);
+                sides[0].push(row.clone());
+                sides[1].push(row);
             }
         }
     }
-    let [left, right] = sides;
-    let [left_numbers, right_numbers] = numbers;
-    Ok(Some(View {
-        rows: shown,
+    let view = View {
+        rows: Arc::new(shown),
         differences: found.differences,
-        sides: [left.finish(), right.finish()],
-        numbers: [left_numbers.finish(), right_numbers.finish()],
-    }))
+    };
+    Ok(Some((view, render(&sides, options))))
+}
+
+/// The patches that turn what the sides' controls show into `sides`, the
+/// RTF of each side's rows.
+fn render(sides: &[Vec<String>; 2], options: &Options) -> Rendering {
+    let look = &options.look;
+    let [left, right] =
+        [0, 1].map(|side| rtf::patch(&options.shown[side], &sides[side], &look.palette, look.font));
+    Rendering {
+        patches: [left.1, right.1],
+        prints: [left.0, right.0],
+    }
 }
 
 /// Reads hex rows of a file through a block that it keeps, because the
@@ -655,16 +755,6 @@ impl<'a> RowReader<'a> {
     }
 }
 
-/// How a row's line number shows: in red on the tint where the row
-/// differs, a grey column where the side has no line, muted otherwise.
-fn number_style(has_line: bool, differs: bool) -> Style {
-    match (has_line, differs) {
-        (false, _) => Style::Gap,
-        (true, true) => Style::Differs,
-        (true, false) => Style::Muted,
-    }
-}
-
 /// Matches `lines`, with the pairs of `anchors`, and builds the rows that
 /// show; `None` when cancelled.
 fn realign(
@@ -672,7 +762,7 @@ fn realign(
     anchors: &[(usize, usize)],
     options: &Options,
     cancel: &CancelToken,
-) -> Option<View> {
+) -> Option<(View, Rendering)> {
     let rows = compare::match_lines(lines[0], lines[1], options.matching, anchors, &|| {
         cancel.is_cancelled()
     })?;
@@ -680,11 +770,7 @@ fn realign(
     let shown = compare::shown_rows(&rows, options.only_differences, SHOWN_LIMIT);
     drop(rows);
     let look = &options.look;
-    let mut sides = [0, 1].map(|_| Rtf::new(&look.palette, look.font));
-    let mut numbers = [0, 1].map(|_| Rtf::new(&look.palette, look.font));
-    let digits = lines
-        .each_ref()
-        .map(|lines| lines.len().max(1).to_string().len());
+    let mut sides = [0, 1].map(|_| Vec::with_capacity(shown.rows.len()));
     for each in &shown.rows {
         if cancel.is_cancelled() {
             return None;
@@ -705,32 +791,99 @@ fn realign(
                 } else {
                     [Vec::new(), Vec::new()]
                 };
-                for (side, row) in [(0, left), (1, right)] {
-                    sides[side].row(texts[side].unwrap_or(""), Style::Text, &marks[side]);
-                    let number = match row {
-                        Some(row) => format!(" {:>width$} ", row + 1, width = digits[side]),
-                        None => " ".repeat(digits[side] + 2),
-                    };
-                    numbers[side].row(&number, number_style(row.is_some(), *differs), &[]);
+                for side in 0..2 {
+                    let text = texts[side].unwrap_or("");
+                    sides[side].push(row_rtf(text, Style::Text, &marks[side]));
                 }
             }
             Shown::Fold { .. } => {
                 let text = fold_text(&look.strings, &look.numbers, each.hidden().unwrap_or(0));
-                for side in 0..2 {
-                    sides[side].row(&text, Style::Muted, &[]);
-                    numbers[side].row(&" ".repeat(digits[side] + 2), Style::Gap, &[]);
-                }
+                let row = row_rtf(&text, Style::Muted, &[]);
+                sides[0].push(row.clone());
+                sides[1].push(row);
             }
         }
     }
-    let [left, right] = sides;
-    let [left_numbers, right_numbers] = numbers;
-    Some(View {
-        rows: shown,
+    let view = View {
+        rows: Arc::new(shown),
         differences,
-        sides: [left.finish(), right.finish()],
-        numbers: [left_numbers.finish(), right_numbers.finish()],
-    })
+    };
+    Some((view, render(&sides, options)))
+}
+
+/// Find's search through the rows that show, on the window's worker,
+/// because a side can hold 32 MB.
+fn search(find: Find, worker: &OffThread, cancel: &CancelToken) -> Found {
+    let Find {
+        needle,
+        backward,
+        side,
+        row,
+        column,
+        rows,
+        searched,
+        look,
+        fresh,
+    } = find;
+    let files = match &searched {
+        Searched::Hex { paths, .. } => match open_both(paths, worker) {
+            Ok(files) => files,
+            Err((side, error)) => {
+                return Found::Failed {
+                    path: paths[side].clone(),
+                    error,
+                };
+            }
+        },
+        Searched::Text(_) => Vec::new(),
+    };
+    let mut readers: Vec<RowReader<'_>> = files.iter().map(RowReader::new).collect();
+    let shown = &rows.rows;
+    for (each_side, each_row, at) in compare::find_order(side, row, column, backward, shown.len()) {
+        if cancel.is_cancelled() {
+            return Found::Cancelled;
+        }
+        let Some(each) = shown.get(each_row) else {
+            continue;
+        };
+        let text: Cow<'_, str> = match (each.line(each_side), &searched) {
+            (None, _) => match each.hidden() {
+                Some(hidden) => Cow::Owned(fold_text(&look.strings, &look.numbers, hidden)),
+                // A row that the side does not have is empty.
+                None => continue,
+            },
+            (Some(line), Searched::Text(texts)) => {
+                let lines = &texts[each_side.index()].lines;
+                match usize::try_from(line).ok().and_then(|line| lines.get(line)) {
+                    Some(line) => Cow::Borrowed(line.as_str()),
+                    None => continue,
+                }
+            }
+            (Some(line), Searched::Hex { paths, sizes }) => {
+                let index = each_side.index();
+                let bytes = match readers[index].row(line) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        return Found::Failed {
+                            path: paths[index].clone(),
+                            error,
+                        };
+                    }
+                };
+                let length = sizes[0].max(sizes[1]);
+                Cow::Owned(hex_row(length, line * HEX_ROW_BYTES as u64, &bytes))
+            }
+        };
+        if let Some(columns) = needle.find(&text, at, backward) {
+            return Found::Match {
+                fresh,
+                side: each_side,
+                row: each_row,
+                columns,
+            };
+        }
+    }
+    Found::Nothing
 }
 
 fn save(files: Vec<SaveFile>, worker: &OffThread, _cancel: &CancelToken) -> Saved {

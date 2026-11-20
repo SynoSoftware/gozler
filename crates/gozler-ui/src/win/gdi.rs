@@ -8,6 +8,7 @@ use crate::core::layout::{Dpi, Px};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::OnceLock;
 use windows::Win32::Foundation::{COLORREF, LRESULT, MAX_PATH, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, COLOR_3DLIGHT, COLOR_BTNTEXT,
@@ -20,9 +21,7 @@ use windows::Win32::Graphics::Gdi::{
     ReleaseDC, SYS_COLOR_INDEX, SelectObject, SetBkColor, SetBkMode, SetTextColor, TEXTMETRICW,
     TRANSPARENT,
 };
-use windows::Win32::Storage::FileSystem::{
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
-};
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES};
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::Controls::{
     HIMAGELIST, HIMAGELIST_QueryInterface, IImageList, ILC_COLOR32, ILD_TRANSPARENT,
@@ -32,7 +31,8 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Shell::{
     PathCompactPathW, SHFILEINFOW, SHGFI_FLAGS, SHGFI_LARGEICON, SHGFI_SMALLICON,
     SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHGSI_SYSICONINDEX, SHGetFileInfoW,
-    SHGetStockIconInfo, SHSTOCKICONINFO, SIID_FOLDEROPEN, SIID_LINK,
+    SHGetStockIconInfo, SHSTOCKICONID, SHSTOCKICONINFO, SIID_DOCNOASSOC, SIID_FOLDER,
+    SIID_FOLDEROPEN, SIID_LINK,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateIconIndirect, DestroyIcon, HICON, ICONINFO, NONCLIENTMETRICSW, SPI_GETHIGHCONTRAST,
@@ -592,15 +592,19 @@ impl Drop for Icon {
 pub(crate) struct ImageList(HIMAGELIST);
 
 impl ImageList {
-    /// The system image list of small icons, from `SHGetFileInfoW`.
+    /// The system image list of small icons. Only the first call asks
+    /// `SHGetFileInfoW`, because a process keeps one list while it runs, so
+    /// a list can ask for it while it paints.
     pub(crate) fn system_small() -> Option<ImageList> {
-        ImageList::system(SHGFI_SMALLICON)
+        static SMALL: OnceLock<Option<ImageList>> = OnceLock::new();
+        *SMALL.get_or_init(|| ImageList::system(SHGFI_SMALLICON))
     }
 
     /// The system image list of large icons, whose indexes are the small
     /// list's.
     pub(crate) fn system_large() -> Option<ImageList> {
-        ImageList::system(SHGFI_LARGEICON)
+        static LARGE: OnceLock<Option<ImageList>> = OnceLock::new();
+        *LARGE.get_or_init(|| ImageList::system(SHGFI_LARGEICON))
     }
 
     fn system(size: SHGFI_FLAGS) -> Option<ImageList> {
@@ -608,16 +612,27 @@ impl ImageList {
         (handle != 0).then_some(ImageList(HIMAGELIST(handle as isize)))
     }
 
-    /// The index in the system image lists of the icon for an item named
-    /// `name`, from its extension, without reading the item: a folder's
-    /// icon, or the icon of the file type.
-    pub(crate) fn system_index(name: &str, is_folder: bool) -> i32 {
-        let attributes = if is_folder {
-            FILE_ATTRIBUTE_DIRECTORY
-        } else {
-            FILE_ATTRIBUTE_NORMAL
-        };
-        system_icon_info(&HSTRING::from(name), attributes, SHGFI_SMALLICON).1
+    /// The index in the system image lists of the icon of a file named
+    /// `name`, which is its file type's, without reading the file; `None`
+    /// when the call fails. The type's icon can come from any program's file
+    /// or icon handler, so Microsoft's documentation asks for this call on a
+    /// background thread.
+    pub(crate) fn system_index(name: &str, _worker: &super::work::OffThread) -> Option<i32> {
+        let (list, index) =
+            system_icon_info(&HSTRING::from(name), FILE_ATTRIBUTE_NORMAL, SHGFI_SMALLICON);
+        (list != 0).then_some(index)
+    }
+
+    /// The index in the system image lists of Windows' own `icon`; `None`
+    /// when the shell does not say. The window's thread may ask it, because
+    /// the icon comes from Windows' own icon files, never from a file type's
+    /// program or handler.
+    pub(crate) fn stock_index(icon: StockIcon) -> Option<i32> {
+        stock_icon_index(match icon {
+            StockIcon::File => SIID_DOCNOASSOC,
+            StockIcon::Folder => SIID_FOLDER,
+            StockIcon::OpenFolder => SIID_FOLDEROPEN,
+        })
     }
 
     pub(super) fn handle(self) -> isize {
@@ -632,31 +647,13 @@ impl ImageList {
         (!icon.is_invalid()).then_some(Icon(icon))
     }
 
-    /// The index in the system image lists of Windows' open folder icon,
-    /// which is already there, so nothing is added to the lists that the
-    /// shell keeps in step; `None` when the shell does not say.
-    pub(crate) fn open_folder_index() -> Option<i32> {
-        let mut info = SHSTOCKICONINFO {
-            cbSize: size_of::<SHSTOCKICONINFO>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: `info` is a local with its size set, which the call fills.
-        unsafe { SHGetStockIconInfo(SIID_FOLDEROPEN, SHGSI_SYSICONINDEX, &mut info) }.ok()?;
-        Some(info.iSysImageIndex)
-    }
-
     /// The overlay of the system image lists that holds Windows' link arrow,
     /// which a list shows over a junction's or a symbolic link's icon as
     /// File Explorer does; `None` when Windows set none. Reads the lists'
     /// overlays, because `SHGetIconOverlayIndexW` would load every installed
     /// overlay handler into the process.
     pub(crate) fn link_overlay(self) -> Option<u32> {
-        let mut info = SHSTOCKICONINFO {
-            cbSize: size_of::<SHSTOCKICONINFO>() as u32,
-            ..Default::default()
-        };
-        // SAFETY: `info` is a local with its size set, which the call fills.
-        unsafe { SHGetStockIconInfo(SIID_LINK, SHGSI_SYSICONINDEX, &mut info) }.ok()?;
+        let arrow = stock_icon_index(SIID_LINK)?;
         let mut raw = std::ptr::null_mut();
         // SAFETY: the system image list lives as long as the process; on
         // success `raw` holds a reference that `from_raw` takes over.
@@ -670,7 +667,7 @@ impl ImageList {
         };
         // An image list has overlays 1 to 15 (`ILD_OVERLAYMASK`).
         (1..=15)
-            .find(|&overlay| image_of(overlay) == Ok(info.iSysImageIndex))
+            .find(|&overlay| image_of(overlay) == Ok(arrow))
             .map(|overlay| overlay as u32)
     }
 
@@ -711,6 +708,25 @@ fn system_icon_info(
         )
     };
     (list, info.iIcon)
+}
+
+/// An icon of Windows' own that a list shows ([`ImageList::stock_index`]).
+#[derive(Clone, Copy)]
+pub(crate) enum StockIcon {
+    /// A file of no known type.
+    File,
+    Folder,
+    OpenFolder,
+}
+
+fn stock_icon_index(icon: SHSTOCKICONID) -> Option<i32> {
+    let mut info = SHSTOCKICONINFO {
+        cbSize: size_of::<SHSTOCKICONINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: `info` is a local with its size set, which the call fills.
+    unsafe { SHGetStockIconInfo(icon, SHGSI_SYSICONINDEX, &mut info) }.ok()?;
+    Some(info.iSysImageIndex)
 }
 
 impl Hwnd {

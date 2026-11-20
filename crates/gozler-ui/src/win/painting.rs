@@ -310,6 +310,7 @@ fn presents(call: &str, file: &str, function: &str) -> bool {
                         | "set_count"
                         | "ensure_visible"
                         | "scroll_row"
+                        | "show_row_at"
                         | "insert_column"
                         | "set_header"
                         | "set_column_width"

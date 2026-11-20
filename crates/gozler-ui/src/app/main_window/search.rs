@@ -1,9 +1,9 @@
 use super::{
-    Button, ButtonIcon, Cell, Column, ColumnFit, ColumnSizing, CommandId, ControlId, CustomDraw,
-    DispInfo, Dpi, DrawAnswer, DrawStage, DropDownList, Edit, Entries, Hwnd, LRESULT, Label,
-    Layout, List, ListButton, ListCaption, ListNotify, ListView, MainWindow, MatchMode, Matching,
-    MeasuredColumn, MenuItem, Px, Range, Rect, RefCell, SELECTION_LIMIT, Selected, SortDir, Tool,
-    Toolbar, Tooltip, captions, clear_glyph, layout, measure_fits, win,
+    Button, ButtonIcon, Cell, Changed, Column, ColumnFit, ColumnSizing, CommandId, ControlId,
+    CustomDraw, DispInfo, Dpi, DrawAnswer, DrawStage, DropDownList, Edit, Entries, Hwnd, LRESULT,
+    Label, Layout, List, ListButton, ListCaption, ListNotify, ListView, MainWindow, MatchMode,
+    Matching, MeasuredColumn, MenuItem, Px, Range, Rect, RefCell, SELECTION_LIMIT, Selected,
+    SortDir, Tool, Toolbar, Tooltip, captions, clear_glyph, layout, measure_fits, win,
 };
 
 pub(super) struct Search {
@@ -428,8 +428,7 @@ impl Search {
 
     /// Formats a cell when the list asks for it, so a redraw shows the
     /// current language and regional format (DESIGN.md: window rule 12). This
-    /// block borrows the model while it formats, which makes no Win32 call; an
-    /// icon not asked for yet is looked up after the borrow ends.
+    /// block borrows the model while it formats, which makes no Win32 call.
     pub(super) fn fill_cell(&self, window: &MainWindow, info: &mut DispInfo) {
         let (text, icon) = {
             let model = window.model.borrow();
@@ -461,7 +460,7 @@ impl Search {
             info.set_text(self.list.fitting_text(info.column(), &text));
         }
         if info.wants_image() {
-            info.set_image(icon.map(|(name, is_folder)| window.icons.index(&name, is_folder)));
+            info.set_image(icon.and_then(|(name, is_folder)| window.item_icon(&name, is_folder)));
         }
         if info.wants_state() {
             let is_link = {
@@ -535,7 +534,7 @@ impl Search {
             (item.path[span].to_owned(), bold, icon)
         };
         let (text, bold, icon) = cell;
-        let icon = icon.map(|is_folder| window.icons.index(&text, is_folder));
+        let icon = icon.and_then(|is_folder| window.item_icon(&text, is_folder));
         let created = window.created();
         let fonts = created.fonts.borrow();
         draw.draw_cell(
@@ -546,6 +545,27 @@ impl Search {
             layout::cell_text_inset(column == 0, dpi),
         );
         DrawAnswer::Drawn
+    }
+
+    /// Has the list draw again its visible rows whose icon `changed` holds.
+    pub(super) fn redraw_icons(&self, window: &MainWindow, changed: &Changed) {
+        let visible = self.list.visible_rows();
+        let rows: Vec<u64> = {
+            let model = window.model.borrow();
+            let results = model.search_list().results();
+            visible
+                .filter(|&row| {
+                    results.row(row).is_some_and(|item| {
+                        let name = crate::core::text::path_part(Column::Name, &item.path);
+                        !item.is_gone()
+                            && name.is_some_and(|name| changed.shows(&item.path[name], item.is_dir))
+                    })
+                })
+                .collect()
+        };
+        for row in rows {
+            self.list.redraw_rows(row..row + 1);
+        }
     }
 
     /// Gives the focused row `Enter`, as `Enter` in the list does, or the

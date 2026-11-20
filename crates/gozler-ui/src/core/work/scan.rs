@@ -98,6 +98,7 @@ fn window_code_has_no_unowned_launcher_or_recognized_wait() {
                     "RegDeleteKeyValueW(",
                     "RegDeleteTreeW(",
                     "OpenClipboard(",
+                    "WM_COPY,",
                     "Shell_NotifyIconW(",
                     "folder_is_missing(",
                     "Queue::new(",

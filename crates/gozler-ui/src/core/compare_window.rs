@@ -5,7 +5,8 @@
 pub(crate) mod session;
 
 use super::commands::{Key, Keystroke, Mark, MenuNode};
-use super::compare::{LINE_COUNT_LIMIT, LINES_LIMIT, SHOWN_LIMIT};
+use super::compare::rtf::Style;
+use super::compare::{LINE_COUNT_LIMIT, LINES_LIMIT, SHOWN_LIMIT, Shown};
 use super::glyph::Glyph;
 use super::layout::{Dpi, Px, Rect, Size};
 use super::panel::Side;
@@ -637,6 +638,25 @@ pub(crate) fn encoding_text(strings: &Strings, side: Side, name: &str) -> String
 /// The text of a fold's row: "125 lines".
 pub(crate) fn fold_text(strings: &Strings, numbers: &dyn Numbers, hidden: u64) -> String {
     strings.count("compare.fold", hidden, numbers, &[])
+}
+
+/// A row of `side`'s line-number column for `shown`: the side's line number
+/// right-aligned in `digits`, or a blank in Hex, where `digits` is `None`
+/// because a hex row shows its offset; in red on the tint where the row
+/// differs, as a grey column where the side has no line, muted otherwise.
+pub(crate) fn number_row(shown: &Shown, side: Side, digits: Option<usize>) -> (String, Style) {
+    let line = shown.line(side);
+    let text = match (digits, line) {
+        (None, _) => " ".to_owned(),
+        (Some(digits), Some(line)) => format!(" {:>digits$} ", line + 1),
+        (Some(digits), None) => " ".repeat(digits + 2),
+    };
+    let style = match line {
+        None => Style::Gap,
+        Some(_) if shown.differs() => Style::Differs,
+        Some(_) => Style::Muted,
+    };
+    (text, style)
 }
 
 /// What the compare window's layout measures: the sizes of its controls

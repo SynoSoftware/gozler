@@ -17,7 +17,7 @@ use super::dialogs::{
     TransferMode, TransferStart,
 };
 use super::file_operations::{FileOperations, FilesSource};
-use super::icons::Icons;
+use super::icons::{Changed, Icons};
 use super::include::{Elevated, NotSaved};
 use super::settings::SettingsDialog;
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar, WorkId};
@@ -562,7 +562,7 @@ enum ModalStep {
     SettingsNotSaved(std::io::Error),
     WindowsShortcutFailed(std::io::Error),
     OpenSettings(Id, RegistryRead),
-    CopyFailed(Id, CopyFailure, ClipboardFormat),
+    CopyFailed(Id, CopyFailure, CommandId),
     Opened(ShellPurpose, crate::core::work::Id, Opened),
     PreparedPaths(PathPurpose, Id, PreparedPaths),
     Paired(crate::core::work::Id, LocalService, bool),
@@ -624,7 +624,7 @@ impl MainWindow {
             ending_session: Cell::new(false),
             show_message,
             reveal: RefCell::new(None),
-            icons: Icons::default(),
+            icons: Icons::new(),
             polling: Cell::new(false),
             update_revision: Cell::new(0),
             pending_refresh: Cell::new(Areas::NONE),
@@ -2026,12 +2026,12 @@ impl MainWindow {
                 CommandId::Copy => match focus {
                     Focus::SearchBox { .. } => {
                         self.cancel_copy(hwnd);
-                        return controls.search.row.input.copy();
+                        return self.copy_text(hwnd, controls.search.row.input.selected_text());
                     }
                     Focus::Value { .. } => {
                         self.cancel_copy(hwnd);
                         if let Some(value) = self.focused_value() {
-                            value.copy();
+                            self.copy_text(hwnd, value.selected_text());
                         }
                         return;
                     }
@@ -2523,18 +2523,11 @@ impl MainWindow {
                     );
                     self.error_box(hwnd, &text, "settings.title");
                 }
-                ModalStep::CopyFailed(id, failure, format) => {
+                ModalStep::CopyFailed(id, failure, command) => {
                     if !self.created().work.borrow().clipboard.is_current(id) {
                         continue;
                     }
                     let text = failure.message(self.model.borrow().strings());
-                    let command = match format {
-                        ClipboardFormat::Files => CommandId::Copy,
-                        ClipboardFormat::CutFiles => CommandId::Cut,
-                        ClipboardFormat::Paths => CommandId::CopyAsPath,
-                        ClipboardFormat::Names => CommandId::CopyName,
-                        ClipboardFormat::Folders => CommandId::CopyFolder,
-                    };
                     self.error_box(hwnd, &text, command.row().label);
                 }
                 ModalStep::PreparedPaths(purpose, id, prepared) => {
@@ -2776,6 +2769,32 @@ impl MainWindow {
         self.icons.link_arrow().filter(|_| is_link)
     }
 
+    /// The icon of an item named `name`, an index in the system image lists.
+    /// Wakes the window to look up an extension that no item showed before
+    /// (`Icons::index`).
+    fn item_icon(&self, name: &str, is_folder: bool) -> Option<i32> {
+        let index = self.icons.index(name, is_folder);
+        if self.icons.has_unknown() {
+            self.created().waker.deliver(|| true);
+        }
+        index
+    }
+
+    /// Has the lists that the mode shows draw again their visible rows
+    /// whose icon `changed` holds, and the inspector its entry's icon.
+    fn redraw_icons(&self, changed: &Changed) {
+        let mode = self.model.borrow().mode();
+        match mode {
+            Mode::Search => self.controls().search.redraw_icons(self, changed),
+            Mode::Commander => {
+                for side in Side::BOTH {
+                    self.controls().panels.redraw_icons(self, side, changed);
+                }
+            }
+        }
+        self.controls().inspector.update_inspector(self);
+    }
+
     /// Has the lists that the mode shows draw their visible rows again.
     fn redraw_shown_lists(&self) {
         let mode = self.model.borrow().mode();
@@ -2818,6 +2837,21 @@ impl MainWindow {
         if let Some(checked) = checked {
             self.icons.learn_links(checked);
             self.redraw_shown_lists();
+        }
+        // Rows showed extensions whose icons are not known yet.
+        let found = {
+            let unknown = self.icons.take_unknown();
+            let mut work = self.created().work.borrow_mut();
+            if !unknown.is_empty() {
+                work.icons.look_up(unknown);
+            }
+            work.icons.take()
+        };
+        if let Some(found) = found {
+            let changed = self.icons.learn_icons(found);
+            if !changed.is_empty() {
+                self.redraw_icons(&changed);
+            }
         }
         self.accept_told_selections(hwnd);
         if !self.update_live() {
@@ -2975,8 +3009,8 @@ impl MainWindow {
                 Timer::Clipboard.id(),
                 crate::core::clipboard::RETRY_AFTER.as_millis() as u32,
             ),
-            Some(CopyNotice::Failed(id, error, format)) => {
-                self.defer(hwnd, ModalStep::CopyFailed(id, error, format))
+            Some(CopyNotice::Failed(id, error, command)) => {
+                self.defer(hwnd, ModalStep::CopyFailed(id, error, command))
             }
             Some(CopyNotice::Finished) | None => {}
         }
@@ -3138,6 +3172,9 @@ impl MainWindow {
         }
         let polled = self.created().work.borrow_mut().tick(Instant::now());
         self.expire_hover(&polled.expired_hover);
+        if polled.expired_icons {
+            self.icons.forget_unanswered();
+        }
         for (purpose, generation) in polled.expired_requests {
             let accepted = self.model.borrow_mut().expire_request(purpose, generation);
             self.apply(hwnd, accepted);
@@ -3643,6 +3680,15 @@ impl MainWindow {
             .borrow_mut()
             .clipboard
             .copy(files, format);
+    }
+
+    /// Puts the text that an edit box selected on the clipboard, as
+    /// `Ctrl+C` does there; nothing happens while none is selected. The
+    /// window's thread only reads the selection (DESIGN.md: Copy).
+    pub(super) fn copy_text(&self, hwnd: Hwnd, text: Option<String>) {
+        let Some(text) = text else { return };
+        hwnd.kill_timer(Timer::Clipboard.id());
+        self.created().work.borrow_mut().clipboard.copy_text(text);
     }
 
     fn cancel_copy(&self, hwnd: Hwnd) {
@@ -4669,7 +4715,7 @@ impl MainWindow {
         match deselect {
             Deselect::Nothing => {}
             Deselect::All => control.deselect_all(),
-            Deselect::Taken => self.request_taken_deselection(list),
+            Deselect::Taken => self.request_taken_deselection(list, 0..u64::MAX),
         }
         control.redraw_visible();
     }

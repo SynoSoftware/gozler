@@ -2073,7 +2073,11 @@ impl<'a> SettingsDialog<'a> {
             dialog,
             DialogId::ServiceReport,
             &captions,
-            &ServiceReport { text },
+            &ServiceReport {
+                text,
+                main: self.main,
+                window: self.window,
+            },
         );
         // The service may have stopped while the report was open, which
         // disabled Show report, and Windows gives the focus back to it.

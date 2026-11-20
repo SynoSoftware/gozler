@@ -170,12 +170,10 @@ impl Inspector {
             .note
             .hwnd()
             .set_text(captions.note().unwrap_or(""));
-        // The shell call can dispatch messages, so no borrow is held
-        // (DESIGN.md: window rule 1).
         let icon = match &captions.inspected {
             Inspected::One {
                 name, is_folder, ..
-            } => Some(window.icons.index(name, *is_folder)),
+            } => window.item_icon(name, *is_folder),
             _ => None,
         };
         if !window.created().waker.while_open(|| {}) {

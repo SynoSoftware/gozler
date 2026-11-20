@@ -12,13 +12,14 @@ pub(crate) mod rtf;
 
 use super::open::Selected;
 use super::panel::Side;
+use super::viewer::find::{Query, cases};
 use super::viewer::{
     CodePage, CodePageText, Encoding, HEX_ROW_BYTES, byte_order_mark, chosen_encoding,
     decode_piece, detect_encoding, hex_columns, is_word,
 };
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 /// Lines are compared for files up to this many bytes; larger files are
 /// compared as Hex, which needs no memory for the file.
@@ -28,8 +29,9 @@ pub(crate) const LINES_LIMIT: u64 = 32 << 20;
 /// window memory of its own.
 pub(crate) const LINE_COUNT_LIMIT: usize = 1_000_000;
 
-/// Edit mode works for files up to this many bytes, because each edit
-/// reads a side's whole text back from its control.
+/// Edit mode works for files up to this many bytes, because an edit while
+/// the worker builds the rows copies the side's lines on the window's
+/// thread (issue #160).
 pub(crate) const EDIT_LIMIT: u64 = 4 << 20;
 
 /// The most rows that show: a RichEdit holds every row in memory and lays
@@ -1124,6 +1126,95 @@ fn insertion(shown: &[Shown], row: usize, side: Side) -> usize {
         .unwrap_or(0)
 }
 
+/// What Find looks for in the rows that show, matched as the Viewer's Find
+/// matches text: each character also in its other case unless the case
+/// must match, and with whole words, no word character next to a match.
+pub(crate) struct Needle {
+    /// The forms that match each character of the text.
+    chars: Vec<Vec<char>>,
+    whole_words: bool,
+}
+
+impl Needle {
+    /// `None` for an empty text, which nothing matches.
+    pub(crate) fn new(query: &Query) -> Option<Needle> {
+        let chars: Vec<Vec<char>> = (query.text.chars())
+            .map(|c| cases(c, query.match_case))
+            .collect();
+        (!chars.is_empty()).then_some(Needle {
+            chars,
+            whole_words: query.whole_words,
+        })
+    }
+
+    /// The match in `line` that Find selects: the first that starts at or
+    /// after `column`, or with `backward` the last that ends at or before
+    /// it. Columns count UTF-16 units, as the controls do.
+    pub(crate) fn find(&self, line: &str, column: usize, backward: bool) -> Option<Range<usize>> {
+        let mut found = None;
+        let mut start = 0;
+        let mut before = None;
+        for (byte, c) in line.char_indices() {
+            // A match that starts here ends after `column`.
+            if backward && start >= column {
+                break;
+            }
+            if (backward || start >= column)
+                && let Some(length) = self.match_at(&line[byte..], before)
+            {
+                let range = start..start + length;
+                if !backward {
+                    return Some(range);
+                }
+                if range.end <= column {
+                    found = Some(range);
+                }
+            }
+            start += c.len_utf16();
+            before = Some(c);
+        }
+        found
+    }
+
+    /// The UTF-16 length of a match at the start of `rest`, which follows
+    /// the character `before`.
+    fn match_at(&self, rest: &str, before: Option<char>) -> Option<usize> {
+        let mut chars = rest.chars();
+        let mut length = 0;
+        for forms in &self.chars {
+            let c = chars.next().filter(|c| forms.contains(c))?;
+            length += c.len_utf16();
+        }
+        if self.whole_words && (before.is_some_and(is_word) || chars.next().is_some_and(is_word)) {
+            return None;
+        }
+        Some(length)
+    }
+}
+
+/// The rows that Find reads, in order, from `side`'s `row` at `column`: to
+/// the end of that side, or with `backward` to its start, then the whole
+/// other side. Each comes with the column that a match starts at or after,
+/// or with `backward` ends at or before. Each side shows `rows` rows.
+pub(crate) fn find_order(
+    side: Side,
+    row: usize,
+    column: usize,
+    backward: bool,
+    rows: usize,
+) -> Box<dyn Iterator<Item = (Side, usize, usize)>> {
+    let other = side.other();
+    if backward {
+        let own = (0..rows.min(row + 1))
+            .rev()
+            .map(move |each| (side, each, if each == row { column } else { usize::MAX }));
+        Box::new(own.chain((0..rows).rev().map(move |each| (other, each, usize::MAX))))
+    } else {
+        let own = (row..rows).map(move |each| (side, each, if each == row { column } else { 0 }));
+        Box::new(own.chain((0..rows).map(move |each| (other, each, 0))))
+    }
+}
+
 /// One row of a pane in edit mode: a line of its file, an empty row facing
 /// the other file's line, or a fold of the file's lines.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1134,12 +1225,77 @@ enum PaneRow {
 }
 
 /// What one side's pane holds in edit mode, so that a change of the
-/// control's text can be read back as a change of the file's lines. The
-/// control separates rows with CR, as a RichEdit does.
+/// control's rows can be read back as a change of the file's lines.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Pane {
     rows: Vec<PaneRow>,
-    text: Vec<u16>,
+}
+
+/// The rows of a side's control that an edit changed, as the window reads
+/// them from the control, so that an edit reads only the rows it changed.
+/// The control separates rows with CR, as a RichEdit does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EditedRows {
+    /// The control's rows `first` through `last` hold the whole change.
+    pub(crate) first: usize,
+    pub(crate) last: usize,
+    /// The rows that the control holds after the edit.
+    pub(crate) count: usize,
+    /// The text of rows `first` through `last`.
+    pub(crate) text: Vec<u16>,
+    /// The caret, counted from the start of row `first`.
+    pub(crate) caret: usize,
+}
+
+impl EditedRows {
+    /// The rows of the `held` rows that the control held before the edit
+    /// that rows `first` through `last` replaced: the rows after them are
+    /// the same, moved by the rows the edit added or removed. The bounds
+    /// only guard against a control that held other rows.
+    pub(crate) fn replaced(&self, held: usize) -> RangeInclusive<usize> {
+        let end = held.max(1) - 1;
+        let first = self.first.min(end);
+        let last = (self.last + held)
+            .saturating_sub(self.count)
+            .clamp(first, end);
+        first..=last
+    }
+}
+
+#[cfg(test)]
+impl EditedRows {
+    /// The rows that changed when a control's text `old` became `new` with
+    /// the caret at `caret`, as the window finds them.
+    pub(crate) fn between(old: &[u16], new: &[u16], caret: usize) -> EditedRows {
+        const CR: u16 = 0x0D;
+        let caret = caret.min(new.len());
+        let shortest = old.len().min(new.len());
+        let prefix = (old.iter().zip(new))
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(caret);
+        let suffix = (old.iter().rev().zip(new.iter().rev()))
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(shortest - prefix)
+            .min(new.len() - caret);
+        let row_of = |at: usize| new[..at].iter().filter(|unit| **unit == CR).count();
+        let (first, last) = (row_of(prefix), row_of(new.len() - suffix));
+        let start = new[..prefix]
+            .iter()
+            .rposition(|unit| *unit == CR)
+            .map_or(0, |at| at + 1);
+        let end = (new[new.len() - suffix..].iter())
+            .position(|unit| *unit == CR)
+            .map_or(new.len(), |at| new.len() - suffix + at);
+        EditedRows {
+            first,
+            last,
+            count: row_of(new.len()) + 1,
+            text: new[start..end].to_vec(),
+            caret: caret - start,
+        }
+    }
 }
 
 /// Why an edit in a pane is taken back.
@@ -1154,8 +1310,8 @@ pub(crate) enum Refused {
 }
 
 impl Pane {
-    /// The pane of `side` for `shown`, whose control holds `text`.
-    pub(crate) fn new(shown: &[Shown], side: Side, text: Vec<u16>) -> Pane {
+    /// The pane of `side` for `shown`, which its control shows.
+    pub(crate) fn new(shown: &[Shown], side: Side) -> Pane {
         let index = |line: u64| usize::try_from(line).unwrap_or(usize::MAX);
         let mut rows: Vec<PaneRow> = shown
             .iter()
@@ -1176,13 +1332,7 @@ impl Pane {
         if rows.is_empty() {
             rows.push(PaneRow::Gap);
         }
-        Pane { rows, text }
-    }
-
-    /// The control's text, as the pane last read it.
-    #[cfg(test)]
-    pub(crate) fn text(&self) -> &[u16] {
-        &self.text
+        Pane { rows }
     }
 
     #[cfg(test)]
@@ -1190,75 +1340,31 @@ impl Pane {
         self.rows.len()
     }
 
-    /// Reads back the person's edit, after which the control holds `text`
-    /// with the caret at `caret`, as a change of `side`'s `lines`: the rows
-    /// around the caret that changed replace the lines they held. The
-    /// caret limits the part that changed, because the same text can come
-    /// from removing either of two equal rows. `Ok(None)` when neither a
-    /// line nor a row changed.
+    /// Reads back the person's edit, which changed the control's `edited`
+    /// rows, as a change of `side`'s `lines`: the rows that changed replace
+    /// the lines they held. `Ok(None)` when neither a line nor a row
+    /// changed.
     pub(crate) fn edited(
         &mut self,
         side: Side,
         lines: &[String],
-        text: Vec<u16>,
-        caret: usize,
+        edited: EditedRows,
     ) -> Result<Option<Change>, Refused> {
         const CR: u16 = 0x0D;
+        let (first, last) = edited.replaced(self.rows.len()).into_inner();
         // The control breaks a row at a vertical tab, which Shift+Enter
         // types, and at the other characters that `breaks_line` names, so
         // they end a line here too, and the sides' rows stay in line.
-        let text: Vec<u16> = (text.into_iter())
+        let new: Vec<u16> = (edited.text.into_iter())
             .map(|unit| match char::from_u32(u32::from(unit)) {
                 Some('\0') => 0xFFFD,
                 Some(c) if breaks_line(c) => CR,
                 _ => unit,
             })
             .collect();
-        let (old, new) = (&self.text, &text);
-        if old == new {
-            return Ok(None);
-        }
-        let shortest = old.len().min(new.len());
-        let caret = caret.min(new.len());
-        let prefix = old
-            .iter()
-            .zip(new)
-            .take_while(|(a, b)| a == b)
-            .count()
-            .min(caret);
-        let suffix = old
-            .iter()
-            .rev()
-            .zip(new.iter().rev())
-            .take_while(|(a, b)| a == b)
-            .count()
-            .min(shortest - prefix)
-            .min(new.len() - caret);
-        let old_end = old.len() - suffix;
-        let new_end = new.len() - suffix;
-        // A row is the number of line ends before it, counted without a list
-        // of every row's start, because this runs at each key.
-        let row_of = |position: usize| old[..position].iter().filter(|unit| **unit == CR).count();
-        // The control's rows are the pane's rows; the bound only guards
-        // against a control that holds others.
-        let end = self.rows.len() - 1;
-        let first = row_of(prefix).min(end);
-        let last = row_of(old_end).clamp(first, end);
-        let row_start = match first.checked_sub(1) {
-            None => 0,
-            Some(before) => (old.iter().enumerate())
-                .filter(|(_, unit)| **unit == CR)
-                .nth(before)
-                .map_or(old.len(), |(at, _)| at + 1),
-        };
-        let row_end = |text: &[u16], from: usize| {
-            text[from.min(text.len())..]
-                .iter()
-                .position(|unit| *unit == CR)
-                .map_or(text.len(), |at| from + at)
-        };
-        let new_region = &new[row_start.min(new.len())..row_end(new, new_end)];
-        let mut inserted: Vec<String> = new_region
+        let caret = edited.caret.min(new.len());
+        let first_row_end = new.iter().position(|unit| *unit == CR).unwrap_or(new.len());
+        let mut inserted: Vec<String> = new
             .split(|unit| *unit == CR)
             .map(String::from_utf16_lossy)
             .collect();
@@ -1282,7 +1388,7 @@ impl Pane {
             && !gap_after
             && inserted.len() > 1
             && empty(inserted.last())
-            && caret <= row_end(new, row_start)
+            && caret <= first_row_end
         {
             (gap_before, gap_after) = (false, true);
         }
@@ -1323,22 +1429,22 @@ impl Pane {
             if replaced != new_rows.as_slice() {
                 return Err(Refused::Gap);
             }
-            self.text = text;
             return Ok(None);
         }
         // The rows that replaced them hold the new lines, and the lines
         // after them moved.
         let moved = inserted.len() as isize - held.len() as isize;
         let shift = |line: usize| line.saturating_add_signed(moved);
-        for row in &mut self.rows[last + 1..] {
-            match row {
-                PaneRow::Line(line) => *line = shift(*line),
-                PaneRow::Fold(lines) => *lines = shift(lines.start)..shift(lines.end),
-                PaneRow::Gap => {}
+        if moved != 0 {
+            for row in &mut self.rows[last + 1..] {
+                match row {
+                    PaneRow::Line(line) => *line = shift(*line),
+                    PaneRow::Fold(lines) => *lines = shift(lines.start)..shift(lines.end),
+                    PaneRow::Gap => {}
+                }
             }
         }
         self.rows.splice(first..=last, new_rows);
-        self.text = text;
         Ok(Some(Change {
             side,
             at,
@@ -1638,6 +1744,30 @@ mod tests {
         assert_eq!(changed, inserted);
     }
 
+    /// Find selects the match the controls' positions name: columns count
+    /// UTF-16 units, Find previous takes the last match that ends before
+    /// the selection, and case and whole words follow the Viewer's Find.
+    #[test]
+    fn find_selects_matches_by_the_controls_columns() {
+        let query = |text: &str, match_case: bool, whole_words: bool| {
+            Needle::new(&Query {
+                text: text.to_owned(),
+                match_case,
+                whole_words,
+                hex: false,
+            })
+            .expect("a text to look for")
+        };
+        let line = "\u{1F600}Ab ab abc";
+        let any_case = query("ab", false, false);
+        assert_eq!(any_case.find(line, 0, false), Some(2..4));
+        assert_eq!(any_case.find(line, 3, false), Some(5..7));
+        assert_eq!(any_case.find(line, 7, true), Some(5..7));
+        assert_eq!(query("ab", true, false).find(line, 0, false), Some(5..7));
+        assert_eq!(query("ab", false, true).find(line, 5, false), Some(5..7));
+        assert_eq!(query("ab", false, true).find(line, 6, false), None);
+    }
+
     fn units(text: &str) -> Vec<u16> {
         text.encode_utf16().collect()
     }
@@ -1666,10 +1796,12 @@ mod tests {
             },
         ];
         let start = units("x\r\ry");
+        let rows =
+            |old: &[u16], new: &str, caret: usize| EditedRows::between(old, &units(new), caret);
         // Typing "a" in the empty row adds a line there.
-        let mut pane = Pane::new(&shown, Side::Left, start.clone());
+        let mut pane = Pane::new(&shown, Side::Left);
         let change = pane
-            .edited(Side::Left, &lines, units("x\ra\ry"), 3)
+            .edited(Side::Left, &lines, rows(&start, "x\ra\ry", 3))
             .expect("no fold");
         assert_eq!(
             change,
@@ -1682,20 +1814,22 @@ mod tests {
         );
         // Delete at the end of "x" joins the empty row, which changes no
         // line but the control's rows.
-        let mut pane = Pane::new(&shown, Side::Left, start.clone());
+        let mut pane = Pane::new(&shown, Side::Left);
         assert_eq!(
-            pane.edited(Side::Left, &lines, units("x\ry"), 1),
+            pane.edited(Side::Left, &lines, rows(&start, "x\ry", 1)),
             Err(Refused::Gap)
         );
         // Enter after "x" adds an empty line after it, and the empty row
         // stays below the caret's row, so typing and the next Enter change
         // that line and never "y" (reported defect).
-        let mut pane = Pane::new(&shown, Side::Left, start);
+        let mut pane = Pane::new(&shown, Side::Left);
+        let mut control = start;
         let mut edit = |lines: &[String], text: &str, caret: usize| {
             let change = pane
-                .edited(Side::Left, lines, units(text), caret)
+                .edited(Side::Left, lines, rows(&control, text, caret))
                 .expect("no fold")
                 .expect("a line changed");
+            control = units(text);
             (change.at, change.removed, change.inserted)
         };
         assert_eq!(edit(&lines, "x\r\r\ry", 2), (1, vec![], strings(&[""])));
@@ -1716,9 +1850,13 @@ mod tests {
             right: Some(0),
             differs: false,
         }];
-        let mut pane = Pane::new(&single, Side::Left, units("ab"));
+        let mut pane = Pane::new(&single, Side::Left);
         let change = pane
-            .edited(Side::Left, &strings(&["ab"]), units("a\u{0B}b"), 2)
+            .edited(
+                Side::Left,
+                &strings(&["ab"]),
+                rows(&units("ab"), "a\u{0B}b", 2),
+            )
             .expect("no fold")
             .expect("a line changed");
         assert_eq!((change.at, change.inserted), (0, strings(&["a", "b"])));

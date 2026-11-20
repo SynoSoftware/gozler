@@ -49,7 +49,7 @@ pub(crate) use counting::{Counted, Counting};
 use quick::Quick;
 pub(crate) use quick::{Finding, Found, QuickAction};
 use rows::{FolderRows, Name, name_hash, name_key, same_name};
-pub(crate) use rows::{give_indexed_sizes, give_sizes, sort_listing};
+pub(crate) use rows::{give_sizes, sort_listing};
 pub(crate) use selecting::{Selected, Selecting};
 
 const PENDING_ROWS: usize = 32;
@@ -64,7 +64,7 @@ const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
-pub(crate) fn size_query(folder: &str) -> Option<ChunkAsk> {
+fn size_query(folder: &str) -> Option<ChunkAsk> {
     let filters = Filters {
         location: Some(folder.to_owned()),
         only_directly: true,
@@ -491,8 +491,7 @@ pub(crate) struct ReadAsk {
     /// as for the shown folder and the saved one.
     pub(crate) nearest: bool,
     /// The panel's sort, which the reading thread sorts the listing by, so
-    /// a large folder is never sorted on the window's thread. Size order
-    /// asks for indexed folder sizes before publishing the listing.
+    /// a large folder is never sorted on the window's thread.
     pub(crate) sort: SortSpec,
     /// The folder sizes the panel knows, when it reads its shown folder
     /// again: the reading thread gives them to the listing before it sorts,
@@ -1347,7 +1346,7 @@ impl Panel {
         if matches!(update.kind, UpdatedKind::Listed { .. }) {
             self.folder.clone_from(&answer.folder);
             self.set_view(View::Folder);
-            self.sized = self.rows.order().key == SortKey::Size;
+            self.sized = false;
             self.read = None;
             self.saved = None;
             self.omitted_end = None;
@@ -4189,6 +4188,41 @@ pub(crate) mod tests {
 
         panels.apply_changes(Side::Left, vec![FolderChange::Added(folder("c"))], None);
         assert_eq!(names(&panels, Side::Left), ["..", "b", "a", "c", "f"]);
+    }
+
+    /// Going up in a panel sorted by Size shows the listing before gozlerd
+    /// gives its sizes (DESIGN.md: A panel, owner ruling): the folders by
+    /// name, the folder it came from focused, and no sum while the sizes are
+    /// asked. The sizes then sort the folders again, and the focus and the
+    /// selection stay on their entries.
+    #[test]
+    fn going_up_sorted_by_size_shows_the_listing_before_its_sizes() {
+        let mut panels = showing(r"C:\d\b", vec![file("x", 1, 0)]);
+        let sort = SortSpec {
+            key: SortKey::Size,
+            dir: SortDir::Desc,
+        };
+        let ask = panels.sort(Side::Left, sort).expect("a folder shows");
+        complete(&mut panels, &ask, r"C:\d\b", vec![file("x", 1, 0)]);
+        let ask = panels.go_up(Side::Left).expect("the folder has a parent");
+        let entries = vec![folder("a"), folder("b"), folder("c")];
+        let place = complete(&mut panels, &ask, r"C:\d", entries);
+        assert_eq!(names(&panels, Side::Left), ["..", "a", "b", "c"]);
+        assert_eq!(place.focused, Some(2));
+        panels.set_selected(Side::Left, vec![1..2].into());
+        panels.ask_sizes(Side::Left, Generation(6));
+        assert_eq!(panels.panel(Side::Left).counts().size, None);
+
+        give_sizes(
+            &mut panels,
+            &[(r"C:\d\a", 10), (r"C:\d\b", 5), (r"C:\d\c", 90)],
+        );
+        let update = panels
+            .take_update(Side::Left)
+            .expect("sizes and order publish together");
+        assert_eq!(names(&panels, Side::Left), ["..", "c", "a", "b"]);
+        assert_eq!(update.place.focused, Some(3));
+        assert_eq!(update.place.selected.as_ref(), &[2..3]);
     }
 
     /// Reading the shown folder again keeps the folder sizes the panel

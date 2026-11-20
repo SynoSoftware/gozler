@@ -7,19 +7,22 @@
 //! the worker of [`super::work::compare`] built.
 
 use super::dialogs::ViewerFind;
+use super::work::CopyNotice;
 pub(super) use super::work::compare::Source;
-use super::work::compare::{Job, Look, Options, Outcome, Progress, Saved, retire};
+use super::work::compare::{
+    Find, Found, Job, Look, Options, Outcome, Progress, Rendering, Saved, Searched, retire,
+};
 use crate::core::captions::{DialogCaptions, button_glyph};
 use crate::core::clipboard::folder_of;
-use crate::core::compare::rtf::{Rtf, Style};
-use crate::core::compare::{self, Chosen, Matching};
+use crate::core::compare::rtf::{self, Rtf, Style};
+use crate::core::compare::{self, Chosen, Matching, Needle};
 use crate::core::compare_window::session::{
     Answer, Caret, Effect, Event, Fresh, Request, RowOptions, SaveFile, SavedFile, Session, Settled,
 };
 use crate::core::compare_window::{
     CompareCommand, CompareKey, CompareSizes, DEFAULT_ZOOM, KeyFocus, MenuState, Note, compare_key,
     compare_layout, context_menu, differences_text, encoding_text, menu_bar, menu_states,
-    note_text, title, zoomed,
+    note_text, number_row, title, zoomed,
 };
 use crate::core::ids::{ControlId, DialogId, IconId};
 use crate::core::layout::{Px, Size, WHEEL_DELTA, image_button_width, status_last_part};
@@ -56,6 +59,8 @@ const PROGRESS_TIMER: usize = 2;
 /// Aligns the rows again once the person has stopped typing this long.
 const REALIGN_TIMER: usize = 3;
 const REALIGN_DELAY: u32 = 300;
+/// Tries the clipboard again while another program holds it.
+const CLIPBOARD_TIMER: usize = 4;
 /// The rows above a difference that going to it keeps in view.
 const CONTEXT_ROWS: usize = 3;
 /// The digits of the extra lines box: those of [`compare::MAX_EXTRA_LINES`].
@@ -483,8 +488,10 @@ struct Controls {
     progress: ProgressBar,
     /// Why no comparison shows, in the sides' place.
     message: Label,
-    sides: [RichText; 2],
-    numbers: [RichText; 2],
+    /// Each side's text and its line numbers. Swap sides swaps the
+    /// controls, which keep their text, so nothing streams again.
+    sides: Cell<[RichText; 2]>,
+    numbers: Cell<[RichText; 2]>,
     list: RichText,
     status: StatusBar,
     /// The tooltips of Next and Previous, which name their keys.
@@ -538,12 +545,20 @@ impl Controls {
             cancel,
             progress,
             message,
-            sides,
-            numbers,
+            sides: Cell::new(sides),
+            numbers: Cell::new(numbers),
             list,
             status,
             tips,
         })
+    }
+
+    fn sides(&self) -> [RichText; 2] {
+        self.sides.get()
+    }
+
+    fn numbers(&self) -> [RichText; 2] {
+        self.numbers.get()
     }
 
     /// The labels, the check boxes and the message, which show on the
@@ -563,10 +578,10 @@ impl Controls {
 
     fn rich(&self) -> [RichText; 5] {
         [
-            self.sides[0],
-            self.sides[1],
-            self.numbers[0],
-            self.numbers[1],
+            self.sides()[0],
+            self.sides()[1],
+            self.numbers()[0],
+            self.numbers()[1],
             self.list,
         ]
     }
@@ -575,7 +590,7 @@ impl Controls {
     fn side_of(&self, hwnd: Hwnd) -> Option<Side> {
         Side::BOTH
             .into_iter()
-            .find(|side| self.sides[side.index()].hwnd() == hwnd)
+            .find(|side| self.sides()[side.index()].hwnd() == hwnd)
     }
 }
 
@@ -623,6 +638,15 @@ struct CompareWindow {
     focused: Cell<Option<Hwnd>>,
     /// The side the person works in, which the commands act on.
     active: Cell<Side>,
+    /// The fingerprints of the rows that each side's control shows, which
+    /// the worker's rows patch (`rtf::patch`).
+    prints: RefCell<[Arc<Vec<u64>>; 2]>,
+    /// The rows of each side whose line numbers show the rows of now. The
+    /// line numbers show only around the rows in view, because inserting a
+    /// line numbers every row below it again.
+    numbered: Cell<[(usize, usize); 2]>,
+    /// The patches of the worker's rows, until the session shows them.
+    rendering: RefCell<Option<Rendering>>,
 }
 
 impl CompareWindow {
@@ -657,6 +681,9 @@ impl CompareWindow {
             zoom_wheel: Cell::new(0),
             focused: Cell::new(None),
             active: Cell::new(Side::Left),
+            prints: RefCell::new([Arc::default(), Arc::default()]),
+            numbered: Cell::new([(0, 0); 2]),
+            rendering: RefCell::new(None),
         }
     }
 
@@ -745,14 +772,11 @@ impl CompareWindow {
                     };
                     self.present(hwnd, place);
                 }
-                Effect::ReadPanes(fresh) => {
-                    if let Some(c) = self.controls() {
-                        let texts = c.sides.map(RichText::text);
-                        self.send(hwnd, Event::Panes { fresh, texts });
-                    }
-                }
                 Effect::Run(command, fresh) => self.run_command(hwnd, command, fresh),
-                Effect::Swapped => self.swap_boxes(),
+                Effect::Swapped => {
+                    self.swap_boxes();
+                    self.swap_sides(hwnd);
+                }
                 Effect::Ask(sides) => {
                     let answer = self.ask(hwnd, &sides);
                     self.send(hwnd, Event::Answered(answer));
@@ -874,7 +898,7 @@ impl CompareWindow {
     fn focus_target(&self) -> Option<Hwnd> {
         let c = self.controls()?;
         if self.session.borrow().showing().is_some() {
-            return Some(c.sides[self.active.get().index()].hwnd());
+            return Some(c.sides()[self.active.get().index()].hwnd());
         }
         let side = match self.notice.borrow().as_ref() {
             Some(Notice::Failed { side, .. }) => *side,
@@ -929,17 +953,23 @@ impl CompareWindow {
         self.settled.take().unwrap_or(Settled::Done)
     }
 
-    /// How the worker builds the rows of `rows`.
+    /// How the worker builds the rows of `rows`, as patches of the rows
+    /// that the sides show now.
     fn options(&self, rows: RowOptions) -> Options {
         Options {
             matching: rows.matching,
             only_differences: rows.only_differences,
-            look: Look {
-                palette: palette(),
-                font: rtf_font(),
-                strings: self.strings.borrow().clone(),
-                numbers: self.numbers.borrow().clone(),
-            },
+            look: self.look(),
+            shown: self.prints.borrow().clone(),
+        }
+    }
+
+    fn look(&self) -> Look {
+        Look {
+            palette: palette(),
+            font: rtf_font(),
+            strings: self.strings.borrow().clone(),
+            numbers: self.numbers.borrow().clone(),
         }
     }
 
@@ -1040,6 +1070,44 @@ impl CompareWindow {
         if let Some(saved) = saved {
             self.on_saved(hwnd, saved);
         }
+        if self.hwnd.get() != Some(hwnd) {
+            return;
+        }
+        let found = (self.work.borrow_mut().as_mut()).and_then(|work| work.take_found());
+        if let Some(found) = found {
+            self.on_found(hwnd, found);
+        }
+        let copied = self
+            .work
+            .borrow_mut()
+            .as_mut()
+            .and_then(|work| work.clipboard.take());
+        match copied {
+            Some(CopyNotice::Retry) => hwnd.set_timer(
+                CLIPBOARD_TIMER,
+                crate::core::clipboard::RETRY_AFTER.as_millis() as u32,
+            ),
+            Some(CopyNotice::Failed(_, failure, _)) => {
+                let (text, title) = {
+                    let strings = self.strings.borrow();
+                    (
+                        failure.message(&strings),
+                        strings.text("compare.window").to_owned(),
+                    )
+                };
+                error_box(self.main.or(Some(hwnd)), &text, &title);
+            }
+            Some(CopyNotice::Finished) | None => {}
+        }
+    }
+
+    /// Puts the text that a box selected on the clipboard; nothing happens
+    /// while none is selected. The window only reads the selection.
+    fn copy_text(&self, text: Option<String>) {
+        let Some(text) = text else { return };
+        if let Some(work) = self.work.borrow_mut().as_mut() {
+            work.clipboard.copy_text(text);
+        }
     }
 
     fn on_outcome(&self, hwnd: Hwnd, outcome: Outcome) {
@@ -1113,7 +1181,7 @@ impl CompareWindow {
             // Only a job that was cancelled or replaced returns it, and the
             // worker drops the outcome of such a job.
             Outcome::Cancelled => {}
-            Outcome::Compared(compared) => {
+            Outcome::Compared(compared, rendering) => {
                 if self.stage.replace(Stage::Shown) == Stage::First && compared.identical {
                     let names = [0, 1].map(|side| name_of(&compared.paths[side]));
                     let text = self
@@ -1129,44 +1197,162 @@ impl CompareWindow {
                     self.set_path(side, &compared.paths[side.index()]);
                 }
                 self.notice.replace(None);
+                // The session shows the rows, or drops them as stale, and
+                // the patches go with them.
+                self.rendering.replace(Some(rendering));
                 self.send(hwnd, Event::Compared(compared));
+                self.rendering.replace(None);
                 self.show_window(hwnd);
             }
-            Outcome::Realigned { generation, view } => {
+            Outcome::Realigned {
+                generation,
+                view,
+                rendering,
+            } => {
                 // Rows built again replace a rebuild that failed before.
                 self.notice.replace(None);
                 let place = self.capture_place();
+                self.rendering.replace(Some(rendering));
                 self.send_at(hwnd, Event::Realigned { generation, view }, place);
+                self.rendering.replace(None);
             }
         }
     }
 
-    /// Gives the controls the comparison's RTF and places the caret.
+    /// Streams the rows of the worker's patches that changed into the
+    /// sides, numbers the rows in view, and places the caret.
     fn present(&self, hwnd: Hwnd, place: Place) {
         let Some(c) = self.controls() else {
             return;
         };
-        {
-            let session = self.session.borrow();
-            let Some(showing) = session.showing() else {
-                return;
-            };
-            let view = showing.view();
-            for side in 0..2 {
-                c.sides[side].set_rtf(&view.sides[side]);
-                c.numbers[side].set_rtf(&view.numbers[side]);
+        let rows = match self.session.borrow().showing() {
+            Some(showing) => showing.view().rows.rows.len().max(1),
+            None => return,
+        };
+        // Swap sides gives no patches: the controls keep their rows.
+        let mut outdated = false;
+        if let Some(Rendering { patches, prints }) = self.rendering.take() {
+            for (side, patch) in Side::BOTH.into_iter().zip(patches) {
+                let control = c.sides()[side.index()];
+                if let Some(patch) = patch {
+                    let held = self.prints.borrow()[side.index()].len().max(1);
+                    if patch.rows.start == 0 && patch.rows.end >= held {
+                        control.set_rtf(&patch.rtf);
+                    } else {
+                        control.replace_rows(patch.rows, &patch.rtf);
+                    }
+                }
+            }
+            let prints = prints.map(Arc::new);
+            for side in Side::BOTH {
+                // A control that took a patch otherwise than it was built
+                // for holds other rows, so its rows stream again whole.
+                let control = c.sides()[side.index()];
+                if control.row_count() != prints[side.index()].len().max(1) {
+                    outdated = true;
+                }
+            }
+            self.prints.replace(prints);
+        }
+        if outdated {
+            for side in Side::BOTH {
+                self.forget_prints(side);
             }
         }
+        self.numbered.set([(0, 0); 2]);
+        self.size_numbers(rows);
         self.layout(hwnd);
         self.place(place);
         self.show_list();
+        if outdated {
+            self.send(hwnd, Event::Outdated);
+        }
+    }
+
+    /// `side`'s control holds rows that nobody knows, so the next rows
+    /// stream into it whole.
+    fn forget_prints(&self, side: Side) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let rows = c.sides()[side.index()].row_count();
+        self.prints.borrow_mut()[side.index()] = Arc::new(vec![rtf::UNKNOWN; rows]);
+    }
+
+    /// Gives each side's line numbers `rows` rows, as many as the side
+    /// shows, blank until [`Self::number_rows`] numbers the rows in view.
+    fn size_numbers(&self, rows: usize) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let (palette, font) = (palette(), rtf_font());
+        for numbers in c.numbers() {
+            let held = numbers.row_count();
+            if held == rows {
+                continue;
+            }
+            // The last row that stays, and those after it, give way to
+            // blank rows, because a patch replaces a row or more.
+            let kept = held.min(rows);
+            let mut blank = Rtf::new(&palette, font);
+            for _ in kept - 1..rows {
+                blank.row("", Style::Muted, &[]);
+            }
+            numbers.replace_rows(kept - 1..held, &blank.finish());
+        }
+    }
+
+    /// Numbers the rows of each side from a page above those in view to a
+    /// page below them, unless their line numbers show already.
+    fn number_rows(&self) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let page = {
+            let fonts = self.fonts.borrow();
+            let height = c.sides()[0].hwnd().client_size().height.0;
+            let row = fonts.as_ref().map_or(16, |fonts| fonts.row_height.0.max(1));
+            usize::try_from(height / row).unwrap_or(0) + 1
+        };
+        let mut numbered = self.numbered.get();
+        for side in Side::BOTH {
+            let first = c.sides()[side.index()].first_visible_row();
+            let (start, end) = numbered[side.index()];
+            if start <= first && first + page <= end {
+                continue;
+            }
+            let numbers = {
+                let session = self.session.borrow();
+                let Some(showing) = session.showing() else {
+                    return;
+                };
+                let rows = &showing.view().rows.rows;
+                let from = first.saturating_sub(page).min(rows.len());
+                let to = (first + 2 * page).min(rows.len());
+                let digits = (showing.mode() == Mode::Text).then(|| {
+                    let lines = showing.text(side).map_or(0, |text| text.lines.len());
+                    lines.max(1).to_string().len()
+                });
+                let mut rtf = Rtf::new(&palette(), rtf_font());
+                for row in &rows[from..to] {
+                    let (text, style) = number_row(row, side, digits);
+                    rtf.row(&text, style, &[]);
+                }
+                (from < to).then(|| (from..to, rtf.finish()))
+            };
+            if let Some((rows, rtf)) = numbers {
+                c.numbers()[side.index()].replace_rows(rows.clone(), &rtf);
+                numbered[side.index()] = (rows.start, rows.end);
+            }
+        }
+        self.numbered.set(numbered);
     }
 
     /// Where the caret is, which [`Self::place`] restores.
     fn capture_place(&self) -> Option<Place> {
         let c = self.controls()?;
         let side = self.active.get();
-        let control = c.sides[side.index()];
+        let control = c.sides()[side.index()];
         let caret = control.selection().start;
         let row = control.row_of(caret);
         let column = caret - control.row_start(row).unwrap_or(caret).min(caret);
@@ -1211,7 +1397,7 @@ impl CompareWindow {
                     });
                     found.unwrap_or(row).min(rows.len().saturating_sub(1))
                 };
-                let control = c.sides[side.index()];
+                let control = c.sides()[side.index()];
                 let start = control.row_start(new_row).unwrap_or(0);
                 let length = control.row_length(new_row);
                 control.select(start + column.min(length)..start + column.min(length));
@@ -1232,12 +1418,12 @@ impl CompareWindow {
         };
         let active = self.active.get();
         for side in [active.other(), active] {
-            let control = c.sides[side.index()];
+            let control = c.sides()[side.index()];
             if let Some(start) = control.row_start(row) {
                 control.select(start..start);
             }
         }
-        let control = c.sides[active.index()];
+        let control = c.sides()[active.index()];
         let top = row.saturating_sub(CONTEXT_ROWS);
         control.scroll_rows(top as isize - control.first_visible_row() as isize);
         control.set_scroll_position((0, control.scroll_position().1));
@@ -1245,20 +1431,22 @@ impl CompareWindow {
         self.show_list();
     }
 
-    /// Scrolls the other side and both line numbers to `side`'s place.
+    /// Scrolls the other side and both line numbers to `side`'s place, and
+    /// numbers the rows that come into view.
     fn sync_from(&self, side: Side) {
         let Some(c) = self.controls() else {
             return;
         };
         let other = side.other();
-        let position = c.sides[side.index()].scroll_position();
-        c.sides[other.index()].set_scroll_position(position);
+        let position = c.sides()[side.index()].scroll_position();
+        c.sides()[other.index()].set_scroll_position(position);
         let mut positions = [(0, 0); 2];
         positions[side.index()] = position;
-        positions[other.index()] = c.sides[other.index()].scroll_position();
+        positions[other.index()] = c.sides()[other.index()].scroll_position();
+        self.number_rows();
         for each in Side::BOTH {
             let y = positions[each.index()].1;
-            c.numbers[each.index()].set_scroll_position((0, y));
+            c.numbers()[each.index()].set_scroll_position((0, y));
         }
         self.scroll.set(positions);
     }
@@ -1268,7 +1456,7 @@ impl CompareWindow {
         let Some(c) = self.controls() else {
             return;
         };
-        let now = c.sides.map(RichText::scroll_position);
+        let now = c.sides().map(RichText::scroll_position);
         let last = self.scroll.get();
         if now == last {
             return;
@@ -1471,9 +1659,9 @@ impl CompareWindow {
         if !self.state.get().two_line_list {
             return;
         }
-        let side = c.sides[self.active.get().index()];
+        let side = c.sides()[self.active.get().index()];
         let row = side.row_of(side.selection().start);
-        let texts = c.sides.map(|side| side.row_text(row));
+        let texts = c.sides().map(|side| side.row_text(row));
         let marks = self.row_marks(row, &texts);
         let mut rtf = Rtf::new(&palette(), rtf_font());
         for index in 0..2 {
@@ -1615,20 +1803,20 @@ impl CompareWindow {
                 (c.progress.hwnd(), layout.progress),
                 (c.cancel.hwnd(), layout.cancel),
                 (c.message.hwnd(), layout.message),
-                (c.sides[0].hwnd(), layout.sides[0]),
-                (c.sides[1].hwnd(), layout.sides[1]),
-                (c.numbers[0].hwnd(), layout.numbers[0]),
-                (c.numbers[1].hwnd(), layout.numbers[1]),
+                (c.sides()[0].hwnd(), layout.sides[0]),
+                (c.sides()[1].hwnd(), layout.sides[1]),
+                (c.numbers()[0].hwnd(), layout.numbers[0]),
+                (c.numbers()[1].hwnd(), layout.numbers[1]),
                 (c.list.hwnd(), layout.list),
             ],
             &[
                 (c.progress.hwnd(), running),
                 (c.cancel.hwnd(), running),
                 (c.message.hwnd(), message),
-                (c.sides[0].hwnd(), !message),
-                (c.sides[1].hwnd(), !message),
-                (c.numbers[0].hwnd(), !message),
-                (c.numbers[1].hwnd(), !message),
+                (c.sides()[0].hwnd(), !message),
+                (c.sides()[1].hwnd(), !message),
+                (c.numbers()[0].hwnd(), !message),
+                (c.numbers()[1].hwnd(), !message),
                 (c.list.hwnd(), state.two_line_list && !message),
             ],
         );
@@ -1668,11 +1856,12 @@ impl CompareWindow {
             Side::BOTH.map(|side| session.typing(side))
         };
         for side in Side::BOTH {
-            c.sides[side.index()].set_read_only(!typing[side.index()]);
+            c.sides()[side.index()].set_read_only(!typing[side.index()]);
         }
     }
 
-    /// The person typed, pasted or deleted in `side`.
+    /// The person typed, pasted or deleted in `side`: the window reads
+    /// only the rows that the edit changed.
     fn on_edited(&self, hwnd: Hwnd, side: Side) {
         let Some(c) = self.controls() else {
             return;
@@ -1680,9 +1869,26 @@ impl CompareWindow {
         if !self.session.borrow().typing(side) {
             return;
         }
-        let control = c.sides[side.index()];
-        let (text, caret) = (control.text(), control.selection().start);
-        self.send(hwnd, Event::Edited { side, text, caret });
+        let event = match c.sides()[side.index()].edited_rows() {
+            Some(rows) => {
+                let mut prints = self.prints.borrow_mut();
+                let prints = Arc::make_mut(&mut prints[side.index()]);
+                if prints.is_empty() {
+                    prints.push(rtf::UNKNOWN);
+                }
+                let replaced = rows.replaced(prints.len());
+                let typed = std::iter::repeat_n(rtf::UNKNOWN, rows.last - rows.first + 1);
+                prints.splice(replaced, typed);
+                Event::Edited { side, rows }
+            }
+            // A change that the window could not read takes the edit back:
+            // the side shows its lines again, streamed whole.
+            None => {
+                self.forget_prints(side);
+                Event::Outdated
+            }
+        };
+        self.send(hwnd, event);
         self.show_list();
     }
 
@@ -1699,6 +1905,8 @@ impl CompareWindow {
             C::PreviousDifference => self.go_to_difference(false),
             C::NextInLine => self.go_to_mark(true),
             C::PreviousInLine => self.go_to_mark(false),
+            C::FindNext => self.find(false, fresh),
+            C::FindPrevious => self.find(true, fresh),
             _ => {}
         }
     }
@@ -1709,7 +1917,7 @@ impl CompareWindow {
         let Some(c) = self.controls() else {
             return;
         };
-        let control = c.sides[self.active.get().index()];
+        let control = c.sides()[self.active.get().index()];
         let selection = control.selection();
         let first = control.row_of(selection.start);
         let rows = if selection.is_empty() {
@@ -1728,7 +1936,7 @@ impl CompareWindow {
         let Some(c) = self.controls() else {
             return;
         };
-        let rows = c.sides.map(|side| side.row_of(side.selection().start));
+        let rows = c.sides().map(|side| side.row_of(side.selection().start));
         self.send(hwnd, Event::Resync { fresh, rows });
     }
 
@@ -1753,7 +1961,7 @@ impl CompareWindow {
         let Some(c) = self.controls() else {
             return 0;
         };
-        let control = c.sides[self.active.get().index()];
+        let control = c.sides()[self.active.get().index()];
         control.row_of(control.selection().start)
     }
 
@@ -1764,7 +1972,7 @@ impl CompareWindow {
             return;
         };
         let side = self.active.get();
-        let control = c.sides[side.index()];
+        let control = c.sides()[side.index()];
         let selection = control.selection();
         let row = control.row_of(selection.start);
         let column = selection.start - control.row_start(row).unwrap_or(0).min(selection.start);
@@ -1786,7 +1994,7 @@ impl CompareWindow {
             if !differs {
                 return Vec::new();
             }
-            let texts = c.sides.map(|side| side.row_text(row));
+            let texts = c.sides().map(|side| side.row_text(row));
             let [left, right] = self.row_marks(row, &texts);
             match side {
                 Side::Left => left,
@@ -1830,7 +2038,7 @@ impl CompareWindow {
     fn focused_text(&self) -> Option<RichText> {
         let c = self.controls()?;
         let focused = Hwnd::focused()?;
-        [c.sides[0], c.sides[1], c.list]
+        [c.sides()[0], c.sides()[1], c.list]
             .into_iter()
             .find(|control| control.hwnd() == focused)
     }
@@ -1840,7 +2048,7 @@ impl CompareWindow {
         let Some(c) = self.controls() else {
             return KeyFocus::Other;
         };
-        if [c.sides[0], c.sides[1], c.list]
+        if [c.sides()[0], c.sides()[1], c.list]
             .iter()
             .any(|control| control.hwnd() == target)
         {
@@ -1869,7 +2077,7 @@ impl CompareWindow {
             }
             CompareKey::Command(command) => self.on_command(hwnd, command),
             CompareKey::SelectLine => {
-                if let Some(control) = [c.sides[0], c.sides[1], c.list]
+                if let Some(control) = [c.sides()[0], c.sides()[1], c.list]
                     .into_iter()
                     .find(|control| control.hwnd() == target)
                 {
@@ -1880,7 +2088,7 @@ impl CompareWindow {
                 }
             }
             CompareKey::NextPane { forward } => {
-                let mut panes = vec![c.sides[0].hwnd(), c.sides[1].hwnd()];
+                let mut panes = vec![c.sides()[0].hwnd(), c.sides()[1].hwnd()];
                 if self.state.get().two_line_list {
                     panes.push(c.list.hwnd());
                 }
@@ -1901,20 +2109,20 @@ impl CompareWindow {
         let Some(c) = self.controls() else {
             return;
         };
-        let active = c.sides[self.active.get().index()];
+        let active = c.sides()[self.active.get().index()];
         match command {
             C::Compare => self.compare_boxes(hwnd),
             C::Save => self.send(hwnd, Event::Save),
             C::Close => self.close(hwnd),
             C::Undo => self.send(hwnd, Event::Undo),
             C::Copy => match self.focused_text() {
-                Some(control) => control.copy(),
+                Some(control) => self.copy_text(control.selected_text()),
                 None => {
                     if let Some(edit) = [c.paths[0], c.paths[1], c.extra]
                         .into_iter()
                         .find(|edit| Some(edit.hwnd()) == Hwnd::focused())
                     {
-                        edit.copy();
+                        self.copy_text(edit.selected_text());
                     }
                 }
             },
@@ -1924,18 +2132,16 @@ impl CompareWindow {
                 }
             }
             C::SelectAll => self.focused_text().unwrap_or(active).select_all(),
+            // Find reads the rows, so it waits for those of the latest edit;
+            // it looks for the query that the dialog keeps.
             C::Find => {
-                if let Some(query) = self.ask_query(hwnd) {
-                    self.find(hwnd, &query, false);
+                if self.ask_query(hwnd).is_some() {
+                    self.send(hwnd, Event::Command(C::FindNext));
                 }
             }
             C::FindNext | C::FindPrevious => {
-                let last = self
-                    .shared
-                    .upgrade()
-                    .and_then(|shared| shared.query.borrow().clone());
-                if let Some(query) = last.or_else(|| self.ask_query(hwnd)) {
-                    self.find(hwnd, &query, command == C::FindPrevious);
+                if self.last_query().is_some() || self.ask_query(hwnd).is_some() {
+                    self.send(hwnd, Event::Command(command));
                 }
             }
             C::EditMode
@@ -2027,6 +2233,24 @@ impl CompareWindow {
         for side in Side::BOTH {
             self.set_path(side, &texts[side.other().index()]);
         }
+    }
+
+    /// The sides' controls follow the files with the rows they show, so
+    /// Swap sides streams nothing.
+    fn swap_sides(&self, hwnd: Hwnd) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let [left, right] = c.sides();
+        c.sides.set([right, left]);
+        let [left, right] = c.numbers();
+        c.numbers.set([right, left]);
+        self.prints.borrow_mut().swap(0, 1);
+        let [left, right] = self.numbered.get();
+        self.numbered.set([right, left]);
+        let [left, right] = self.scroll.get();
+        self.scroll.set([right, left]);
+        self.layout(hwnd);
     }
 
     /// Shows the text at `zoom` percent, which the next window opens with.
@@ -2252,53 +2476,98 @@ impl CompareWindow {
         Some(query)
     }
 
-    /// Looks for `query` from the selection of the side with the caret,
-    /// then in the other side.
-    fn find(&self, hwnd: Hwnd, query: &Query, backward: bool) {
+    /// The query that Find looked for last, in any compare window.
+    fn last_query(&self) -> Option<Query> {
+        (self.shared.upgrade()).and_then(|shared| shared.query.borrow().clone())
+    }
+
+    /// Find next, or with `backward` Find previous: the worker looks for
+    /// the last query from the selection of the side with the caret, then
+    /// in the other side, through the rows that `fresh` proves.
+    fn find(&self, backward: bool, fresh: Fresh) {
         let Some(c) = self.controls() else {
             return;
         };
+        let Some(needle) = self.last_query().as_ref().and_then(Needle::new) else {
+            return;
+        };
         let side = self.active.get();
-        let control = c.sides[side.index()];
+        let control = c.sides()[side.index()];
         let selection = control.selection();
-        let from = if backward {
+        let at = if backward {
             selection.start
         } else {
             selection.end
         };
-        let search = |control: RichText, from: usize| {
-            control.find(
-                &query.text,
-                from,
+        let row = control.row_of(at);
+        let column = at - control.row_start(row).unwrap_or(0).min(at);
+        let look = self.look();
+        let find = {
+            let session = self.session.borrow();
+            let Some(showing) = session.showing() else {
+                return;
+            };
+            let searched = match showing.texts() {
+                Some(texts) => Searched::Text(texts.clone()),
+                None => Searched::Hex {
+                    paths: showing.paths().clone(),
+                    sizes: showing.sizes(),
+                },
+            };
+            Find {
+                needle,
                 backward,
-                query.match_case,
-                query.whole_words,
-            )
+                side,
+                row,
+                column,
+                rows: Arc::clone(&showing.view().rows),
+                searched,
+                look,
+                fresh,
+            }
         };
-        let other = c.sides[side.other().index()];
-        let other_from = if backward { other.length() } else { 0 };
-        let found = search(control, from)
-            .map(|range| (side, range))
-            .or_else(|| search(other, other_from).map(|range| (side.other(), range)));
+        if let Some(work) = self.work.borrow_mut().as_mut() {
+            work.find(find);
+        }
+    }
+
+    /// Selects the match that the worker's Find found, or says why none.
+    /// A match in rows that changed meanwhile shows nothing, because it was
+    /// found in other text.
+    fn on_found(&self, hwnd: Hwnd, found: Found) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let title = self.strings.borrow().text("viewer.find_title").to_owned();
         match found {
-            Some((side, range)) => {
-                let control = c.sides[side.index()];
+            Found::Match {
+                fresh,
+                side,
+                row,
+                columns,
+            } => {
+                if !self.session.borrow().holds(&fresh) {
+                    return;
+                }
+                let control = c.sides()[side.index()];
+                let start = control.row_start(row).unwrap_or(0);
                 self.active.set(side);
                 control.hwnd().focus();
-                control.select(range);
+                control.select(start + columns.start..start + columns.end);
                 self.sync_from(side);
                 self.show_list();
             }
-            None => {
-                let (text, title) = {
-                    let strings = self.strings.borrow();
-                    (
-                        strings.format("viewer.not_found", &[&query.text]),
-                        strings.text("viewer.find_title").to_owned(),
-                    )
-                };
+            Found::Nothing => {
+                let query = self.last_query().unwrap_or_default();
+                let text = (self.strings.borrow()).format("viewer.not_found", &[&query.text]);
                 info_box(hwnd, &text, &title);
             }
+            Found::Failed { path, error } => {
+                let (name, reason) = (name_of(&path), win::error_text(&error));
+                let text = (self.strings.borrow()).format("viewer.cannot_read", &[&name, &reason]);
+                error_box(Some(hwnd), &text, &title);
+            }
+            Found::Cancelled => {}
         }
     }
 
@@ -2345,7 +2614,7 @@ impl CompareWindow {
         let Some(c) = self.controls() else {
             return;
         };
-        let side = c.sides[self.active.get().index()];
+        let side = c.sides()[self.active.get().index()];
         let corner = side.hwnd().screen_rect();
         let point = point.unwrap_or((corner.x.0 + 16, corner.y.0 + 16));
         let nodes = context_menu(&self.strings.borrow());
@@ -2388,7 +2657,7 @@ impl CompareWindow {
         let Some(c) = self.controls() else {
             return;
         };
-        let right = c.sides[1].hwnd().rect_in(hwnd);
+        let right = c.sides()[1].hwnd().rect_in(hwnd);
         let fell_right = if self.state.get().above_each_other {
             point.1 >= right.y.0
         } else {
@@ -2431,7 +2700,7 @@ impl CompareWindow {
             return;
         };
         for side in Side::BOTH {
-            if c.sides[side.index()].changed(event) {
+            if c.sides()[side.index()].changed(event) {
                 return self.on_edited(hwnd, side);
             }
             if c.browse[side.index()].clicked(event) {
@@ -2524,7 +2793,7 @@ impl WindowProc for CompareWindow {
                 let c = self.controls()?;
                 let side = Side::BOTH
                     .into_iter()
-                    .find(|side| c.sides[side.index()].selection_changed(&notification))?;
+                    .find(|side| c.sides()[side.index()].selection_changed(&notification))?;
                 self.active.set(side);
                 self.show_list();
                 // "Difference 2 of 3", Next and Previous follow the caret.
@@ -2558,6 +2827,18 @@ impl WindowProc for CompareWindow {
                 let (done, total) = self.progress.borrow().read();
                 if let Some(c) = self.controls() {
                     c.progress.set_measured(done, total);
+                }
+                Some(LRESULT(0))
+            }
+            Message::Timer(CLIPBOARD_TIMER) => {
+                hwnd.kill_timer(CLIPBOARD_TIMER);
+                let left = self
+                    .work
+                    .borrow_mut()
+                    .as_mut()
+                    .and_then(|work| work.clipboard.retry());
+                if let Some(left) = left {
+                    hwnd.set_timer(CLIPBOARD_TIMER, left.as_millis().max(1) as u32);
                 }
                 Some(LRESULT(0))
             }
@@ -2662,7 +2943,7 @@ impl WindowProc for CompareWindow {
             Message::Destroy => {
                 self.remember_placement(hwnd);
                 self.hwnd.set(None);
-                for timer in [SHOW_TIMER, PROGRESS_TIMER, REALIGN_TIMER] {
+                for timer in [SHOW_TIMER, PROGRESS_TIMER, REALIGN_TIMER, CLIPBOARD_TIMER] {
                     hwnd.kill_timer(timer);
                 }
                 if let Some(waker) = self.waker.get() {

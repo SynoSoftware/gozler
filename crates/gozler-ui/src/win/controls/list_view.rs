@@ -16,7 +16,7 @@ use windows::Win32::UI::Controls::{
     LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNW, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
     LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM,
     LVM_GETSELECTEDCOUNT, LVM_GETSELECTIONMARK, LVM_GETSTRINGWIDTHW, LVM_GETTOPINDEX, LVM_HITTEST,
-    LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY,
+    LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SCROLL, LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY,
     LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
     LVM_SETITEMCOUNT, LVM_SETITEMSTATE, LVM_SETSELECTIONMARK, LVN_BEGINDRAG, LVN_ITEMACTIVATE,
     LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP,
@@ -492,6 +492,28 @@ impl ListView {
         crate::win::present::scroll_now(self.0, || send(self.0, WM_VSCROLL, code.0 as usize, 0));
     }
 
+    /// Scrolls the list so that `row` shows `offset` rows below its top
+    /// row, as far as the rows reach.
+    pub(crate) fn show_row_at(self, row: u64, offset: u64) {
+        let wanted = row.saturating_sub(offset);
+        let top = self.whole_rows().start;
+        if wanted == top {
+            return;
+        }
+        let mut rect = RECT {
+            left: LVIR_BOUNDS as i32,
+            ..RECT::default()
+        };
+        // SAFETY: `rect` is a local that the list reads the part from and
+        // fills in; a list without rows fails, and nothing scrolls.
+        if unsafe { send_pointer(self.0, LVM_GETITEMRECT, 0, &raw mut rect) } == 0 {
+            return;
+        }
+        // In report view the list scrolls by pixels, rounded to whole rows.
+        let pixels = (wanted as isize - top as isize) * (rect.bottom - rect.top) as isize;
+        crate::win::present::scroll_now(self.0, || send(self.0, LVM_SCROLL, 0, pixels));
+    }
+
     /// Takes the focus for the row the person left in this list of `count`
     /// rows: the focused row, else the first selected one, else the first
     /// row. Only the focus moves there; the selection stays as the person
@@ -687,32 +709,6 @@ unsafe extern "system" fn cursor_mouse(
         // SAFETY: the point is local and the message targets this live control.
         let _ = unsafe { ClientToScreen(hwnd, &mut screen) };
         let list = ListView(Hwnd(hwnd));
-        list.hwnd().focus();
-        list.hwnd().parent().show_focus_cues();
-        // As Total Commander's left mouse button: a row that is not
-        // selected becomes the focused row alone, which commands act on; a
-        // selected row keeps the selection for a drag, and without one it
-        // stays selected alone.
-        let selected = row.is_some_and(|row| list.row_state(row).1);
-        if let Some(row) = row {
-            list.set_focused(Some(row));
-        }
-        // SAFETY: Windows tracks the gesture using its system drag threshold.
-        let drag = row.is_some()
-            && message == WM_LBUTTONDOWN
-            && unsafe { DragDetect(hwnd, screen) }.as_bool();
-        // Drag tracking dispatches messages, including destruction of the list.
-        // SAFETY: IsWindow accepts a handle that may have been destroyed.
-        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-            return LRESULT(0);
-        }
-        // SAFETY: the control is still live on its owning thread.
-        let id = unsafe { GetDlgCtrlID(hwnd) } as usize;
-        let hdr = NMHDR {
-            hwndFrom: hwnd,
-            idFrom: id,
-            code: if drag {
-                LVN_BEGINDRAG
         let row = list.row_at((screen.x, screen.y));
         // Windows toggles the row and selects Shift's range. While nothing
         // is selected, the focused row is the selection, so Ctrl adds the
@@ -729,13 +725,47 @@ unsafe extern "system" fn cursor_mouse(
             // SAFETY: the original parameters are forwarded unchanged.
             return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
         }
+        list.hwnd().focus();
+        list.hwnd().parent().show_focus_cues();
+        // As Total Commander's left mouse button: a row that is not
+        // selected becomes the focused row alone, which commands act on; a
+        // selected row keeps the selection for a drag, and without one it
+        // stays selected alone.
+        let selected = row.is_some_and(|row| list.row_state(row).1);
+        if let Some(row) = row {
+            if !selected && list.selected_count() > 0 {
+                list.deselect_all();
+            }
+            list.set_focused(Some(row));
+        }
+        // SAFETY: Windows tracks the gesture using its system drag threshold.
+        let drag = row.is_some()
+            && message == WM_LBUTTONDOWN
+            && unsafe { DragDetect(hwnd, screen) }.as_bool();
+        // Drag tracking dispatches messages, including destruction of the list.
+        // SAFETY: IsWindow accepts a handle that may have been destroyed.
+        if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+            return LRESULT(0);
+        }
+        if let Some(row) = row
+            && selected
+            && !drag
+            && list.selected_count() > 1
+        {
+            list.deselect_all();
+            list.select(row, true);
+        }
+        // SAFETY: the control is still live on its owning thread.
+        let id = unsafe { GetDlgCtrlID(hwnd) } as usize;
+        let hdr = NMHDR {
+            hwndFrom: hwnd,
+            idFrom: id,
+            code: if drag {
+                LVN_BEGINDRAG
             } else if message == WM_LBUTTONDBLCLK && row.is_some() {
                 LVN_ITEMACTIVATE
             } else {
                 NM_CLICK
-            if !selected && list.selected_count() > 0 {
-                list.deselect_all();
-            }
             },
         };
         if drag {
@@ -747,14 +777,6 @@ unsafe extern "system" fn cursor_mouse(
             };
             // SAFETY: the notification outlives the synchronous WM_NOTIFY.
             unsafe {
-        if let Some(row) = row
-            && selected
-            && !drag
-            && list.selected_count() > 1
-        {
-            list.deselect_all();
-            list.select(row, true);
-        }
                 send_pointer(list.hwnd().parent(), WM_NOTIFY, id, &raw const notification);
             }
         } else {

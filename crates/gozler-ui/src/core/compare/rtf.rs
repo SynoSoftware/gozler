@@ -3,11 +3,13 @@
 //! colours of the marks (DESIGN.md: Compare by content). Building it takes
 //! the rows and the colours, so the window's worker builds a large one.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 /// A colour as its red, green and blue.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Rgb(pub(crate) u8, pub(crate) u8, pub(crate) u8);
 
 impl Rgb {
@@ -27,7 +29,7 @@ impl Rgb {
 
 /// The colours of a comparison, which the window takes from the system's
 /// colours of now, high contrast included.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Palette {
     pub(crate) text: Rgb,
     pub(crate) muted: Rgb,
@@ -43,7 +45,7 @@ pub(crate) struct Palette {
 
 /// The font: its height in half points, and the width of eight of its
 /// characters in twips, where a tab stops.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Font {
     pub(crate) half_points: u32,
     pub(crate) tab_twips: u32,
@@ -109,63 +111,154 @@ impl Rtf {
     /// Adds a row whose text shows as `style`, with the UTF-16 units in
     /// `marks` as [`Style::Mark`].
     pub(crate) fn row(&mut self, text: &str, style: Style, marks: &[Range<usize>]) {
+        self.push(&row_rtf(text, style, marks));
+    }
+
+    /// Adds a row that [`row_rtf`] wrote.
+    pub(crate) fn push(&mut self, row: &str) {
         if self.rows > 0 {
             self.text.push_str("\\par\n");
         }
         self.rows += 1;
-        let mut marks = marks.iter().peekable();
-        let mut unit = 0;
-        let mut run = String::new();
-        let mut run_style = style;
-        for c in text.chars() {
-            while marks.next_if(|mark| mark.end <= unit).is_some() {}
-            let marked = marks.peek().is_some_and(|mark| mark.start <= unit);
-            let wanted = if marked { Style::Mark } else { style };
-            if wanted != run_style {
-                self.push_run(&run, run_style);
-                run.clear();
-                run_style = wanted;
-            }
-            run.push(c);
-            unit += c.len_utf16();
-        }
-        self.push_run(&run, run_style);
+        self.text.push_str(row);
     }
 
-    fn push_run(&mut self, run: &str, style: Style) {
-        if run.is_empty() {
-            return;
-        }
-        let plain = style == Style::Text;
-        if !plain {
-            let (text, back) = style.colours();
-            let _ = write!(self.text, r"{{\cf{text}\highlight{back} ");
-        }
-        for c in run.chars() {
-            match c {
-                '\\' => self.text.push_str(r"\\"),
-                '{' => self.text.push_str(r"\{"),
-                '}' => self.text.push_str(r"\}"),
-                '\t' => self.text.push_str(r"\tab "),
-                ' '..='~' => self.text.push(c),
-                _ => {
-                    let mut units = [0; 2];
-                    for unit in c.encode_utf16(&mut units) {
-                        // RTF writes a code unit as a signed 16-bit number.
-                        let _ = write!(self.text, r"\u{}?", *unit as i16);
-                    }
-                }
-            }
-        }
-        if !plain {
-            self.text.push('}');
-        }
-    }
-
+    /// The document, which ends without a paragraph mark, so it replaces
+    /// a control's rows with as many rows as it holds.
     pub(crate) fn finish(mut self) -> String {
         self.text.push('}');
         self.text
     }
+}
+
+/// A row's RTF without the document around it: its text as `style`, with
+/// the UTF-16 units in `marks` as [`Style::Mark`].
+pub(crate) fn row_rtf(text: &str, style: Style, marks: &[Range<usize>]) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut marks = marks.iter().peekable();
+    let mut unit = 0;
+    let mut run = String::new();
+    let mut run_style = style;
+    for c in text.chars() {
+        while marks.next_if(|mark| mark.end <= unit).is_some() {}
+        let marked = marks.peek().is_some_and(|mark| mark.start <= unit);
+        let wanted = if marked { Style::Mark } else { style };
+        if wanted != run_style {
+            push_run(&mut out, &run, run_style);
+            run.clear();
+            run_style = wanted;
+        }
+        run.push(c);
+        unit += c.len_utf16();
+    }
+    push_run(&mut out, &run, run_style);
+    out
+}
+
+fn push_run(out: &mut String, run: &str, style: Style) {
+    if run.is_empty() {
+        return;
+    }
+    let plain = style == Style::Text;
+    if !plain {
+        let (text, back) = style.colours();
+        let _ = write!(out, r"{{\cf{text}\highlight{back} ");
+    }
+    for c in run.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '{' => out.push_str(r"\{"),
+            '}' => out.push_str(r"\}"),
+            '\t' => out.push_str(r"\tab "),
+            ' '..='~' => out.push(c),
+            _ => {
+                let mut units = [0; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    // RTF writes a code unit as a signed 16-bit number.
+                    let _ = write!(out, r"\u{}?", *unit as i16);
+                }
+            }
+        }
+    }
+    if !plain {
+        out.push('}');
+    }
+}
+
+/// The fingerprint of a row that a control holds and nobody knows, such as
+/// one the person typed in; it matches no row.
+pub(crate) const UNKNOWN: u64 = 0;
+
+/// The rows of a control that a document replaces: its rows in `rows` give
+/// way to the rows of `rtf`, which holds one row or more.
+#[derive(Debug)]
+pub(crate) struct Patch {
+    pub(crate) rows: Range<usize>,
+    pub(crate) rtf: String,
+}
+
+/// Turns a control's rows into `rows`, each written by [`row_rtf`], in
+/// `palette` and `font`. `shown` holds the fingerprints of the control's
+/// rows; the answer holds those of `rows`, and the patch that streams only
+/// the rows that changed, or `None` when the control shows `rows` already.
+/// A control always holds a row, so no rows show as one empty row.
+pub(crate) fn patch(
+    shown: &[u64],
+    rows: &[String],
+    palette: &Palette,
+    font: Font,
+) -> (Vec<u64>, Option<Patch>) {
+    let empty = [String::new()];
+    let rows = if rows.is_empty() { &empty[..] } else { rows };
+    let shown = if shown.is_empty() {
+        &[UNKNOWN][..]
+    } else {
+        shown
+    };
+    // The colours and the font are in the document's header, so a row
+    // looks different in other ones.
+    let look = {
+        let mut hasher = DefaultHasher::new();
+        (palette, font).hash(&mut hasher);
+        hasher.finish()
+    };
+    let prints: Vec<u64> = (rows.iter())
+        .map(|row| {
+            let mut hasher = DefaultHasher::new();
+            (look, row).hash(&mut hasher);
+            hasher.finish().max(UNKNOWN + 1)
+        })
+        .collect();
+    let same = |a: &u64, b: &u64| a == b && *a != UNKNOWN;
+    let shortest = shown.len().min(prints.len());
+    let mut before = (shown.iter().zip(&prints))
+        .take_while(|(a, b)| same(a, b))
+        .count();
+    let mut after = (shown.iter().rev().zip(prints.iter().rev()))
+        .take_while(|(a, b)| same(a, b))
+        .count()
+        .min(shortest - before);
+    if before == shown.len() && before == prints.len() {
+        return (prints, None);
+    }
+    // The patch replaces a row or more with a row or more, because a
+    // document that ends with a paragraph mark would add a row.
+    if before == shown.len() - after || before == prints.len() - after {
+        if before > 0 {
+            before -= 1;
+        } else {
+            after -= 1;
+        }
+    }
+    let mut rtf = Rtf::new(palette, font);
+    for row in &rows[before..rows.len() - after] {
+        rtf.push(row);
+    }
+    let patch = Patch {
+        rows: before..shown.len() - after,
+        rtf: rtf.finish(),
+    };
+    (prints, Some(patch))
 }
 
 #[cfg(test)]
@@ -191,5 +284,33 @@ mod tests {
         );
         assert!(text.ends_with('}'));
         assert_eq!(Rgb(0, 0, 0).mixed(Rgb(200, 100, 0), 50), Rgb(100, 50, 0));
+    }
+
+    /// A patch replaces only the rows that changed, and at least one row
+    /// with at least one row, so the control ends with the new rows' count:
+    /// an added row takes its neighbour along, and a row the person typed
+    /// in streams again.
+    #[test]
+    fn a_patch_streams_the_rows_that_changed() {
+        let rows = |texts: &[&str]| -> Vec<String> {
+            texts
+                .iter()
+                .map(|text| row_rtf(text, Style::Text, &[]))
+                .collect()
+        };
+        let (palette, font) = (Palette::default(), Font::default());
+        let (shown, first) = patch(&[], &rows(&["a", "b", "c"]), &palette, font);
+        assert_eq!(first.map(|patch| patch.rows), Some(0..1));
+        let (_, same) = patch(&shown, &rows(&["a", "b", "c"]), &palette, font);
+        assert!(same.is_none());
+        let (_, added) = patch(&shown, &rows(&["a", "b", "x", "c"]), &palette, font);
+        let added = added.expect("a row was added");
+        assert_eq!(added.rows, 1..2);
+        assert!(added.rtf.ends_with("b\\par\nx}"), "{}", added.rtf);
+        let (_, removed) = patch(&shown, &rows(&["a", "c"]), &palette, font);
+        assert_eq!(removed.map(|patch| patch.rows), Some(0..2));
+        let typed = [shown[0], UNKNOWN, shown[2]];
+        let (_, again) = patch(&typed, &rows(&["a", "b", "c"]), &palette, font);
+        assert_eq!(again.map(|patch| patch.rows), Some(1..2));
     }
 }

@@ -5,6 +5,8 @@
 //! The selection).
 
 use super::super::dialogs::{NewFolder, SelectFiles, TransferMode, TransferStart};
+use super::super::icons::Changed;
+use super::selection::Scroll;
 use super::{MainWindow, MeasuredColumn, Selected, Timer, measure_fits};
 use crate::core::captions::{self, PanelCaptions};
 use crate::core::commands::{self, CommandId, Mark, MenuItem, MenuNode, PanelAction, PanelKey};
@@ -262,15 +264,6 @@ pub(super) struct Refused {
     typed: Option<String>,
 }
 
-/// Whether showing a panel's rows scrolls its focused row into view.
-#[derive(Clone, Copy)]
-enum Scroll {
-    /// Another folder, or a new order.
-    ToFocus,
-    /// The same rows changed, which stay where the person sees them.
-    Keep,
-}
-
 /// Sets `control`'s text when it differs, so an update that changes
 /// nothing does not repaint it.
 fn show_text(control: Hwnd, text: &str) {
@@ -450,8 +443,8 @@ impl Panels {
     }
 
     /// Shows the rows of `side` with `place`, where the list showed
-    /// `shown`, keeping the scroll position unless `scroll` asks to show
-    /// the focused row. A remap preserves an accepted selection command.
+    /// `shown`, scrolled as `scroll` says. A remap preserves an accepted
+    /// selection command.
     fn show_place(
         &self,
         window: &MainWindow,
@@ -465,8 +458,8 @@ impl Panels {
             List::Panel(side),
             shown,
             place,
-            matches!(scroll, Scroll::ToFocus),
-            keep_action,
+            scroll,
+            super::selection::Chosen::Remap { keep_action },
         );
         self.show_panel_sort(window, side);
     }
@@ -1108,19 +1101,19 @@ impl Panels {
                 window.created().work.borrow_mut().lists.mark(list, input);
             }
         }
-        if listed && window.model.borrow().panels().panel(side).sort().key != SortKey::Size
-            || update.sizes
-        {
+        // The listing shows without its folder sizes, in every sort, and
+        // they fill in when gozlerd answers (DESIGN.md: Folder sizes).
+        if listed || update.sizes {
             self.ask_panel_sizes(window, side);
         }
-        let scroll = if matches!(update.kind, UpdatedKind::Listed { again: false })
-            || shown
-                .focused
-                .is_some_and(|row| self.panel(side).list.visible_rows().contains(&row))
-        {
-            Scroll::ToFocus
-        } else {
-            Scroll::Keep
+        let visible = self.panel(side).list.visible_rows();
+        let scroll = match (update.kind, shown.focused) {
+            (UpdatedKind::Listed { again: false }, _) => Scroll::ToFocus,
+            (UpdatedKind::Sizes, Some(row)) if visible.contains(&row) => Scroll::FocusAt {
+                offset: row - visible.start,
+            },
+            (_, Some(row)) if visible.contains(&row) => Scroll::ToFocus,
+            _ => Scroll::Keep,
         };
         self.show_place(
             window,
@@ -2429,9 +2422,9 @@ impl Panels {
             info.set_text(self.panel(side).list.fitting_text(info.column(), &text));
         }
         if info.wants_image() {
-            info.set_image(icon.map(|icon| match icon {
+            info.set_image(icon.and_then(|icon| match icon {
                 RowIcon::Up => window.icons.up(),
-                RowIcon::Item(name, is_folder) => window.icons.index(&name, is_folder),
+                RowIcon::Item(name, is_folder) => window.item_icon(&name, is_folder),
             }));
         }
         if info.wants_state() {
@@ -2444,6 +2437,29 @@ impl Panels {
                 }
             };
             info.set_overlay(window.row_overlay(is_link));
+        }
+    }
+
+    /// Has `side`'s list draw again its visible rows whose icon `changed`
+    /// holds.
+    pub(super) fn redraw_icons(&self, window: &MainWindow, side: Side, changed: &Changed) {
+        let list = self.panel(side).list;
+        let visible = list.visible_rows();
+        let rows: Vec<u64> = {
+            let model = window.model.borrow();
+            visible
+                .filter(|&row| {
+                    shown_or_taken(model.panels(), side, row).is_some_and(|row| {
+                        match icon_of(row) {
+                            RowIcon::Up => false,
+                            RowIcon::Item(name, is_folder) => changed.shows(&name, is_folder),
+                        }
+                    })
+                })
+                .collect()
+        };
+        for row in rows {
+            list.redraw_rows(row..row + 1);
         }
     }
 

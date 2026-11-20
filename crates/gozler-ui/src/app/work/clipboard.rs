@@ -1,6 +1,7 @@
 //! Clipboard publication retains its original selection and bounded retries.
 
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, Publication};
+use crate::core::commands::CommandId;
 use crate::core::work::{Id, Replacement, Retirement, Waiting};
 pub(in crate::app) use crate::win::clipboard::CopyFailure;
 use crate::win::clipboard::{self, ClipboardBlock, CopyAttempt};
@@ -14,21 +15,24 @@ use std::time::{Duration, Instant};
 
 struct Copy {
     data: CopyData,
-    /// What the command puts there, which a failure names.
-    format: ClipboardFormat,
+    /// The command that copies, which a failure names.
+    command: CommandId,
     publication: Publication,
     preceding: Arc<AtomicU32>,
 }
 
 enum CopyData {
-    Rows(Arc<[ResultItem]>),
+    Rows(Arc<[ResultItem]>, ClipboardFormat),
+    /// Text that an edit box selected, as `Ctrl+C` copies it.
+    Text(String),
     Block(ClipboardBlock),
 }
 
 impl Copy {
     fn items(&self) -> usize {
         match &self.data {
-            CopyData::Rows(files) => files.len(),
+            CopyData::Rows(files, _) => files.len(),
+            CopyData::Text(_) => 1,
             CopyData::Block(block) => block.items(),
         }
     }
@@ -37,7 +41,7 @@ impl Copy {
 enum Copied {
     Finished,
     Busy(Copy),
-    Failed(windows::core::Error, ClipboardFormat),
+    Failed(windows::core::Error, CommandId),
 }
 
 struct CopyRetry {
@@ -48,7 +52,7 @@ struct CopyRetry {
 
 pub(in crate::app) enum CopyNotice {
     Retry,
-    Failed(Id, CopyFailure, ClipboardFormat),
+    Failed(Id, CopyFailure, CommandId),
     Finished,
 }
 
@@ -70,10 +74,28 @@ impl Work {
     }
 
     pub(in crate::app) fn copy(&mut self, files: Arc<[ResultItem]>, format: ClipboardFormat) {
+        let command = match format {
+            ClipboardFormat::Files => CommandId::Copy,
+            ClipboardFormat::CutFiles => CommandId::Cut,
+            ClipboardFormat::Paths => CommandId::CopyAsPath,
+            ClipboardFormat::Names => CommandId::CopyName,
+            ClipboardFormat::Folders => CommandId::CopyFolder,
+        };
+        self.start(CopyData::Rows(files, format), command);
+    }
+
+    /// Puts `text`, which an edit box selected, on the clipboard. The window
+    /// reads the selection and never sends the box `WM_COPY`, which would
+    /// make its thread wait for the program whose clipboard it replaces.
+    pub(in crate::app) fn copy_text(&mut self, text: String) {
+        self.start(CopyData::Text(text), CommandId::Copy);
+    }
+
+    fn start(&mut self, data: CopyData, command: CommandId) {
         self.clear_copy_retry();
         self.task.replace(Copy {
-            data: CopyData::Rows(files),
-            format,
+            data,
+            command,
             publication: Publication::new(clipboard::sequence()),
             preceding: Arc::clone(&self.last_publication),
         });
@@ -108,8 +130,8 @@ impl Work {
         let (id, answer) = answer?;
         Some(match answer {
             Copied::Finished => CopyNotice::Finished,
-            Copied::Failed(error, format) => {
-                CopyNotice::Failed(id, CopyFailure::Native(error), format)
+            Copied::Failed(error, command) => {
+                CopyNotice::Failed(id, CopyFailure::Native(error), command)
             }
             Copied::Busy(mut copy) => {
                 if copy.publication.retry() {
@@ -120,9 +142,9 @@ impl Work {
                     });
                     CopyNotice::Retry
                 } else {
-                    let format = copy.format;
+                    let command = copy.command;
                     self.retire_copy(copy);
-                    CopyNotice::Failed(id, CopyFailure::Busy, format)
+                    CopyNotice::Failed(id, CopyFailure::Busy, command)
                 }
             }
         })
@@ -175,8 +197,14 @@ fn copy(copy: Copy, worker: &OffThread, cancel: &CancelToken) -> Copied {
         return Copied::Finished;
     }
     let block = match copy.data {
-        CopyData::Rows(files) => {
-            let Some(block) = ClipboardBlock::new(&ClipboardData::new(copy.format, &files)) else {
+        CopyData::Rows(files, format) => {
+            let Some(block) = ClipboardBlock::new(&ClipboardData::new(format, &files)) else {
+                return Copied::Finished;
+            };
+            block
+        }
+        CopyData::Text(text) => {
+            let Some(block) = ClipboardBlock::text(&text) else {
                 return Copied::Finished;
             };
             block
@@ -187,10 +215,10 @@ fn copy(copy: Copy, worker: &OffThread, cancel: &CancelToken) -> Copied {
         CopyAttempt::Published | CopyAttempt::Superseded => Copied::Finished,
         CopyAttempt::Busy(block) => Copied::Busy(Copy {
             data: CopyData::Block(block),
-            format: copy.format,
+            command: copy.command,
             publication: copy.publication,
             preceding: copy.preceding,
         }),
-        CopyAttempt::Failed(error) => Copied::Failed(error, copy.format),
+        CopyAttempt::Failed(error) => Copied::Failed(error, copy.command),
     }
 }
