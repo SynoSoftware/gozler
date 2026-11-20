@@ -124,6 +124,15 @@ operation does, where its rules live and how its data changes by reading
 the code. Correctness, security and reliability come first; simplicity
 never justifies weaker behavior.
 
+Before you edit, map the change: the owner of the state you touch, every
+entry point that reaches it (a window message, a menu command or key, a pipe
+request, a journal record, a worker's answer, a timer), and every output
+(what the window shows, a reply on the pipe, `ui.json` or `operations.json`,
+a file changed on disk). Rethink the design when it would store a fact twice,
+put a rule in a second place, depend on timing or a hidden side effect, or
+copy logic from another area, or when you cannot explain it in two or three
+sentences.
+
 - **Fit the code around you.** Solve the problem the way the code beside your
   change already does. Make the smallest coherent change that solves the whole
   problem, and restructure the code you are changing when that makes its
@@ -146,6 +155,11 @@ never justifies weaker behavior.
   construction. Names and signatures reveal operations that save, send or
   change shared state. Use named types for domain inputs, outcomes and errors
   whose meaning a caller would otherwise reconstruct from strings or tuples.
+  A function takes at most four parameters besides `self`. Past four, give
+  the work to the owner that holds the values, or pass a type that already
+  owns them, never a struct made only to carry one call's arguments. A
+  signature that Win32 or a trait fixes keeps its shape, and an existing
+  function meets the limit when a change already restructures it.
 - **Return errors from untrusted input.** Bytes from the disk, the journal and
   the pipe can be anything. Read them the way the existing parsers do, through
   `zerocopy` views and checked lengths, so a malformed record becomes an error,
@@ -169,10 +183,20 @@ never justifies weaker behavior.
   slow volume or one broad query cannot stall other clients.
 - **Count allocations.** The index holds millions of entries, so a byte per
   entry or an allocation per hit is a real cost. Borrow instead of cloning on
-  hot paths and size buffers up front. Measure with the criterion benches in
+  hot paths and size buffers up front. Code that runs once per entry or
+  candidate, such as `Scan::visit`, what it calls and `DirPaths`, is the
+  hottest path: a change there states what each candidate now runs in
+  addition (a call, a struct copy, a test whose answer is the same for the
+  whole query), decides a per-query test once by choosing the loop, passes
+  structs by reference, and gives a helper extracted from it `#[inline]` or
+  a look at the disassembly. Measure with the criterion benches in
   `crates/gozler-core/benches` before you claim a speed-up. Compare matched
   before/after runs of `pwsh ./build.ps1 -Bench <name filter>`, because
-  criterion's previous run may belong to another agent. Reuse a valid
+  criterion's previous run may belong to another agent, and accept a
+  difference only when every pair agrees in direction; a mixed result is
+  reported as mixed. `build.ps1 -Timing optimizations` checks that each
+  shortcut still beats the work it replaces, and only matched runs against
+  an older build show a slowdown of a few percent. Reuse a valid
   baseline; a bench run is a build, so it takes the steps in "Building and
   finishing". On Windows the benches count the bench thread's CPU cycles, not
   wall time, because other work on this machine moves wall-clock timings by
@@ -219,8 +243,11 @@ the distinctions the reader still needs, not the shortest possible name.
 - **Every word earns its place.** Challenge `Data`, `Info`, `Manager`,
   `Helper`, `Request` and `Result`; retain them when they name a real
   distinction. Name enduring concepts rather than their current screen,
-  storage or transport. Add words when they preserve meaning at the use site;
-  there is no word-count quota.
+  storage or transport. Because the structure carries the context, a new or
+  changed name prefers one word and normally takes two at most. A third
+  word stays when it carries a distinction the structure cannot, and your
+  report names that distinction; ask the owner before you settle on four.
+  A test's name states its scenario and outcome, so it reads as a sentence.
 
 Before accepting a new or changed name, identify its concept, the context
 its callers already have, and the distinction each word adds. Remove
@@ -423,9 +450,16 @@ for its result and report what it proved. The same code compiled twice gives
 the same result, so a second build only takes minutes of the owner's shared
 laptop.
 
-Final verification starts when you have read the final diff as its next
-maintainer, traced each changed behavior from its callers, and named the
-failure each new test watches.
+Read the final diff as its next maintainer. Each new file, type, state,
+dependency and branch names the requirement that forces it. Simplify a
+helper for trivial logic, an extraction with one caller, a pass-through, a
+rule implemented twice, data reshaped twice and work added per entry. Leave
+the code free of unused and commented-out lines, check each new comment
+against `docs/COMMENTS.md`, and for a changed contract (the wire protocol,
+command-line output, saved settings) name every consumer and what it needs.
+
+Final verification starts when you have done that, traced each changed
+behavior from its callers, and named the failure each new test watches.
 
 1. Run `pwsh ./build.ps1`, unless another session's build already covers
    your change.
