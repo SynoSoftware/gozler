@@ -7,10 +7,11 @@
 #### Rename many files at once
 
 - **Multi-Rename.** Select entries in Search or Commander and press Ctrl+M. Build the new names with masks, a counter, search and replace, and case changes, or edit the names as text. The list shows every new name before anything changes, and Undo puts the old names back.
+- **Work as in Total Commander.** The dialog is laid out like Total Commander's Multi-Rename Tool, with the same fields and access keys. **Next step** (F5) applies another rule to the names the step before made, and one Undo reverses every step. **Result list** shows what the last rename changed and what failed.
 
 #### Compare two files
 
-- **Compare by content.** Select two files and choose **File > Compare by content…** (Ctrl+Shift+C). The files show side by side, with the changed lines and words marked. Go from difference to difference, or turn on Edit mode to change either side and save it. Typing and Find stay quick in large files.
+- **Compare by content.** Select two files and choose **File > Compare by content…** (Ctrl+Shift+C). The files show side by side, with the changed lines and words marked. Go from difference to difference, or turn on Edit mode to change either side and save it. Typing and Find stay quick in large files. The buttons and options are laid out as in Total Commander's compare window.
 - **Use it from Git.** `gozler-ui --compare <a> <b>` opens only the compare window, so Git and other tools can use it as their diff program. To compare with another program instead, set **Comparison tool** in **File > Settings > Context menu**.
 
 #### Work without waiting
@@ -29,6 +30,10 @@ These work in Search and on the command line.
 - **Find folders by what's in them.** `child-count:` counts the entries directly in a folder, and `empty:` finds empty folders.
 - **Write dates the short way.** `dm:7d` finds items changed in the last 7 days. `dm:2025` finds a year and `dm:2025-06` a month.
 
+#### Keep working through updates
+
+- **Fewer version mismatches.** From this release on, most updates no longer stop a newer `gozler` or window from working with the service that's running. If you search for something that only a newer service knows, the service searches without it and tells you what it skipped, such as `child:readme`. The results might then be incomplete, so `gozler` exits with code 2.
+
 #### Read files in the Viewer
 
 - **View several files.** Press F3 with several files selected, and go through them with **Next file** and **Previous file**.
@@ -44,9 +49,14 @@ These work in Search and on the command line.
 
 - **Link arrows.** Junctions and symbolic links show File Explorer's link arrow, so a link no longer looks like the folder or file it points to. When a link's target is gone, Gozler names the missing target.
 
-#### Fit the columns
+#### Select with the mouse as in Total Commander
+
+- **Clear the selection with a click.** In Commander, a click on a row that isn't selected clears the selection and moves to that row. Ctrl+click and Shift+click still add to it.
+
+#### Read the list at a glance
 
 - **Auto fit.** The columns now fill the list's width by themselves. Right-click a column header and turn off **Auto fit** to keep your own widths.
+- **Two-digit dates.** Days, months and hours always show two digits, such as 01/26/2026 07:58 PM, so the dates line up in a column.
 
 #### Use Gozler from scripts and AI agents
 
