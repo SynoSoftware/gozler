@@ -630,8 +630,30 @@ impl CompiledQuery {
 const MAX_COMPONENT_TERMS: usize = u64::BITS as usize;
 
 /// The most literals a prefilter scans the names for. Each is one pass over
-/// the folded names, so past a few, testing every name costs less.
+/// the folded names, so past a few, testing every name costs less. A path
+/// term's candidate walk takes the same limit, which no measurement has tuned
+/// for it.
 const MAX_PREFILTER_LITERALS: usize = 8;
+
+/// `literals` without each one that holds another, because every name that
+/// contains it contains the other; `None` when one is empty, which every name
+/// contains, or when more than [`MAX_PREFILTER_LITERALS`] remain.
+fn fewest_literals(mut literals: Vec<Vec<u8>>) -> Option<Vec<Vec<u8>>> {
+    if literals.iter().any(Vec::is_empty) {
+        return None;
+    }
+    literals.sort_unstable_by_key(Vec::len);
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    for literal in literals {
+        if !kept
+            .iter()
+            .any(|short| memmem::find(&literal, short).is_some())
+        {
+            kept.push(literal);
+        }
+    }
+    (!kept.is_empty() && kept.len() <= MAX_PREFILTER_LITERALS).then_some(kept)
+}
 
 /// What a clause reads of an entry, in the order the scan has it: the
 /// entry's own columns, then its [`ComponentBits`], then its full path.
@@ -717,20 +739,7 @@ impl CompiledClause {
                 _ => return None,
             }
         }
-        if literals.iter().any(Vec::is_empty) {
-            return None;
-        }
-        literals.sort_unstable_by_key(Vec::len);
-        let mut kept: Vec<Vec<u8>> = Vec::new();
-        for literal in literals {
-            if !kept
-                .iter()
-                .any(|short| memmem::find(&literal, short).is_some())
-            {
-                kept.push(literal);
-            }
-        }
-        (!kept.is_empty() && kept.len() <= MAX_PREFILTER_LITERALS).then_some(kept)
+        fewest_literals(literals)
     }
 
     /// What the clause reads, then the cost of its dearest term: the order
@@ -1178,15 +1187,30 @@ impl Matcher {
         }
     }
 
-    fn last_component_literal(&self) -> Option<Vec<u8>> {
-        match self {
+    /// Texts without a separator, one of which the full path of every entry
+    /// that passes this path matcher contains, so it lies inside one component
+    /// of that path: the literal of a literal's or a wildcard's last component,
+    /// or the longest part between separators of each literal that a regular
+    /// expression's matches start with ([`regex_literals`]). `None` when no
+    /// such set exists, as for `.*x` or `^\\`.
+    fn path_needles(&self) -> Option<Vec<Vec<u8>>> {
+        let last_component = match self {
+            Matcher::Regex(regex) => {
+                let mut parts = Vec::new();
+                for literal in regex_literals(regex)? {
+                    let longest = literal.split(|&b| b == b'\\').max_by_key(|p| p.len());
+                    parts.push(longest.unwrap_or_default().to_vec());
+                }
+                return fewest_literals(parts);
+            }
             Matcher::Wildcard(wildcard) => wildcard.last_component_literal(0),
             _ => self
                 .literal()?
                 .rsplit(|&b| b == b'\\')
                 .find(|part| !part.is_empty())
                 .map(<[u8]>::to_vec),
-        }
+        };
+        last_component.map(|needle| vec![needle])
     }
 
     /// The text of a matcher that compares a text, which
@@ -1892,9 +1916,10 @@ fn scan_cost(index: &VolumeIndex, query: &CompiledQuery, names: &mut Option<Vec<
     index.len()
 }
 
-/// The path term whose last component holds the longest literal, and that
-/// literal, which [`Scan::visit_path_candidates`] starts from.
-fn path_candidate(query: &CompiledQuery) -> Option<(&CompiledTerm, Vec<u8>)> {
+/// The positive path term, alone in its clause, whose shortest
+/// [`Matcher::path_needles`] is the longest, and those needles, which
+/// [`Scan::visit_path_candidates`] starts from.
+fn path_candidate(query: &CompiledQuery) -> Option<(&CompiledTerm, Vec<Vec<u8>>)> {
     query
         .clauses
         .iter()
@@ -1906,11 +1931,11 @@ fn path_candidate(query: &CompiledQuery) -> Option<(&CompiledTerm, Vec<u8>)> {
                 return None;
             };
             (!term.negated)
-                .then(|| matcher.last_component_literal())
+                .then(|| matcher.path_needles())
                 .flatten()
-                .map(|needle| (term, needle))
+                .map(|needles| (term, needles))
         })
-        .max_by_key(|(_, needle)| needle.len())
+        .max_by_key(|(_, needles)| needles.iter().map(Vec::len).min())
 }
 
 /// Finds every match of `query` over `index` that `seen_by` sees, as
@@ -2045,10 +2070,12 @@ fn scan_with<'q, 'i>(
     }
 
     if !query.match_case
-        && let Some((term, needle)) = path_candidate(query)
-        && memmem::find(&root, &needle).is_none()
+        && let Some((term, needles)) = path_candidate(query)
+        && needles
+            .iter()
+            .all(|needle| memmem::find(&root, needle).is_none())
     {
-        if scan.visit_path_candidates(term, &needle, scope) {
+        if scan.visit_path_candidates(term, &needles, scope) {
             return scan;
         }
         scan.records.clear();
@@ -2352,16 +2379,21 @@ impl<'q, 'i> Scan<'q, 'i> {
         true
     }
 
+    /// Visits, each once, the entries whose full path can pass `term`: those
+    /// whose name contains one of its `needles`, everything below them, and
+    /// everything below a link target that a path through the link can pass
+    /// it at without a needle in a real name. Returns `false` when they pass
+    /// a [`COMPONENT_WALK_SHARE`] of the volume, with some visited.
     fn visit_path_candidates(
         &mut self,
         term: &CompiledTerm,
-        needle: &[u8],
+        needles: &[Vec<u8>],
         scope: Option<EntryIdx>,
     ) -> bool {
         let index = self.index;
         let most = index.len() / COMPONENT_WALK_SHARE;
         let mut roots = Vec::new();
-        for_each_name_containing(index, needle, |id| {
+        for_each_name_containing_any(index, needles, |id| {
             roots.extend(index.name_chain(id).filter(|&idx| !index.is_synthetic(idx)));
             roots.len() <= most
         });
@@ -2372,8 +2404,9 @@ impl<'q, 'i> Scan<'q, 'i> {
             (&term.through, &term.check, &self.query_paths)
         {
             roots.extend(paths.targets().filter_map(|(folder, target)| {
-                through
-                    .needs_target(target, matcher, needle)
+                needles
+                    .iter()
+                    .any(|needle| through.needs_target(target, matcher, needle))
                     .then_some(folder)
             }));
         }
@@ -4086,6 +4119,13 @@ mod tests {
             r"C:\*\sub\*",
             r"docs\sub\rep|proj\out\rep",
             r"proj\out\rep !missing",
+            // A regular expression walks from a part of its literal between
+            // separators, from each of its literals, folded, and not when
+            // the root's name holds the part.
+            r"regex:DOCS\\sub\\rep",
+            r"regex:notes\.|report\.",
+            r"regex:RÉPORT",
+            r"regex:^c:\\",
         ] {
             let parsed = parse_query_with(
                 text,
