@@ -21,8 +21,7 @@ use mask::{CounterAt, Mask, MaskError, Missing, Output};
 use replace::{Replacer, Wanted};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -923,24 +922,33 @@ pub(crate) fn undo(batch: &[Renamed]) -> Vec<Rename> {
 /// The path of `from` relative to the folder of `at`: its name, after a
 /// `..` for each folder up from `at` and the folders down to `from`.
 fn relative(at: &Path, from: &Path) -> PathBuf {
-    let folders = |path: &Path| -> Vec<Vec<u16>> {
-        (path.parent().into_iter().flat_map(Path::iter))
-            .map(|part| part.encode_wide().collect())
-            .collect()
-    };
-    let (here, there) = (folders(at), folders(from));
+    let here: Vec<&OsStr> = at.parent().into_iter().flat_map(Path::iter).collect();
+    let there: Vec<&OsStr> = from.parent().into_iter().flat_map(Path::iter).collect();
     let shared = (here.iter().zip(&there))
-        .take_while(|(one, other)| fold(one) == fold(other))
+        .take_while(|(one, other)| fold(&units(one)) == fold(&units(other)))
         .count();
     let mut name = PathBuf::new();
     for _ in shared..here.len() {
         name.push("..");
     }
     for part in &there[shared..] {
-        name.push(OsString::from_wide(part));
+        name.push(part);
     }
     name.push(from.file_name().unwrap_or_default());
     name
+}
+
+/// `part` as the UTF-16 units that [`fold`] compares.
+#[cfg(windows)]
+fn units(part: &OsStr) -> Vec<u16> {
+    std::os::windows::ffi::OsStrExt::encode_wide(part).collect()
+}
+
+/// As on Windows, for CI's compile check, the only build of this crate
+/// elsewhere.
+#[cfg(not(windows))]
+fn units(part: &OsStr) -> Vec<u16> {
+    part.to_string_lossy().encode_utf16().collect()
 }
 
 /// The placeholders that the `+` menu offers, in groups, each with the
