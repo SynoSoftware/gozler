@@ -54,6 +54,9 @@ pub(crate) struct ListColumn<'a> {
 }
 
 impl ListView {
+    /// Makes the left mouse button select as Total Commander's does, with
+    /// the focused row apart from the selection (DESIGN.md: Selecting
+    /// entries).
     pub(crate) fn focus_on_click(self) -> windows::core::Result<()> {
         // SAFETY: this thread owns the control; the stateless subclass is
         // removed when the control is destroyed.
@@ -674,10 +677,8 @@ unsafe extern "system" fn cursor_mouse(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
-    // MK_SHIFT and MK_CONTROL leave range selection and toggling to Windows.
-    if matches!(message, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK)
-        && wparam.0 & (MK_SHIFT.0 | MK_CONTROL.0) as usize == 0
-    {
+    if matches!(message, WM_LBUTTONDOWN | WM_LBUTTONDBLCLK) {
+        let keys = wparam.0 & (MK_SHIFT.0 | MK_CONTROL.0) as usize;
         let point = POINT {
             x: lparam.0 as i16 as i32,
             y: (lparam.0 >> 16) as i16 as i32,
@@ -688,7 +689,11 @@ unsafe extern "system" fn cursor_mouse(
         let list = ListView(Hwnd(hwnd));
         list.hwnd().focus();
         list.hwnd().parent().show_focus_cues();
-        let row = list.row_at((screen.x, screen.y));
+        // As Total Commander's left mouse button: a row that is not
+        // selected becomes the focused row alone, which commands act on; a
+        // selected row keeps the selection for a drag, and without one it
+        // stays selected alone.
+        let selected = row.is_some_and(|row| list.row_state(row).1);
         if let Some(row) = row {
             list.set_focused(Some(row));
         }
@@ -708,10 +713,29 @@ unsafe extern "system" fn cursor_mouse(
             idFrom: id,
             code: if drag {
                 LVN_BEGINDRAG
+        let row = list.row_at((screen.x, screen.y));
+        // Windows toggles the row and selects Shift's range. While nothing
+        // is selected, the focused row is the selection, so Ctrl adds the
+        // row to it, as Total Commander's Ctrl+click does.
+        if keys != 0 {
+            if keys == MK_CONTROL.0 as usize
+                && message == WM_LBUTTONDOWN
+                && list.selected_count() == 0
+                && let (Some(row), Some(focused)) = (row, list.focused())
+                && row != focused
+            {
+                list.select(focused, true);
+            }
+            // SAFETY: the original parameters are forwarded unchanged.
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
             } else if message == WM_LBUTTONDBLCLK && row.is_some() {
                 LVN_ITEMACTIVATE
             } else {
                 NM_CLICK
+            if !selected && list.selected_count() > 0 {
+                list.deselect_all();
+            }
             },
         };
         if drag {
@@ -723,6 +747,14 @@ unsafe extern "system" fn cursor_mouse(
             };
             // SAFETY: the notification outlives the synchronous WM_NOTIFY.
             unsafe {
+        if let Some(row) = row
+            && selected
+            && !drag
+            && list.selected_count() > 1
+        {
+            list.deselect_all();
+            list.select(row, true);
+        }
                 send_pointer(list.hwnd().parent(), WM_NOTIFY, id, &raw const notification);
             }
         } else {
