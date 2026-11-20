@@ -6,7 +6,7 @@
 
 use super::super::dialogs::{NewFolder, SelectFiles, TransferMode, TransferStart};
 use super::super::icons::Changed;
-use super::selection::Scroll;
+use super::selection::{Origin, Scroll};
 use super::{MainWindow, MeasuredColumn, Selected, Timer, measure_fits};
 use crate::core::captions::{self, PanelCaptions};
 use crate::core::commands::{self, CommandId, Mark, MenuItem, MenuNode, PanelAction, PanelKey};
@@ -458,8 +458,10 @@ impl Panels {
             List::Panel(side),
             shown,
             place,
-            scroll,
-            super::selection::Chosen::Remap { keep_action },
+            Origin::Remap {
+                keep_action,
+                scroll,
+            },
         );
         self.show_panel_sort(window, side);
     }

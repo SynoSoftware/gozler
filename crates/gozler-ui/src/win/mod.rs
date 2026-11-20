@@ -98,12 +98,18 @@ impl Hwnd {
     }
 
     pub(crate) fn text(self) -> String {
+        String::from_utf16_lossy(&self.text_units())
+    }
+
+    /// The text as UTF-16 units, which an edit control's positions count.
+    pub(crate) fn text_units(self) -> Vec<u16> {
         // SAFETY: plain values.
         let length = unsafe { GetWindowTextLengthW(self.0) };
         let mut buffer = vec![0u16; usize::try_from(length).unwrap_or(0) + 1];
         // SAFETY: the call writes at most the buffer's length.
         let copied = unsafe { GetWindowTextW(self.0, &mut buffer) };
-        String::from_utf16_lossy(&buffer[..usize::try_from(copied).unwrap_or(0)])
+        buffer.truncate(usize::try_from(copied).unwrap_or(0));
+        buffer
     }
 
     pub(crate) fn client_size(self) -> Size {

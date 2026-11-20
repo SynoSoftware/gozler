@@ -328,9 +328,7 @@ impl Edit {
                 Some(LPARAM(&raw mut end as isize)),
             )
         };
-        // A lone surrogate becomes one replacement character, so the
-        // positions still count the same units.
-        let units: Vec<u16> = self.0.text().encode_utf16().collect();
+        let units = self.0.text_units();
         let selected = units.get(start as usize..end as usize)?;
         (!selected.is_empty()).then(|| String::from_utf16_lossy(selected))
     }

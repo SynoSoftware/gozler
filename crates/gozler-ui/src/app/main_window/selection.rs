@@ -67,12 +67,14 @@ struct Unhighlight {
 
 /// Who chose the place that [`MainWindow::show_native_place`] shows.
 #[derive(Clone, Copy)]
-pub(super) enum Chosen {
-    /// A change of the rows: a panel's model holds the place already, and
-    /// `keep_action` keeps a selection command that waits.
-    Remap { keep_action: bool },
-    /// A key of the person: the list tells its model when the writes end,
-    /// as it tells a click.
+pub(super) enum Origin {
+    /// A change of the rows: a panel's model holds the place already,
+    /// `keep_action` keeps a selection command that waits, and `scroll`
+    /// says where the list's scroll goes.
+    Remap { keep_action: bool, scroll: Scroll },
+    /// A key of the person: the list keeps its scroll and its selection
+    /// mark, as a key's rows written one by one leave them, and tells its
+    /// model when the writes end, as it tells a click.
     Key,
 }
 
@@ -95,8 +97,7 @@ struct NativeUpdate {
     changes: Option<Changes>,
     focused: Option<u64>,
     anchor: Option<u64>,
-    scroll: Scroll,
-    chosen: Chosen,
+    origin: Origin,
 }
 
 #[derive(Clone, Copy)]
@@ -869,7 +870,7 @@ impl MainWindow {
                         selected: Arc::default(),
                     };
                     let place = Place { focused, selected };
-                    self.show_native_place(list, &before, &place, Scroll::Keep, Chosen::Key);
+                    self.show_native_place(list, &before, &place, Origin::Key);
                 }
             }
         }
@@ -911,7 +912,7 @@ impl MainWindow {
             focused,
             selected: selected.positions,
         };
-        self.show_native_place(list, &before, &place, Scroll::Keep, Chosen::Key);
+        self.show_native_place(list, &before, &place, Origin::Key);
         if run.mark && taken {
             self.request_taken_deselection(list, rows);
         }
@@ -1064,13 +1065,12 @@ impl MainWindow {
         list: List,
         before: &Place,
         place: &Place,
-        scroll: Scroll,
-        chosen: Chosen,
+        origin: Origin,
     ) {
         self.end_matching_selection(list);
         let control = self.list_control(list);
-        let (count, selected_count, anchor) = match (list, chosen) {
-            (List::Panel(side), Chosen::Remap { .. }) => {
+        let (count, selected_count, anchor) = match (list, origin) {
+            (List::Panel(side), Origin::Remap { .. }) => {
                 let model = self.model.borrow();
                 (
                     model.panels().panel(side).count(),
@@ -1078,12 +1078,17 @@ impl MainWindow {
                     model.panels().anchor(side),
                 )
             }
-            (List::Search, Chosen::Remap { keep_action: true }) => (
+            (
+                List::Search,
+                Origin::Remap {
+                    keep_action: false, ..
+                },
+            ) => (control.count(), row_count(&place.selected), place.focused),
+            _ => (
                 control.count(),
                 row_count(&place.selected),
                 control.selection_mark(),
             ),
-            _ => (control.count(), row_count(&place.selected), place.focused),
         };
         let mut retired = Retirement::default();
         {
@@ -1095,7 +1100,10 @@ impl MainWindow {
                 (!native.applying && native.unhighlight.is_none() && !native.unhighlighting)
                     .then(|| Arc::clone(&before.selected));
             native.unhighlight = None;
-            if let Chosen::Remap { keep_action: true } = chosen {
+            if let Origin::Remap {
+                keep_action: true, ..
+            } = origin
+            {
                 let key = native.capture.key(count);
                 native.action = native.action.and_then(|action| action.remapped(key));
             } else {
@@ -1112,8 +1120,7 @@ impl MainWindow {
                 changes: None,
                 focused: place.focused,
                 anchor,
-                scroll,
-                chosen,
+                origin,
             });
         }
         if let List::Panel(side) = list {
@@ -1123,7 +1130,7 @@ impl MainWindow {
                 .native_selection_pending(side, true);
         }
         self.created().work.borrow_mut().retire(retired);
-        if let (List::Panel(_), Chosen::Remap { .. }) = (list, chosen) {
+        if let (List::Panel(_), Origin::Remap { .. }) = (list, origin) {
             // The panel's rows may have changed with the place.
             control.set_count(count);
         }
@@ -1201,10 +1208,12 @@ impl MainWindow {
         }
         control.focus_in_place(update.focused);
         control.set_selection_mark(update.anchor);
-        match (update.scroll, update.focused) {
-            (Scroll::ToFocus, Some(row)) => control.ensure_visible(row),
-            (Scroll::FocusAt { offset }, Some(row)) => control.show_row_at(row, offset),
-            _ => {}
+        if let (Origin::Remap { scroll, .. }, Some(row)) = (update.origin, update.focused) {
+            match scroll {
+                Scroll::ToFocus => control.ensure_visible(row),
+                Scroll::FocusAt { offset } => control.show_row_at(row, offset),
+                Scroll::Keep => {}
+            }
         }
         if !current() {
             self.retire_selection(update);
@@ -1212,8 +1221,8 @@ impl MainWindow {
         }
         let focused = control.focused();
         let hwnd = control.hwnd().parent();
-        match (list, update.chosen) {
-            (List::Panel(side), Chosen::Remap { .. }) => {
+        match (list, update.origin) {
+            (List::Panel(side), Origin::Remap { .. }) => {
                 self.model
                     .borrow_mut()
                     .panels_mut()
@@ -1223,7 +1232,7 @@ impl MainWindow {
             // The model reads a key's place as it reads a click's, on a turn
             // of its own, because a read during the writes found the list
             // busy and left no turn waiting.
-            (List::Panel(side), Chosen::Key) => {
+            (List::Panel(side), Origin::Key) => {
                 self.panel(side).changed.set(panels::ListChanged::Selection);
                 hwnd.post_deferred();
             }
