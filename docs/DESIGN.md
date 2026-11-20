@@ -1680,27 +1680,30 @@ Multi-Rename… (`Ctrl+M`, in both modes) gives many entries new names in one st
 
 - **It acts on the selected entries, or on the focused row,** never on `..`, in Search, in a search panel and in a folder panel, so found files are renamed in one step; Total Commander needs Feed to listbox first. It is enabled as Copy to folder… is. The dialog opens at once: it takes each entry's path, kind, size and date modified from the rows the list already holds, and reads nothing from the disk.
 - **The fields start as the person left them** while the window runs, and as the defaults after Gozler starts: name `[N]`, extension `[E]`, empty Search for and Replace with, Extension too on and the other check boxes off, Case Unchanged, counter start 1, step 1, digits 1. The name box has the focus.
-- **A dialog that stays open after Rename,** as Total Commander's does: the renamed rows leave the list, the rows that failed stay, so Rename tries them again, and Undo is one key away.
+- **A dialog that stays open after Start!,** as Total Commander's does: the renamed rows leave the list, the rows that failed stay, so Start! tries them again, and Undo is one key away.
 
 #### The dialog
 
-The title bar says Multi-Rename. The dialog is modal and resizable; the list and the status line take the extra room, and the size is saved in `ui.json`. Windows draws every control.
+The dialog is laid out as Total Commander's Multi-Rename tool, with its captions and access keys, because people who know that tool find every field where they expect it (AGENTS.md: established behavior first). The title bar says Multi-Rename, the command's name. The dialog is modal and resizable; it opens at Total Commander's height and wide enough for the status text's three counts beside the bottom row, and wider when a translation needs wider buttons. A resize keeps the band of fields as it is, gives the list the extra width and height, and moves the bottom row down with the status text taking the extra width; the size is saved in `ui.json`. Windows draws every control.
 
 | Area | Controls |
 | --- | --- |
-| Name | an editable combo box with the name mask and its history; buttons Name, Range…, Counter, Date, Time and More |
-| Extension | an editable combo box with the extension mask and its history; buttons Extension, Range…, Counter |
-| Case | a drop-down list: Unchanged, lowercase, UPPERCASE, First letter uppercase, First Letter Of Each Word, Title case (English) |
-| Search and replace | Search for and Replace with, editable combo boxes with history; check boxes Match case, First only, Extension too, Regular expression, Whole name |
-| Counter | Start at, Step by, and Digits, a drop-down list of 1 to 10 and Auto |
-| Saved renames | a drop-down list, `F2` (see "Saved renames") |
-| The list | a virtual list view: Name, New name, Note, Size, Date modified, and Folder when the entries come from more than one folder |
-| The status line | a row of its own above the buttons, because its counts are longer than the room beside four buttons |
-| Bottom | Edit…, Undo, Rename (the default) and Close |
+| Rename mask: file name | an editable combo box with the name mask and its history; buttons `[N]  Name`, `+`, `[YMD]  Date`, `[N#-#] Range`, `#`, `[hms]  Time` and `[C]  Counter` |
+| Extension | an editable combo box with the extension mask and its history, kept although Total Commander's is a plain box, because the history saves typing; buttons `[E]  Ext.`, `[E#-#] Range` and `[C]  Counter` |
+| Search & Replace | Search for and Replace with, editable combo boxes with history; check boxes `^`, `1x`, `[E]`, RegEx and Subst. |
+| Upper/lowercase | a drop-down list: Unchanged, All lowercase, All UPPERCASE, First letter uppercase, First of each word uppercase, First of each word uppercase (English in Titles) |
+| `?` and the names button | `?` opens Regular expressions; the button with a pencil opens a menu of Load names from file… and Edit names… |
+| Define counter [C] | Start at and Step by, each an edit box with an up-down control, and Digits, a drop-down list of 1 to 10 and `a` |
+| Saved renames | a drop-down list below the counter, which shows "F2 Saved renames" while no saved rename is chosen (see "Saved renames") |
+| The list | a virtual list view: Old name, Ext., New name, Size, Date and Location |
+| Bottom | the status text, the next step button with an arrow, Start! (the default), Undo, Result list and Close |
 
-- **A placeholder button inserts at the caret** of the box it belongs to, in place of the selected text, so the placeholder shows in the box and the person learns it. Its caption is one word, and its tooltip names the placeholder, such as "Insert [N], the name without its extension". Date inserts `[YMD]` and Time `[hms]`. More opens a menu of every other placeholder with what it inserts.
-- **Range…** opens a dialog titled Range with the focused row's name, or its extension, in a read-only edit box and a check box, Count from the end. The person selects characters; OK inserts their range, such as `[N3-6]`, or `[N-8-5]` when counted from the end.
-- **Windows words replace Total Commander's symbols:** Match case for `^`, First only for `1x`, Extension too for `[E]`, Regular expression for RegEx, Whole name for Subst.
+- **A placeholder button inserts at the caret** of the box it belongs to, in place of the selected text, so the placeholder shows in the box and the person learns it. Its caption shows the placeholder before its word, as in Total Commander, and its tooltip says what it inserts, such as "Insert [N], the name without its extension". The placeholder buttons, `?` and the two icon buttons keep the width of Total Commander's grid; the bottom row's other buttons share one width.
+- **`+`** opens a menu of every placeholder that has no button, with what it inserts, in Total Commander's order. `[X]` shows only while the clipboard holds text, because without text it keeps every name.
+- **`#`** opens a menu of the texts whose ranges no button inserts: the whole name with its extension, the folder that holds the entry, the folder above that, and the full path. Each opens Range on that text and inserts `[A2-5]`, `[P2-5]`, `[G2-5]` or `[2-5]`.
+- **Range** shows the focused row's text in a read-only edit box, three check boxes, "Measure first character from the end", "Measure last character from the end" and "Use [first,length] instead of [first-last]", and at the lower left the placeholder that OK inserts, which follows the selection and the check boxes. So selecting characters gives `[N3-6]`, `[N-8-5]`, `[N3--5]` or `[N3,4]`. A first character counted from the end counts the last one from the end too, because no range form counts only the first from the end. OK is disabled while nothing is selected.
+- **The symbol check boxes have full names:** `^` is Match case, `1x` First only, `[E]` Extension too, RegEx Regular expression and Subst. Whole name. Each name is the check box's tooltip and, through `IAccPropServices`, its name for a screen reader, which reads the symbols as punctuation. The icon buttons' captions are their names for a screen reader, and their tooltips name their keys.
+- **Regular expressions** (`?`) is a dialog with Gozler's own text on what Search for and Replace with take with RegEx on, because Total Commander's regular expressions differ from Gozler's.
 
 #### The mask
 
@@ -1715,8 +1718,15 @@ The name mask and the extension mask are text with placeholders in square bracke
 | `[G]` | the name of the folder above that |
 | `[B0]` … `[B9]` | a folder counted up from the entry: `[B0]` is `[P]`, `[B1]` is `[G]` |
 | `[B+0]` … `[B+9]` | a folder counted down from the root: `[B+0]` is the drive letter without its colon, or the server of a share, whose `[B+1]` is the share; `[B+1]` the first folder |
+| `[2-5]`, and every other range without a letter | characters of the full path, with the extension |
+| `[S]` | the size in bytes; nothing for an entry whose size the list does not know |
+| `[%USERNAME%]` | an environment variable, read once when the dialog opens; `[%x%\]` its last folder, and `[%x%_]` its value with each `\` replaced by the character after the second `%`, here `_`, and `:` removed. A variable that does not exist inserts nothing, so the rest of the name is still made |
+| `[X]`, `[X+]` | the clipboard's text, with `*?:\|"<>` as `_`. Without text, `[X]` keeps the row's name with "No text on the clipboard", and `[X+]` inserts nothing |
+| `[u]` | nothing; anywhere in the mask, it joins separated accents to their letters (NFC) in the entry's name before the other placeholders read it. Total Commander requires it first; the result is the same |
 | `[[]`, `[]]` | `[` and `]` |
 | `[I]`, `[I0]`, `[I1]` | nothing |
+
+**The clipboard** is read through the work owner when a mask with `[X]` changes, because the program that owns the clipboard can make a read wait. Until the text arrives, the list keeps its previous names with "Updating names…", and Start! stays disabled.
 
 **A folder has no extension.** `[N]` is a folder's whole name and `[E]` is empty, as a panel's Ext column is empty for a folder, so folders whose names hold dots rename without a switch. Total Commander splits `My.Folder` unless the mask starts with `[I]`; Gozler accepts `[I]` and ignores it, so Total Commander masks keep working.
 
@@ -1746,6 +1756,9 @@ A range past the end of a name gives the characters that exist, and an empty tex
 | `[C:a]` | digits from the largest value the counter reaches in the list, as Auto does |
 | `[C+1/100]` | a counter that steps once every 100 rows, such as for `[C+1/100]\[N]` |
 | `[Caa+1]` | letters: `aa`, `ab` … `az`, `ba`; the start sets the width |
+| `[c]`, `[c1]` | the number of entries in the list |
+| `[c2]` | the same, with the Digits of Define counter |
+| `[c3]` | the last value of the counter of Define counter |
 
 Every row of the list takes the next value in the list's order, including a row that keeps its name, so one row's problem never renumbers the others. A placeholder with its own settings takes the parts it leaves out from the Counter fields, so `[C10]` steps and pads as the fields say. Fewer digits than the value needs show the whole value.
 
@@ -1761,6 +1774,8 @@ Every row of the list takes the next value in the list's order, including a row 
 | `[d]`, `[t]` | the date and the time in Windows' short formats, with `/` as `-` and `:` as `.` |
 | `[YMD]`, `[hms]` | several date letters in one bracket insert one after another |
 | `[T1]` | the date fields after it read Date modified; this is the default. An entry whose row has no Date modified keeps its name, and its row says "No date modified" |
+| `[T2]` | the date fields after it read the time the dialog opened |
+| `[T3]` | the date fields after it read the time the fields last changed |
 | `[T4]` | the date fields after it read Date taken, or Media created for a video; an entry without one keeps its name, and its row says "No date taken" |
 | `[T1+60m]`, `[T4-2h]` | the same, moved by a number of `s`, `m`, `h`, `D`, `M` or `Y`, such as to correct a camera clock |
 
@@ -1776,14 +1791,14 @@ A mask that cannot be read, such as `[Q]` or a `[` with no `]`, gives no new nam
 - **Several pairs** are separated by `|`: `ä|ö` with `ae|oe`. A pair without a replacement replaces with nothing.
 - **First only** replaces the first match of each pair. **Extension too** also searches the extension; off, only the name changes.
 - **Regular expression** reads Search for in the syntax of Search's `regex:`, and Match case applies to it as above. Replace with takes `$1` to `$9` and `${name}`. `\U`, `\L` and `\F` before a group make that group uppercase, lowercase or first letter uppercase, and `\n` keeps its case; each acts on the next group only. **Whole name**, available only with Regular expression, replaces the whole name with Replace with when the expression matches, and keeps it when it does not. An expression that does not parse gives no new names, and the status line says why.
-- **Case** changes the new name last. Lowercase and UPPERCASE change the whole name, the extension included. First letter uppercase, First Letter Of Each Word and Title case (English) change the name without its extension, because an extension such as `Jpg` is never wanted.
-- **The order** for each row: the masks, then search and replace, then Case, then the checks of "Names that cannot be used", then numbering. A row whose result equals its name keeps its name, and its Note says "No change".
+- **Upper/lowercase** changes the new name last. All lowercase and All UPPERCASE change the whole name, the extension included. First letter uppercase and the two First of each word uppercase change the name without its extension, because an extension such as `Jpg` is never wanted.
+- **The order** for each row: the masks, then search and replace, then Upper/lowercase, then the checks of "Names that cannot be used", then numbering. A row whose result equals its name keeps its name, which New name shows, and the status line does not count it.
 
 #### Folders and names that cannot be used
 
 - **A `\` in the result** separates folders below the entry's folder; the missing ones are created. `..` goes up a folder, as in Total Commander. A trailing `\` is removed. A rename stays on the entry's drive: a name that goes above the drive's root cannot be used, and a new path that reaches another volume through a mount point is a failure that the engine finds.
 - **Each folder name in the result** follows "Names the person types" (`core::typed`): trailing dots and spaces are trimmed, and a device name such as `NUL` or a character that no name holds cannot be used. A name longer than 255 characters, an empty name, a path that starts with a drive, `\` or `\\`, and an empty folder name such as `a\\b` cannot be used either.
-- **A row with a problem keeps its name, and the other rows are renamed,** as Total Commander skips a file that has no date taken. Its Note says why: "Not valid: " and the reason, "No date taken" or "No date modified", and the status line counts these rows.
+- **A row with a problem keeps its name, and the other rows are renamed,** as Total Commander skips a file that has no date taken. Its New name says why, where Total Commander shows `<Error!>`: "Not valid: " and the reason, "No date taken", "No date modified" or "No text on the clipboard", and the status line counts these rows.
 
 #### Numbering
 
@@ -1792,36 +1807,48 @@ Names are compared without regard to case, as NTFS compares them.
 - **Two rows that get the same new name:** the first in the list's order gets it, and each later one gets the first free numbered name, `name (2).ext`, then `(3)`, with the numbering of Keep both.
 - **A new name that an entry outside the batch holds,** or an entry of the batch that keeps its name: numbered the same way, in the preview, so no question is needed and nothing is replaced. Total Commander asks at Start! instead, and its preview does not show the numbers. The preview knows the rows of a folder panel's folder; in a folder that the preview does not list, as in Search, the engine finds the name in use and numbers it, and the list of that folder shows the name it got.
 - **Not in use:** a name that another row of the batch gives up, as in a swap or a shift (`1→2`, `2→3`), and a change of case only.
-- The preview calls the engine's numbering function, so the two never number differently. A numbered row's Note says "Numbered".
+- The preview calls the engine's numbering function, so the two never number differently. A numbered row shows its numbered name, and the status line counts these rows.
 
 #### The list
 
-- **The list starts in the order the entries had,** in the panel or in Search, so the counter follows what the person saw. A click on a column header sorts by it, and a second click reverses the order. `Alt+Up` and `Alt+Down` move the focused row, as in the transfer queue, because `Shift` with an arrow selects rows in Gozler's lists. `Delete` removes the selected rows from the list, not from the disk, and the context menu calls it Remove from list.
-- **Names are computed through the work owner.** A list of up to its inline size of 1,000 rows is computed at once; a larger one keeps its previous names, with "Updating names…" in the status line, while the work runs, and a newer change cancels the older work. Rename is enabled only when the names shown belong to the fields and the rows shown; a change marks them out of date at once, because `Enter` arrives before the timer that computes them.
-- **The status line** counts what Rename will do, and never hides the known counts behind a problem in some rows: "9 of 12 entries get a new name. 2 are numbered. 1 can't be renamed."
+- **The columns:** Old name is the whole name with its extension, as in Total Commander. Ext. is the extension, empty for a folder; a click on it sorts by extension, then by name. New name is the new name, or the reason a row keeps its name. Size and Date are the size and the date modified as Gozler's lists show them. Location is the folder that holds the entry, shown always, because it tells apart two entries of the same name. The headers can be dragged into another order.
+- **The list starts in the order the entries had,** in the panel or in Search, so the counter follows what the person saw. A click on a column header sorts by it, and a second click reverses the order. `Alt+Up` and `Alt+Down` move the focused row, as in the transfer queue, because `Shift` with an arrow selects rows in Gozler's lists. A drag moves a row as in Total Commander: the row follows the mouse through the list until the button is released, and `Esc` stops it where it is. `Delete` removes the selected rows from the list, not from the disk, and the context menu calls it Remove from list.
+- **Names are computed through the work owner.** A list of up to its inline size of 1,000 rows is computed at once; a larger one keeps its previous names, with "Updating names…" in the status line, while the work runs, and a newer change cancels the older work. Start! is enabled only when the names shown belong to the fields and the rows shown; a change marks them out of date at once, because `Enter` arrives before the timer that computes them.
+- **The status text** sits left of the buttons, where Total Commander's is, on two lines. When a translation widens the buttons, the dialog grows by the same width, so the status text keeps its width. It counts what Start! will do, and never hides the known counts behind a problem in some rows: "9 of 12 entries get a new name. 2 are numbered. 1 can't be renamed." A row that failed at Start! keeps its new name in the cell, because Start! tries it again, and its tooltip gives Windows' reason.
 
-#### Rename
+#### Next step
 
-- **Rename** is enabled when at least one row gets a new name. It submits one batch with the rows that get a new name, in the list's order, and leaves out the rows with No change or a problem. It puts the texts of the four boxes first in their histories.
-- **While it runs,** the fields, the list and Rename are disabled, Close has the focus, and the status line counts "Renaming… 4,210 of 10,000". Close closes the dialog; the batch goes on.
+Next step (`F5`, or the arrow button left of Start!) applies a second rule to the result of the first, as Total Commander's does.
+
+- **Each row's new name becomes the name the masks read,** with the numbering it got, and the fields return to their defaults. A row with no change or a problem keeps the name it had. The status text says the step: "Step 2. 9 of 12 entries get a new name." `F5` again adds a step.
+- **`[N]`, `[E]` and `[A]` read the last part of a step name;** a folder part that an earlier step made, such as `sub\` in `sub\a.txt`, stays in front of what the next step makes. `[P]`, `[G]`, `[B…]`, the full path, sizes and dates still read the entry on disk. When the next step cannot make a name for a row, the row keeps the name of the step before.
+- **Old name keeps the name on disk,** and Start! renames from it to the last step's name in one batch, so one Undo reverses every step. The steps belong to the list, not to the fields: a saved rename, (Default) and Edit names change only the current step. Start! and Close end the steps.
+
+#### Start!
+
+- **Start!** is enabled when at least one row gets a new name. It submits one batch with the rows that get a new name, in the list's order, and leaves out the rows with no change or a problem. It puts the texts of the four boxes first in their histories.
+- **While it runs,** the fields, the list and Start! are disabled, Close has the focus, and the status text counts "Renaming… 4,210 of 10,000". Close closes the dialog; the batch goes on.
 - **The batch shows as a rename does,** with Move's transfer presentation, and takes its entries as a move does: they leave the folder panels and show struck through in the search lists until the lists read again. Its row says "Rename {folder}", and the status bar "Renaming 12 items" and "Renamed 12 items"; Cancel all cancels it as any transfer. A failure goes to the operation's Report.
-- **When it ends with the dialog open,** the renamed rows leave the list. Each row that failed stays, with "Couldn't rename: " and Windows' reason in its Note, and keeps the new name it had, so the counter does not number it again; a change to a field computes its name again. The status line says "Renamed 98 entries. 2 couldn't be renamed.", and Rename tries the failed rows again.
-- **The selection follows the renamed entries.** When the dialog closes, a folder panel selects the renamed entries that are in its folder, under their new names, and focuses the new name of the entry it had focused, as it follows an `F6` rename. So a second rule is `Esc`, `Ctrl+M`, and `F5` copies what was just renamed; Total Commander's "next step" (`F5` in its tool) is left out.
+- **When it ends with the dialog open,** the renamed rows leave the list. Each row that failed stays, and keeps the new name it had, so the counter does not number it again; a change to a field computes its name again. The status text says "Renamed 98 entries. 2 couldn't be renamed.", and Start! tries the failed rows again. Total Commander shows the failed rows in bold; Gozler leaves that out, because every row with a new name that stays after Start! is one that failed.
+- **Result list** is enabled once a batch, an Undo included, ends while the dialog is open, as in Total Commander. It opens a dialog titled Result list with one line for each entry of that batch, "old path → new path", and "path: Couldn't rename: " and Windows' reason for each failure, in a read-only box with Copy and Close.
+- **The selection follows the renamed entries.** When the dialog closes, a folder panel selects the renamed entries that are in its folder, under their new names, and focuses the new name of the entry it had focused, as it follows an `F6` rename.
 
 #### Undo
 
 - **The window keeps the renamed entries of the last 20 batches,** each as its old path and the path it got, newest first, until Exit, as Total Commander does. A batch that renamed nothing is not kept. It reverses Multi-Rename batches only; it is not a general Undo of file operations.
 - **Undo** (`Alt+U`) is enabled while a batch is kept. It asks first, in a dialog titled Undo: "Undo the last Multi-Rename of 12 entries?", or for one entry, "Undo renaming "a.txt" to "a-1.txt"?", with "Entries that changed since then keep their names." below it, and Undo, the default, and Cancel.
 - **Undo submits a batch** that renames each entry back, the last rename first. An entry that is no longer at the path it got, or whose old name is in use, fails and is listed; nothing is numbered or replaced. The folders that the batch created stay. The batch leaves the list of kept batches, and the Undo itself is not kept, so each press goes one batch further back. The status line says "Undid the renames of 12 entries." and "1 couldn't be undone.".
-- A row in the open dialog whose entry the Undo renamed fails at Rename as any entry that no longer exists does.
+- A row in the open dialog whose entry the Undo renamed fails at Start! as any entry that no longer exists does.
 
 #### Edit names
 
-Edit… opens a dialog titled Edit names, with "New names, one per line:" and a multi-line edit box that holds the rows' new names in the list's order, with their extensions and any folders. The person types or pastes, which needs no external editor as Total Commander's does. OK gives each row the name on its line and closes; the names then pass the checks and the numbering, as computed names do. The fields are disabled, and the status line says "The names come from Edit names.". Choosing (Default) or a saved rename returns to the fields. A count of lines other than the count of rows keeps the dialog open with a balloon: "There are 98 names for 100 entries. Write one name on each line." Empty lines at the end are not counted.
+The names button and `F10` open a menu of Load names from file… and Edit names…, as Total Commander's do; its Configure editor… is left out, because Edit names edits the names in Gozler. Load names from file… opens the common file dialog, reads the file through the work owner, as UTF-8 with or without a byte-order mark or as UTF-16 with one, and opens Edit names with its lines once no batch runs and nothing else is open over the dialog, so the count check and OK stay in one place. A file that cannot be read says why in the status text: "Couldn't read names.txt: Access is denied.", before the counts
+
+Edit names… opens a dialog titled Edit names, with "New names, one per line:" and a multi-line edit box that holds the rows' new names in the list's order, with their extensions and any folders. The person types or pastes, which needs no external editor as Total Commander's does. OK gives each row the name on its line and closes; the names then pass the checks and the numbering, as computed names do. The fields are disabled, and the status line says "The names come from Edit names.". Choosing (Default) or a saved rename returns to the fields. A count of lines other than the count of rows keeps the dialog open with a balloon: "There are 98 names for 100 entries. Write one name on each line." Empty lines at the end are not counted.
 
 #### Saved renames
 
-- **Saved renames** (`F2`) is a drop-down list: (Default), then each saved rename by name, then Save… and Delete…. A saved rename holds every field of the dialog. Selecting one fills the fields; (Default) sets the defaults. Save… and Delete… open their dialog only when the person chooses them in the open list, by a click or `Enter`, so the arrow keys pass them by, as the filter pane's Custom… does.
+- **Saved renames** (`F2`) is a drop-down list: (Default), then each saved rename by name in alphabetical order, as Total Commander sorts them, then Save… and Delete…. A saved rename holds every field of the dialog. Selecting one fills the fields; (Default) sets the defaults. Save… and Delete… open their dialog only when the person chooses them in the open list, by a click or `Enter`, so the arrow keys pass them by, as the filter pane's Custom… does.
 - **Save…** asks for a name in a dialog titled Save. A name in use asks "Replace the saved rename "Photos by date"?", with Replace and Cancel. **Delete…** asks "Delete the saved rename "Photos by date"?", with Delete and Cancel, for the saved rename chosen last.
 - **History.** The name, extension, Search for and Replace with boxes each keep their last 20 texts, newest first. `Shift+Delete` in an open list removes one.
 - Both are saved in `ui.json` under `multi_rename`, with the dialog's size, and a missing or damaged value gives an empty list.
@@ -1830,32 +1857,27 @@ Edit… opens a dialog titled Edit names, with "New names, one per line:" and a 
 
 | Key | Does |
 | --- | --- |
-| `Enter` | Rename, from a box or the list; in an open drop-down list, closes the list |
+| `Enter` | Start!, from a box or the list; in an open drop-down list, closes the list |
 | `Esc` | Close, also from a box; in an open drop-down list, closes the list |
 | `F2` | open Saved renames |
-| `Alt+U` | Undo |
-| `Alt` and an underlined letter | the field or button with that access key |
+| `F5` | Next step |
+| `F10` | the names menu: Load names from file… and Edit names… |
+| `Alt` and an underlined letter | the field or button with that access key, as in Total Commander, such as `Alt+M` for the name mask and `Alt+U` for Undo |
 | `Delete`, `Alt+Up`, `Alt+Down` | in the list: remove rows, move the focused row |
 | `Shift+Delete` | in an open history list: remove the entry |
 
 #### Left out
 
-Each item can be added later without changing anything else; none serves a common task that the rest cannot do.
-
 | Total Commander | Task | Why not |
 | --- | --- | --- |
-| `[2-5]` | a range of the full path | `[P]`, `[G]` and `[B…]` with ranges name the folders |
-| `[c]`, `[c2]`, `[c3]` | "File 3 of 12" | rare |
-| `[T2]`, `[T3]` | the time now | rare; the date a file was renamed is not a property of the file |
-| `[S]` | the size in bytes | rare |
-| `[%x%]`, `[X]`, `[X+]` | an environment variable, the clipboard | rare; paste the text into the mask instead |
-| `[u]` | join separated accents | rare outside files from macOS |
-| `[=plugin.field]` | a content plug-in field | Gozler has no plug-ins |
-| `MULTIRENAME=<name>` | run a saved rename from a button | Gozler has no button bar |
-| Result list | a log of the renames | Undo and the Report cover the reason for it |
-| `F5` next step | apply a second rule before renaming | the selection follows the renamed entries |
-| Load names from file | names from a text file | paste them into Edit names |
+| `[=plugin.field]`, `[=?]  Plug-in`, `[?#-#]` | a content plug-in field | Gozler has no plug-ins; the Plug-in button's place stays empty |
+| Configure editor… | edit the names in another program | Edit names edits them in Gozler |
+| `MULTIRENAME=<name>`, `MULTIRENAME <UNDO>` | run a saved rename or Undo from a button | Gozler has no button bar |
+| The question at Start! about names in use | number names in use | the preview numbers them, so nothing waits for an answer |
+| "Please press 'Start!' to start renaming!" | — | the status text's counts say more |
+| Bold failed rows | see which renames failed | the rows with a new name that stay after Start! are the failed ones, and the status text counts them |
 | Restart as administrator | rename where Windows denies it | Move to folder… does not offer it either |
+| `wincmd.ini` keys such as `MultiRenameUndoHistoryLen` | — | Gozler keeps its own settings in `ui.json` |
 
 ## File operations
 

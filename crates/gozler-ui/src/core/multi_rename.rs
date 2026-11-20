@@ -15,6 +15,7 @@ use super::text::Numbers;
 use super::typed::{self, Refusal};
 use gozler_fileops::names::{fold, numbered_name};
 use gozler_fileops::{Rename, Renamed};
+use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use mask::{CounterAt, Mask, MaskError, Missing, Output};
 use replace::{Replacer, Wanted};
@@ -166,6 +167,9 @@ pub(crate) struct Row {
     pub(crate) taken: Option<i64>,
     /// The name that Edit names gave it.
     pub(crate) edited: Option<String>,
+    /// The new name that the steps before Next step gave it, relative to
+    /// its folder, which the masks read in place of its name.
+    pub(crate) step: Option<String>,
     /// A rename that failed keeps the name it had until a field changes,
     /// so the counter does not number it again.
     pub(crate) failed: Option<Failed>,
@@ -208,6 +212,7 @@ impl Row {
                     entry,
                     taken: None,
                     edited: None,
+                    step: None,
                     failed: None,
                 }
             })
@@ -219,19 +224,55 @@ impl Row {
         String::from_utf16_lossy(&self.entry.path[..self.name_at])
     }
 
-    /// Whether `other`'s entry is in the same folder.
-    pub(crate) fn shares_folder(&self, other: &Row) -> bool {
-        self.folder_key == other.folder_key
-    }
-
-    /// The name without its extension, which `[N]` inserts.
-    pub(crate) fn stem(&self) -> &str {
-        &self.name[..self.dot]
-    }
-
-    /// The extension without its dot, which `[E]` inserts.
+    /// The extension without its dot, which the Ext. column shows.
     pub(crate) fn extension(&self) -> &str {
-        self.name.get(self.dot + 1..).unwrap_or_default()
+        self.own_name().extension()
+    }
+
+    /// The name the masks read: after Next step the earlier steps' name,
+    /// whose folders stay in front of what this step makes; otherwise its
+    /// own.
+    pub(crate) fn read_name(&self) -> ReadName<'_> {
+        let Some(step) = &self.step else {
+            return self.own_name();
+        };
+        let (folders, name) = step.split_at(step.rfind('\\').map_or(0, |at| at + 1));
+        ReadName {
+            folders,
+            name,
+            dot: extension_dot(name, self.entry.is_folder),
+        }
+    }
+
+    /// The entry's name on disk.
+    fn own_name(&self) -> ReadName<'_> {
+        ReadName {
+            folders: "",
+            name: &self.name,
+            dot: self.dot,
+        }
+    }
+
+    /// The text that the placeholder starting with `letter` reads, in
+    /// which the Range dialog selects characters: `N`, `E` and `A` the
+    /// name the masks read, `P` and `G` a folder, and no letter the full
+    /// path.
+    pub(crate) fn range_text(&self, letter: &str) -> String {
+        let read = self.read_name();
+        let folder = |up: usize| {
+            let (folders, _) = self.folders();
+            (folders.len().checked_sub(up))
+                .map(|index| folders[index].clone())
+                .unwrap_or_default()
+        };
+        match letter {
+            "N" => read.stem().to_owned(),
+            "E" => read.extension().to_owned(),
+            "A" => read.name.to_owned(),
+            "P" => folder(1),
+            "G" => folder(2),
+            _ => String::from_utf16_lossy(&self.entry.path),
+        }
     }
 
     /// The folders from the root: the drive letter without its colon or the
@@ -253,6 +294,26 @@ impl Row {
             .collect();
         let depth = folders.len().saturating_sub(root);
         (folders, depth)
+    }
+}
+
+/// The name a row's masks read, with the folders that an earlier step made.
+pub(crate) struct ReadName<'a> {
+    pub(crate) folders: &'a str,
+    pub(crate) name: &'a str,
+    /// Where the extension's dot is in `name`; its length when it has none.
+    dot: usize,
+}
+
+impl<'a> ReadName<'a> {
+    /// The name without its extension, which `[N]` inserts.
+    pub(crate) fn stem(&self) -> &'a str {
+        &self.name[..self.dot]
+    }
+
+    /// The extension without its dot, which `[E]` inserts.
+    pub(crate) fn extension(&self) -> &'a str {
+        self.name.get(self.dot + 1..).unwrap_or_default()
     }
 }
 
@@ -312,6 +373,11 @@ impl Rule {
         self.name.reads_date_taken() || self.extension.reads_date_taken()
     }
 
+    /// Whether a mask reads the clipboard, which the dialog reads first.
+    pub(crate) fn reads_clipboard(&self) -> bool {
+        self.name.reads_clipboard() || self.extension.reads_clipboard()
+    }
+
     /// The new name the rule makes for the row at `index` of a list of
     /// `rows`, relative to its folder, before the checks.
     fn make(
@@ -328,10 +394,13 @@ impl Rule {
             (Vec::new(), 0)
         };
         let folders: Vec<&str> = folders.iter().map(String::as_str).collect();
+        let read = row.read_name();
         let source = mask::Row {
-            stem: row.stem(),
-            extension: row.extension(),
-            name: &row.name,
+            stem: read.stem(),
+            extension: read.extension(),
+            name: read.name,
+            path: &row.entry.path,
+            size: row.entry.size,
             folders: &folders,
             counter: CounterAt {
                 index,
@@ -340,8 +409,7 @@ impl Rule {
             },
             modified: row.entry.modified,
             taken: row.taken,
-            zone: context.zone,
-            formats: context.formats,
+            context,
         };
         let mut name = Output::default();
         self.name.evaluate(&source, &mut name)?;
@@ -356,7 +424,42 @@ impl Rule {
             true => self.replacer.apply(joined(name, &extension)),
             false => joined(self.replacer.apply(name), &extension),
         };
-        Ok(with_case(&replaced, self.case, row.entry.is_folder))
+        let cased = with_case(&replaced, self.case, row.entry.is_folder);
+        Ok(format!("{}{cased}", read.folders))
+    }
+}
+
+/// The text of a file of names for Edit names, as Windows programs write
+/// one: UTF-16 after its byte-order mark, little- or big-endian, or else
+/// UTF-8, with or without its mark. Bytes that are not text become
+/// U+FFFD, so one bad line never hides the others.
+pub(crate) fn names_text(bytes: &[u8]) -> String {
+    let utf16 = |bytes: &[u8], unit: fn([u8; 2]) -> u16| {
+        let units: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| unit(pair))
+            .collect();
+        String::from_utf16_lossy(&units)
+    };
+    match bytes {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// Next step: each row's new name becomes the name the masks read, so the
+/// fields' next rule applies to the result of this one. A row without a
+/// new name keeps the name it has; the names that Edit names gave belong
+/// to this step.
+pub(crate) fn next_step(rows: &mut [Row], outcomes: &[Outcome]) {
+    for (row, outcome) in rows.iter_mut().zip(outcomes) {
+        let name = outcome.name(row);
+        row.step = (name != row.name).then(|| name.to_owned());
+        row.edited = None;
     }
 }
 
@@ -366,11 +469,23 @@ pub(crate) enum Source<'a> {
     Edited,
 }
 
-/// What formats dates for a mask: the time zone the list shows dates in,
-/// and Windows' short formats for `[d]` and `[t]`.
+/// What a mask reads besides the row: the time zone the list shows dates
+/// in, Windows' short formats for `[d]` and `[t]`, and what the dialog took
+/// from the machine.
 pub(crate) struct Context<'a> {
     pub(crate) zone: &'a TimeZone,
     pub(crate) formats: &'a dyn Numbers,
+    /// When the dialog opened, which date fields after `[T2]` read.
+    pub(crate) opened: Timestamp,
+    /// When the fields last changed, which date fields after `[T3]` read.
+    pub(crate) changed: Timestamp,
+    /// The environment variables, read once when the dialog opens, keyed by
+    /// the name in uppercase because Windows compares names without regard
+    /// to case.
+    pub(crate) variables: &'a HashMap<String, String>,
+    /// The clipboard's text; `None` when it holds none. The dialog reads it
+    /// only when [`Rule::reads_clipboard`] says a mask needs it.
+    pub(crate) clipboard: Option<&'a str>,
 }
 
 /// The names of the folder that a folder panel shows, which the preview
@@ -428,6 +543,8 @@ pub(crate) enum Problem {
     Invalid(Invalid),
     NoDateTaken,
     NoDateModified,
+    /// `[X]` and the clipboard holds no text.
+    NoClipboardText,
 }
 
 /// Why a new name cannot be used.
@@ -496,12 +613,22 @@ pub(crate) fn preview(
                 Source::Rule(rule) => rule.make(row, index as u64, count, context),
                 Source::Edited => Ok(row.edited.clone().unwrap_or_else(|| row.name.clone())),
             };
-            let made = match made {
-                Ok(made) => made,
-                Err(Missing::Taken) => return Outcome::Kept(Problem::NoDateTaken),
-                Err(Missing::Modified) => return Outcome::Kept(Problem::NoDateModified),
+            // A row that this step cannot name keeps the earlier steps'
+            // name, which passed these checks then.
+            let made = match (made, &row.step) {
+                (Ok(made), _) => made,
+                (Err(_), Some(step)) => step.clone(),
+                (Err(Missing::Taken), None) => return Outcome::Kept(Problem::NoDateTaken),
+                (Err(Missing::Modified), None) => return Outcome::Kept(Problem::NoDateModified),
+                (Err(Missing::Clipboard), None) => {
+                    return Outcome::Kept(Problem::NoClipboardText);
+                }
             };
-            match checked(&made, || row.folders().1) {
+            let name = match (checked(&made, || row.folders().1), &row.step) {
+                (Err(_), Some(step)) => checked(step, || row.folders().1),
+                (name, _) => name,
+            };
+            match name {
                 Err(invalid) => Outcome::Kept(Problem::Invalid(invalid)),
                 Ok(name) if name == row.name => Outcome::NoChange,
                 Ok(name) => Outcome::New {
@@ -668,15 +795,16 @@ fn with_case(name: &str, case: Case, is_folder: bool) -> String {
     }
 }
 
-/// A column of the dialog's list, which a click on its header sorts by.
+/// A column of the dialog's list, which a click on its header sorts by:
+/// Total Commander's Old name, Ext., New name, Size, Date and Location.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Column {
-    Name,
+    OldName,
+    Extension,
     NewName,
-    Note,
     Size,
     Modified,
-    Folder,
+    Location,
 }
 
 /// The order of `rows` by `column`, as the index of the row that goes
@@ -690,7 +818,7 @@ pub(crate) fn sorted(
     descending: bool,
 ) -> Vec<usize> {
     let folded = |text: &str| fold(&text.encode_utf16().collect::<Vec<u16>>());
-    let new_names: Vec<Vec<u16>> = match column {
+    let keys: Vec<Vec<u16>> = match column {
         Column::NewName => (rows.iter().enumerate())
             .map(|(index, row)| {
                 let name = outcomes
@@ -699,28 +827,21 @@ pub(crate) fn sorted(
                 folded(name)
             })
             .collect(),
+        Column::Extension => rows.iter().map(|row| folded(row.extension())).collect(),
         _ => Vec::new(),
-    };
-    // Each kind of note sorts as a group.
-    let note = |index: usize| match outcomes.get(index) {
-        Some(Outcome::NoChange) | None => 0,
-        Some(Outcome::New {
-            numbered: false, ..
-        }) => 1,
-        Some(Outcome::New { numbered: true, .. }) => 2,
-        Some(Outcome::Kept(_)) => 3,
-        Some(Outcome::Failed(_)) => 4,
     };
     let mut order: Vec<usize> = (0..rows.len()).collect();
     order.sort_by(|&a, &b| {
         let (one, other) = (&rows[a], &rows[b]);
         let ordering = match column {
-            Column::Name => one.name_key.cmp(&other.name_key),
-            Column::NewName => new_names[a].cmp(&new_names[b]),
-            Column::Note => note(a).cmp(&note(b)),
+            Column::OldName => one.name_key.cmp(&other.name_key),
+            Column::Extension => {
+                (keys[a].cmp(&keys[b])).then_with(|| one.name_key.cmp(&other.name_key))
+            }
+            Column::NewName => keys[a].cmp(&keys[b]),
             Column::Size => one.entry.size.cmp(&other.entry.size),
             Column::Modified => one.entry.modified.cmp(&other.entry.modified),
-            Column::Folder => (one.folder_key.cmp(&other.folder_key))
+            Column::Location => (one.folder_key.cmp(&other.folder_key))
                 .then_with(|| one.name_key.cmp(&other.name_key)),
         };
         match descending {
@@ -731,15 +852,28 @@ pub(crate) fn sorted(
     order
 }
 
-/// The range placeholder of the letter `letter`, such as `N`, that names
-/// the characters `selected` of `text`, given as UTF-16 units as an edit
-/// control gives its selection: counted from the start, as `[N3-6]`, or
-/// from the end, as `[N-8-5]`. `None` when nothing is selected.
+/// How the Range dialog writes a range, as its three check boxes choose,
+/// as Total Commander's does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RangeForm {
+    /// The first character counted from the end, as `[N-8-5]`.
+    pub(crate) first_from_end: bool,
+    /// The last character counted from the end, as `[N2--5]`.
+    pub(crate) last_from_end: bool,
+    /// The first character and a count, as `[N2,5]`.
+    pub(crate) length: bool,
+}
+
+/// The range placeholder after `letter`, such as `N`, or after nothing for
+/// the full path, that names the characters `selected` of `text`, given as
+/// UTF-16 units as an edit control gives its selection, in the form
+/// `form`: `[N3-6]`, `[N-8-5]`, `[N3--5]` or `[N3,4]`. `None` when nothing
+/// is selected.
 pub(crate) fn range(
-    letter: char,
+    letter: &str,
     text: &str,
     selected: (usize, usize),
-    from_end: bool,
+    form: RangeForm,
 ) -> Option<String> {
     // The characters before a UTF-16 offset, because a range counts a
     // character that Windows stores as two units once.
@@ -757,13 +891,24 @@ pub(crate) fn range(
         return None;
     }
     let count = text.chars().count();
-    let (first, last, sign) = match from_end {
-        false => (start + 1, end, ""),
-        true => (count - start, count + 1 - end, "-"),
+    let (first, sign) = match form.first_from_end {
+        false => (start + 1, ""),
+        true => (count - start, "-"),
     };
-    Some(match first == last {
-        true => format!("[{letter}{sign}{first}]"),
-        false => format!("[{letter}{sign}{first}-{last}]"),
+    if form.length {
+        return Some(format!("[{letter}{sign}{first},{}]", end - start));
+    }
+    // `[N-8-5]` reads both ends from the end and `[N2--5]` only the last,
+    // so a mask has no form for a first end from the end and a last one
+    // from the start.
+    let last = match form.first_from_end || form.last_from_end {
+        false => end,
+        true => count + 1 - end,
+    };
+    Some(match (form.first_from_end, form.last_from_end) {
+        (false, true) => format!("[{letter}{first}--{last}]"),
+        _ if first == last => format!("[{letter}{sign}{first}]"),
+        _ => format!("[{letter}{sign}{first}-{last}]"),
     })
 }
 
@@ -798,34 +943,35 @@ fn relative(at: &Path, from: &Path) -> PathBuf {
     name
 }
 
-/// The placeholders that More offers, in groups, each with the catalogue
-/// key of what it inserts.
-pub(crate) const MORE: [&[(&str, &str)]; 5] = [
+/// The placeholders that the `+` menu offers, in groups, each with the
+/// catalogue key of what it inserts: Total Commander's entries first, in
+/// its order.
+pub(crate) const MORE: [&[(&str, &str)]; 7] = [
     &[
-        ("[A]", "multi_rename.more_whole_name"),
         ("[P]", "multi_rename.more_folder"),
         ("[G]", "multi_rename.more_parent"),
+        ("[A]", "multi_rename.more_whole_name"),
         ("[B+0]", "multi_rename.more_drive"),
         ("[B+1]", "multi_rename.more_top_folder"),
     ],
     &[
+        ("[d]", "multi_rename.more_short_date"),
+        ("[t]", "multi_rename.more_short_time"),
         ("[Y]", "multi_rename.more_year"),
         ("[y]", "multi_rename.more_short_year"),
         ("[M]", "multi_rename.more_month"),
         ("[D]", "multi_rename.more_day"),
-        ("[d]", "multi_rename.more_short_date"),
-    ],
-    &[
         ("[h]", "multi_rename.more_hour"),
         ("[H]", "multi_rename.more_twelve_hour"),
         ("[i]", "multi_rename.more_am_pm"),
         ("[m]", "multi_rename.more_minutes"),
         ("[s]", "multi_rename.more_seconds"),
         ("[v]", "multi_rename.more_milliseconds"),
-        ("[t]", "multi_rename.more_short_time"),
     ],
     &[
         ("[T1]", "multi_rename.more_date_modified"),
+        ("[T2]", "multi_rename.more_opened"),
+        ("[T3]", "multi_rename.more_changed"),
         ("[T4]", "multi_rename.more_date_taken"),
     ],
     &[
@@ -834,7 +980,32 @@ pub(crate) const MORE: [&[(&str, &str)]; 5] = [
         ("[F]", "multi_rename.more_each_word"),
         ("[f]", "multi_rename.more_title"),
         ("[n]", "multi_rename.more_as_is"),
+        ("[u]", "multi_rename.more_compose"),
     ],
+    &[
+        ("[c]", "multi_rename.more_count"),
+        ("[c2]", "multi_rename.more_count_digits"),
+        ("[c3]", "multi_rename.more_last_counter"),
+        ("[S]", "multi_rename.more_size"),
+        ("[%USERNAME%]", "multi_rename.more_variable"),
+    ],
+    &[
+        ("[[]", "multi_rename.more_open_bracket"),
+        ("[]]", "multi_rename.more_close_bracket"),
+    ],
+    // The dialog shows `[X]` only while the clipboard holds text, as Total
+    // Commander does.
+    &[("[X]", "multi_rename.more_clipboard")],
+];
+
+/// The `#` menu: the texts whose ranges no button inserts, each as the
+/// letter its placeholder starts with and the menu item's text. The full
+/// path has no letter, as in `[2-5]`.
+pub(crate) const RANGES: [(&str, &str); 4] = [
+    ("A", "multi_rename.more_whole_name"),
+    ("P", "multi_rename.more_folder"),
+    ("G", "multi_rename.more_parent"),
+    ("", "multi_rename.range_full_path"),
 ];
 
 /// The first letter uppercase and the rest lowercase.
@@ -913,7 +1084,19 @@ mod tests {
     }
 
     fn names(rows: &[Row], fields: &Fields, known: Option<&Known>) -> Vec<Outcome> {
+        names_reading(rows, fields, known, None)
+    }
+
+    /// The dialog opened at 2026-01-02 03:04:05 UTC, the fields changed at
+    /// 2026-06-07 08:09:10 UTC, and the environment holds only `TEMP`.
+    fn names_reading(
+        rows: &[Row],
+        fields: &Fields,
+        known: Option<&Known>,
+        clipboard: Option<&str>,
+    ) -> Vec<Outcome> {
         let rule = Rule::new(fields).expect("the fields read");
+        let variables = HashMap::from([("TEMP".to_owned(), r"c:\temp".to_owned())]);
         preview(
             rows,
             &Source::Rule(&rule),
@@ -921,6 +1104,10 @@ mod tests {
             &Context {
                 zone: &TimeZone::UTC,
                 formats: &English,
+                opened: "2026-01-02T03:04:05Z".parse().unwrap(),
+                changed: "2026-06-07T08:09:10Z".parse().unwrap(),
+                variables: &variables,
+                clipboard,
             },
         )
     }
@@ -1079,6 +1266,7 @@ mod tests {
     fn made(name: &str, mask: &str) -> String {
         let fields = Fields {
             name: mask.into(),
+            extension: String::new(),
             ..Fields::default()
         };
         let list = rows(&[&format!(r"C:\Photos\2026\Trip\{name}")]);
@@ -1162,16 +1350,30 @@ mod tests {
     /// them, counted from the start or from the end.
     #[test]
     fn range_names_the_selected_characters() {
-        assert_eq!(
-            range('N', "abcdefghij", (2, 6), false).as_deref(),
-            Some("[N3-6]")
-        );
-        assert_eq!(
-            range('N', "abcdefghij", (2, 6), true).as_deref(),
-            Some("[N-8-5]")
-        );
-        assert_eq!(range('E', "a😀b", (3, 4), false).as_deref(), Some("[E3]"));
-        assert_eq!(range('N', "abc", (1, 1), false), None);
+        let picked = |form: RangeForm| range("N", "abcdefghij", (2, 6), form);
+        assert_eq!(picked(RangeForm::default()).as_deref(), Some("[N3-6]"));
+        let from_end = RangeForm {
+            first_from_end: true,
+            last_from_end: true,
+            length: false,
+        };
+        assert_eq!(picked(from_end).as_deref(), Some("[N-8-5]"));
+        let one = range("N", "abcdefghij", (2, 3), from_end);
+        assert_eq!(one.as_deref(), Some("[N-8]"));
+        let last_from_end = RangeForm {
+            last_from_end: true,
+            ..RangeForm::default()
+        };
+        assert_eq!(picked(last_from_end).as_deref(), Some("[N3--5]"));
+        let length = RangeForm {
+            length: true,
+            ..RangeForm::default()
+        };
+        assert_eq!(picked(length).as_deref(), Some("[N3,4]"));
+        let form = RangeForm::default();
+        assert_eq!(range("E", "a😀b", (3, 4), form).as_deref(), Some("[E3]"));
+        assert_eq!(range("", "C:\\a", (0, 2), form).as_deref(), Some("[1-2]"));
+        assert_eq!(range("N", "abc", (1, 1), form), None);
     }
 
     /// Undo names each entry's old name from the folder it is in now: up
@@ -1226,5 +1428,172 @@ mod tests {
         );
         list[0].taken = Some(modified - 36_000_000_000);
         assert_eq!(dated(&list, "[T4-1D][D][h]"), new("0304"));
+    }
+
+    /// `[T2]` reads the time the dialog opened and `[T3]` the time the
+    /// fields last changed, also for an entry without Date modified, and
+    /// an offset moves them.
+    #[test]
+    fn dates_read_when_the_dialog_opened_and_the_fields_changed() {
+        assert_eq!(made("x", "[T2][YMD]-[hms]"), "20260102-030405");
+        assert_eq!(made("x", "[T3+1D][YMD]"), "20260608");
+    }
+
+    /// A range reads the whole path, the extension included.
+    #[test]
+    fn a_range_alone_reads_the_path() {
+        assert_eq!(made("abc.txt", "[4-9]"), "Photos");
+        assert_eq!(made("abc.txt", "[-7-]"), "abc.txt");
+    }
+
+    /// `[c]` and `[c1]` count the rows; `[c2]` pads that count and `[c3]`
+    /// is the counter's last value, both to the Counter fields' digits,
+    /// and `[C]` stays the counter.
+    #[test]
+    fn the_row_count_and_the_last_counter_value() {
+        let paths: Vec<String> = (0..12).map(|n| format!(r"C:\a\f{n}")).collect();
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let list = rows(&paths);
+        let counted = |mask: &str, digits: Digits| {
+            let fields = Fields {
+                name: mask.into(),
+                counter: Counter {
+                    start: 5,
+                    step: 3,
+                    digits,
+                },
+                ..Fields::default()
+            };
+            names(&list, &fields, None)[0].name(&list[0]).to_owned()
+        };
+        let fixed = Digits::Fixed(4);
+        assert_eq!(counted("[c]-[c1]", fixed), "12-12");
+        assert_eq!(counted("[c2]-[c3]-[C]", fixed), "0012-0038-0005");
+        assert_eq!(counted("[c2]-[c3]", Digits::Auto), "12-38");
+    }
+
+    /// `[S]` is the size in bytes with no separators; an entry without a
+    /// size inserts nothing.
+    #[test]
+    fn the_size_in_bytes() {
+        let entry = |path: &str, size| Entry {
+            path: path.encode_utf16().collect(),
+            is_folder: false,
+            size,
+            modified: None,
+        };
+        let list = Row::of(vec![
+            entry(r"C:\a\big", Some(1_234_567)),
+            entry(r"C:\a\none", None),
+        ]);
+        let fields = Fields {
+            name: "[N]-[S]".into(),
+            extension: String::new(),
+            ..Fields::default()
+        };
+        assert_eq!(
+            names(&list, &fields, None),
+            [new("big-1234567"), new("none-")]
+        );
+    }
+
+    /// `[%x%]` is an environment variable, found without regard to case,
+    /// and takes a range; `\` gives its last part; a character gives the
+    /// value with `\` as that character and `:` removed. A variable that
+    /// does not exist inserts nothing, so the rest of the name is made.
+    #[test]
+    fn environment_variables() {
+        assert_eq!(made("x", "[%temp%4-7]"), "temp");
+        assert_eq!(made("x", r"[%TEMP%\]"), "temp");
+        assert_eq!(made("x", r"[%TEMP%\2-3]"), "em");
+        assert_eq!(made("x", "[%TEMP%_]"), "c_temp");
+        assert_eq!(made("x", "[%TEMP%_2-]"), "_temp");
+        assert_eq!(made("x", "[%NOPE%]-[N]"), "-x");
+    }
+
+    /// `[X]` is the clipboard's text with the characters no name holds as
+    /// `_`; without text it keeps the row's name and says why, and `[X+]`
+    /// inserts nothing instead. Only a rule with `[X]` reads the clipboard.
+    #[test]
+    fn the_clipboard_text() {
+        let list = rows(&[r"C:\a\f"]);
+        let with = |mask: &str, clipboard: Option<&str>| {
+            let fields = Fields {
+                name: mask.into(),
+                extension: String::new(),
+                ..Fields::default()
+            };
+            names_reading(&list, &fields, None, clipboard).remove(0)
+        };
+        assert_eq!(
+            with("[X]", Some("a*b?c:d|e\"f<g>h")),
+            new("a_b_c_d_e_f_g_h")
+        );
+        assert_eq!(with("[X]", None), Outcome::Kept(Problem::NoClipboardText));
+        assert_eq!(with("[X+]x", None), new("x"));
+        let reads = |name: &str| {
+            let fields = Fields {
+                name: name.into(),
+                ..Fields::default()
+            };
+            Rule::new(&fields).unwrap().reads_clipboard()
+        };
+        assert!(reads("[N][X+]"));
+        assert!(!reads("[N]"));
+    }
+
+    /// `[u]` puts the name in composed form before every placeholder reads
+    /// it, wherever in the mask it stands.
+    #[test]
+    fn composing_the_name() {
+        let decomposed = "e\u{301}x";
+        assert_eq!(made(decomposed, "[N]"), decomposed);
+        assert_eq!(made(decomposed, "[N]-[u]"), "\u{e9}x-");
+        assert_eq!(made(decomposed, "[N1][u]"), "\u{e9}");
+    }
+
+    /// Next step: the second rule reads the first one's names, keeps the
+    /// folder the first one made in front, and renames from the name on
+    /// disk; a row the second rule cannot name keeps the first's name.
+    #[test]
+    fn a_second_step_reads_the_first_steps_names() {
+        let mut list = rows(&[r"C:\a\photo.jpg", r"C:\a\clip.mp4"]);
+        let rule = |name: &str| Fields {
+            name: name.into(),
+            ..Fields::default()
+        };
+        let first = names(&list, &rule(r"sorted\[N]-[C]"), None);
+        next_step(&mut list, &first);
+        let second = names(&list, &rule("[U][N]"), None);
+        assert_eq!(
+            second,
+            [new(r"sorted\PHOTO-1.jpg"), new(r"sorted\CLIP-2.mp4")]
+        );
+        // No row has a date taken.
+        let third = names(&list, &rule("[T4][Y]"), None);
+        assert_eq!(
+            third,
+            [new(r"sorted\photo-1.jpg"), new(r"sorted\clip-2.mp4")]
+        );
+    }
+
+    /// A names file that Notepad saved as Unicode is UTF-16 after its mark;
+    /// read as UTF-8, every name would hold NULs.
+    #[test]
+    fn a_names_file_in_utf16_reads_as_text() {
+        let utf16: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("a\r\nä".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(names_text(&utf16), "a\r\nä");
+        assert_eq!(names_text(b"\xEF\xBB\xBFb"), "b");
+    }
+
+    /// Ext. sorts by the extension, then by the name, so the files of one
+    /// type keep their names' order; a folder has no extension.
+    #[test]
+    fn a_sort_by_extension_keeps_the_names_in_order() {
+        let list = rows(&[r"C:\a\b.txt", r"C:\a\z.JPG", r"C:\a\a.txt", r"C:\a\d.v1\"]);
+        assert_eq!(sorted(&list, &[], Column::Extension, false), [3, 1, 2, 0]);
     }
 }

@@ -600,6 +600,7 @@ impl DialogProc for IndexedFolders<'_> {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Other => false,
         }
     }

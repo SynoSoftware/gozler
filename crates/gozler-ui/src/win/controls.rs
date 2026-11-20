@@ -26,24 +26,25 @@ use windows::Win32::Graphics::Gdi::COLOR_WINDOWTEXT;
 use windows::Win32::UI::Controls::{
     BCM_GETIMAGELIST, BCM_SETIMAGELIST, BCM_SETSHIELD, BCM_SETSPLITINFO, BCSIF_STYLE, BCSS_NOSPLIT,
     BS_SPLITBUTTON, BST_CHECKED, BUTTON_IMAGELIST, BUTTON_IMAGELIST_ALIGN,
-    BUTTON_IMAGELIST_ALIGN_CENTER, BUTTON_IMAGELIST_ALIGN_LEFT, BUTTON_SPLITINFO, COMBOBOXINFO,
-    DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, EM_GETCUEBANNER, EM_GETMARGINS, EM_GETSEL, EM_LIMITTEXT,
-    EM_REPLACESEL, EM_SETCUEBANNER, EM_SETSEL, GDT_NONE, GDT_VALID, GetComboBoxInfo, HIMAGELIST,
-    HKM_GETHOTKEY, HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL, HOTKEYF_EXT,
-    HOTKEYF_SHIFT, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_HOTKEY_CLASS, ICC_LINK_CLASS,
-    ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, ICC_TREEVIEW_CLASSES, INITCOMMONCONTROLSEX,
-    InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT,
-    LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT, LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED,
-    LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
-    LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMTEXTW, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
-    LVM_SETITEMSTATE, LVM_SETITEMTEXTW, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT,
-    LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS,
-    LVS_SHOWSELALWAYS, LVS_SINGLESEL, LVSCW_AUTOSIZE, LVSIL_SMALL, PBM_SETMARQUEE, PBM_SETPOS,
-    PBM_SETRANGE32, PBS_MARQUEE, PROGRESS_CLASSW, SetWindowTheme, TOOLTIPS_CLASSW, TTF_ABSOLUTE,
-    TTF_IDISHWND, TTF_SUBCLASS, TTF_TRACK, TTM_ADDTOOLW, TTM_GETTEXTW, TTM_NEWTOOLRECTW,
-    TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE, TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON,
-    TTS_NOPREFIX, TTTOOLINFOW, WC_LISTVIEWW,
+    BUTTON_IMAGELIST_ALIGN_CENTER, BUTTON_IMAGELIST_ALIGN_LEFT, BUTTON_SPLITINFO, CB_SETCUEBANNER,
+    COMBOBOXINFO, DTM_GETSYSTEMTIME, DTM_SETSYSTEMTIME, EM_GETCUEBANNER, EM_GETMARGINS, EM_GETSEL,
+    EM_LIMITTEXT, EM_REPLACESEL, EM_SETCUEBANNER, EM_SETSEL, GDT_NONE, GDT_VALID, GetComboBoxInfo,
+    HIMAGELIST, HKM_GETHOTKEY, HKM_SETHOTKEY, HKM_SETRULES, HOTKEYF_ALT, HOTKEYF_CONTROL,
+    HOTKEYF_EXT, HOTKEYF_SHIFT, ICC_BAR_CLASSES, ICC_DATE_CLASSES, ICC_HOTKEY_CLASS,
+    ICC_LINK_CLASS, ICC_LISTVIEW_CLASSES, ICC_STANDARD_CLASSES, ICC_TREEVIEW_CLASSES,
+    ICC_UPDOWN_CLASS, INITCOMMONCONTROLSEX, InitCommonControlsEx, LIST_VIEW_ITEM_STATE_FLAGS,
+    LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
+    LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE,
+    LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMTEXTW,
+    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
+    LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP,
+    LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
+    LVSCW_AUTOSIZE, LVSIL_SMALL, PBM_SETMARQUEE, PBM_SETPOS, PBM_SETRANGE32, PBS_MARQUEE,
+    PROGRESS_CLASSW, SetWindowTheme, TOOLTIPS_CLASSW, TTF_ABSOLUTE, TTF_IDISHWND, TTF_SUBCLASS,
+    TTF_TRACK, TTM_ADDTOOLW, TTM_GETTEXTW, TTM_NEWTOOLRECTW, TTM_SETMAXTIPWIDTH, TTM_TRACKACTIVATE,
+    TTM_TRACKPOSITION, TTM_UPDATETIPTEXTW, TTS_BALLOON, TTS_NOPREFIX, TTTOOLINFOW, UDM_SETRANGE32,
+    WC_LISTVIEWW,
 };
 use windows::Win32::UI::HiDpi::GetSystemMetricsForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled};
@@ -72,7 +73,8 @@ pub(crate) fn initialize() {
             | ICC_LINK_CLASS
             | ICC_DATE_CLASSES
             | ICC_HOTKEY_CLASS
-            | ICC_TREEVIEW_CLASSES,
+            | ICC_TREEVIEW_CLASSES
+            | ICC_UPDOWN_CLASS,
     };
     // SAFETY: `classes` is complete.
     let _ = unsafe { InitCommonControlsEx(&classes) };
@@ -746,6 +748,24 @@ pub(super) fn has_image(button: Hwnd) -> bool {
     !list.himl.is_invalid()
 }
 
+/// An up-down control that steps the number in the edit box beside it,
+/// such as Multi-Rename's Start at.
+#[derive(Clone, Copy)]
+pub(crate) struct UpDown(Hwnd);
+
+impl UpDown {
+    /// The up-down control `id` of a dialog whose template declares one.
+    pub(crate) fn of_dialog(dialog: Hwnd, id: u16) -> Option<UpDown> {
+        super::dialog::item(dialog, id).map(UpDown)
+    }
+
+    /// Steps between `minimum` and `maximum`, with the up arrow raising
+    /// the number: Windows' default range runs from 100 down to 0.
+    pub(crate) fn set_range(self, minimum: i32, maximum: i32) {
+        send(self.0, UDM_SETRANGE32, minimum as usize, maximum as isize);
+    }
+}
+
 /// A drop-down list, such as the Match list.
 #[derive(Clone, Copy)]
 pub(crate) struct DropDownList(Hwnd);
@@ -837,6 +857,21 @@ impl DropDownList {
         if self.selected() != Some(index) {
             super::present::mark_after(self.0, || send(self.0, CB_SETCURSEL, index, 0));
         }
+    }
+
+    /// Selects no item, so the closed list shows its cue.
+    pub(crate) fn select_none(self) {
+        if self.selected().is_some() {
+            // -1 selects no item.
+            super::present::mark_after(self.0, || send(self.0, CB_SETCURSEL, usize::MAX, 0));
+        }
+    }
+
+    /// The grey text the closed list shows while no item is selected.
+    pub(crate) fn set_cue(self, text: &str) {
+        let text = wide(text);
+        // SAFETY: `text` is a NUL-terminated string that outlives the call.
+        unsafe { send_pointer(self.0, CB_SETCUEBANNER, 0, text.as_ptr()) };
     }
 
     /// Opens the list, as `F4` does.
@@ -1512,6 +1547,48 @@ fn set_tool_text(tip: Hwnd, mut tool: TTTOOLINFOW, text: &str) {
     tool.lpszText = PWSTR(text.as_mut_ptr());
     // SAFETY: `tool` and its text outlive the call, which copies the text.
     unsafe { send_pointer(tip, TTM_UPDATETIPTEXTW, 0, &raw const tool) };
+}
+
+/// Gives `control` the name `name` for screen readers, in place of its
+/// caption, such as for a check box whose caption is a symbol like `^`;
+/// `None` removes it. Windows keeps the name by the window's handle after
+/// the window is gone, and reuses handles, so the dialog removes each name
+/// when it closes. The window's thread has COM; without it the caption
+/// stays the name.
+pub(crate) fn set_accessible_name(control: Hwnd, name: Option<&str>) {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+    use windows::Win32::UI::Accessibility::{CAccPropServices, IAccPropServices, PROPID_ACC_NAME};
+    use windows::Win32::UI::WindowsAndMessaging::{CHILDID_SELF, OBJID_CLIENT};
+    // SAFETY: a COM object that Windows documents for this use.
+    let services: windows::core::Result<IAccPropServices> =
+        unsafe { CoCreateInstance(&CAccPropServices, None, CLSCTX_INPROC_SERVER) };
+    let Ok(services) = services else {
+        return;
+    };
+    let Some(name) = name else {
+        // SAFETY: plain values and a slice that outlives the call.
+        let _ = unsafe {
+            services.ClearHwndProps(
+                control.0,
+                OBJID_CLIENT.0 as u32,
+                CHILDID_SELF,
+                &[PROPID_ACC_NAME],
+            )
+        };
+        return;
+    };
+    let name = wide(name);
+    // SAFETY: `name` is a NUL-terminated string that outlives the call,
+    // which copies it.
+    let _ = unsafe {
+        services.SetHwndPropStr(
+            control.0,
+            OBJID_CLIENT.0 as u32,
+            CHILDID_SELF,
+            PROPID_ACC_NAME,
+            PCWSTR(name.as_ptr()),
+        )
+    };
 }
 
 /// A check box.

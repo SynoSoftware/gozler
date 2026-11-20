@@ -494,6 +494,29 @@ thread_local! {
     static SHIFT_PRESSES: Cell<u32> = const { Cell::new(0) };
 }
 
+/// Whether a menu, a drag or a move or size of a window holds this thread's
+/// input, so its messages run inside that loop, where a dialog must not
+/// open.
+pub(crate) fn input_held() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GUI_INMENUMODE, GUI_INMOVESIZE, GUI_POPUPMENUMODE, GUI_SYSTEMMENUMODE, GUITHREADINFO,
+        GetGUIThreadInfo,
+    };
+    let mut info = GUITHREADINFO {
+        cbSize: size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    // 0 would name the foreground thread, which can be another program's.
+    // SAFETY: plain values.
+    let thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    // SAFETY: `info` is a local the call fills in.
+    if unsafe { GetGUIThreadInfo(thread, &mut info) }.is_err() {
+        return false;
+    }
+    let held = GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE;
+    !info.hwndCapture.is_invalid() || info.flags.0 & held.0 != 0
+}
+
 /// Names `window`, a top-level window besides the main one, as one that
 /// takes its own keys, or, with `own` false, no longer, as a Viewer does
 /// while it is open (DESIGN.md: The Viewer). The message loop offers each key

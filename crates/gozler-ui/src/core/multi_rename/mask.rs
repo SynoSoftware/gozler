@@ -2,11 +2,11 @@
 //! brackets, read once for every key the person types and then evaluated
 //! for each row (DESIGN.md: Multi-Rename, "The mask").
 
-use super::{Case, Counter, Digits};
+use super::{Case, Context, Counter, Digits};
 use crate::core::text::Numbers;
 use gozler_core::output::filetime_to_unix_ms;
-use jiff::tz::TimeZone;
 use jiff::{Span, Timestamp, Zoned};
+use unicode_normalization::UnicodeNormalization;
 
 /// Why a mask cannot be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,10 +28,42 @@ enum Part {
     Extension(Range),
     All(Range),
     Folder(Folder, Range),
+    /// `[2-5]`: characters of the whole path.
+    Path(Range),
     Counter(CounterMask),
+    /// `[c]`, `[c2]`: the rows of the list, padded to the Counter fields'
+    /// digits for `[c2]`.
+    Rows {
+        padded: bool,
+    },
+    /// `[c3]`: the last value that the Counter fields' counter reaches.
+    LastCounter,
+    Size,
+    Variable {
+        /// In uppercase, as the dialog keys its variables.
+        name: String,
+        form: VariableForm,
+        range: Range,
+    },
+    /// `[X]`, or `[X+]` when `optional`.
+    Clipboard {
+        optional: bool,
+    },
+    /// `[u]`: the name is composed before any placeholder reads it.
+    Composed,
     Date(Vec<DateField>),
     Source(Source),
     Case(Case),
+}
+
+/// How `[%x%…]` writes the value of the variable `x`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VariableForm {
+    Whole,
+    /// `[%x%\]`: the last part of the path.
+    LastPart,
+    /// `[%x%_]`: `\` replaced by the character, `:` removed.
+    Replaced(char),
 }
 
 /// Which folder of the path a placeholder names.
@@ -103,12 +135,24 @@ enum DateField {
     ShortTime,
 }
 
-/// `[T1…]` or `[T4…]`: which date the date fields after it read, moved by
+/// `[T1…]` to `[T4…]`: which date the date fields after it read, moved by
 /// an offset.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct Source {
-    pub(super) taken: bool,
+struct Source {
+    origin: Origin,
     offset: Offset,
+}
+
+/// The date that date fields read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Origin {
+    #[default]
+    Modified,
+    Taken,
+    /// The time the dialog opened.
+    Opened,
+    /// The time the fields last changed.
+    Changed,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -173,12 +217,20 @@ impl Mask {
         let mut taken = false;
         for part in &self.0 {
             match part {
-                Part::Source(source) => taken = source.taken,
+                Part::Source(source) => taken = source.origin == Origin::Taken,
                 Part::Date(_) if taken => return true,
                 _ => {}
             }
         }
         false
+    }
+
+    /// Whether a placeholder reads the clipboard, which the dialog reads
+    /// only for a mask that needs it.
+    pub(crate) fn reads_clipboard(&self) -> bool {
+        self.0
+            .iter()
+            .any(|part| matches!(part, Part::Clipboard { .. }))
     }
 
     /// Whether a placeholder names a folder of the path.
@@ -188,21 +240,47 @@ impl Mask {
 
     /// The text this mask makes for `row`, into `out`.
     pub(super) fn evaluate(&self, row: &Row<'_>, out: &mut Output) -> Result<(), Missing> {
+        let compose = |text: &str| text.nfc().collect::<String>();
+        let composed = (self.0.iter().any(|part| matches!(part, Part::Composed)))
+            .then(|| [row.stem, row.extension, row.name].map(compose));
+        let [stem, extension, name] = match &composed {
+            Some([stem, extension, name]) => [stem.as_str(), extension.as_str(), name.as_str()],
+            None => [row.stem, row.extension, row.name],
+        };
         let mut source = Source::default();
         for part in &self.0 {
             match part {
                 Part::Text(text) => out.push(text),
-                Part::Name(range) => out.push(&range.of(row.stem)),
-                Part::Extension(range) => out.push(&range.of(row.extension)),
-                Part::All(range) => out.push(&range.of(row.name)),
+                Part::Name(range) => out.push(&range.of(stem)),
+                Part::Extension(range) => out.push(&range.of(extension)),
+                Part::All(range) => out.push(&range.of(name)),
                 Part::Folder(folder, range) => {
                     out.push(&range.of(row.folder(*folder).unwrap_or_default()));
                 }
+                Part::Path(range) => out.push(&range.of(&String::from_utf16_lossy(row.path))),
                 Part::Counter(counter) => out.push(&row.counter.text(counter)),
+                Part::Rows { padded } => out.push(&row.counter.rows_text(*padded)),
+                Part::LastCounter => out.push(&row.counter.last_text()),
+                Part::Size => {
+                    if let Some(size) = row.size {
+                        out.push(&size.to_string());
+                    }
+                }
+                Part::Variable { name, form, range } => {
+                    if let Some(value) = row.context.variables.get(name) {
+                        out.push(&range.of(&form.apply(value)));
+                    }
+                }
+                Part::Clipboard { optional } => match (row.context.clipboard, *optional) {
+                    (Some(text), _) => out.push(&clipboard_text(text)),
+                    (None, true) => {}
+                    (None, false) => return Err(Missing::Clipboard),
+                },
+                Part::Composed => {}
                 Part::Date(fields) => {
                     let at = row.date(source)?;
                     for field in fields {
-                        out.push(&field.text(&at, row.formats));
+                        out.push(&field.text(&at, row.context.formats));
                     }
                 }
                 Part::Source(new) => source = *new,
@@ -213,11 +291,13 @@ impl Mask {
     }
 }
 
-/// A date that a row lacks, so it keeps its name.
+/// What a row lacks that a placeholder needs, so it keeps its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Missing {
     Taken,
     Modified,
+    /// `[X]` and the clipboard holds no text.
+    Clipboard,
 }
 
 /// What a mask reads of one row.
@@ -227,14 +307,38 @@ pub(super) struct Row<'a> {
     /// Without its dot; empty for a folder.
     pub(super) extension: &'a str,
     pub(super) name: &'a str,
+    /// The whole path, in UTF-16 units as the entry holds it.
+    pub(super) path: &'a [u16],
+    pub(super) size: Option<u64>,
     /// The folders that hold the entry, from the root: the drive letter
     /// without its colon or the server first, the folder that holds it last.
     pub(super) folders: &'a [&'a str],
     pub(super) counter: CounterAt<'a>,
     pub(super) modified: Option<i64>,
     pub(super) taken: Option<i64>,
-    pub(super) zone: &'a TimeZone,
-    pub(super) formats: &'a dyn Numbers,
+    pub(super) context: &'a Context<'a>,
+}
+
+/// The clipboard's text as a name can hold it.
+fn clipboard_text(text: &str) -> String {
+    text.chars()
+        .map(|c| if "*?:|\"<>".contains(c) { '_' } else { c })
+        .collect()
+}
+
+impl VariableForm {
+    fn apply(self, value: &str) -> String {
+        match self {
+            VariableForm::Whole => value.to_owned(),
+            VariableForm::LastPart => value
+                .trim_end_matches('\\')
+                .rsplit('\\')
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+            VariableForm::Replaced(with) => value.replace(':', "").replace('\\', &with.to_string()),
+        }
+    }
 }
 
 impl Row<'_> {
@@ -246,18 +350,24 @@ impl Row<'_> {
         self.folders.get(index).copied()
     }
 
+    /// The date `source` names. A date that the offset moves out of range
+    /// is reported as the row's missing Date modified, or Date taken.
     fn date(&self, source: Source) -> Result<Zoned, Missing> {
-        let filetime = match source.taken {
-            true => self.taken.ok_or(Missing::Taken)?,
-            false => self.modified.ok_or(Missing::Modified)?,
+        let missing = match source.origin {
+            Origin::Taken => Missing::Taken,
+            Origin::Modified | Origin::Opened | Origin::Changed => Missing::Modified,
         };
-        let missing = match source.taken {
-            true => Missing::Taken,
-            false => Missing::Modified,
+        let from_file = |filetime: Option<i64>| {
+            let filetime = filetime.ok_or(missing)?;
+            Timestamp::from_millisecond(filetime_to_unix_ms(filetime)).map_err(|_| missing)
         };
-        let at = Timestamp::from_millisecond(filetime_to_unix_ms(filetime))
-            .map_err(|_| missing)?
-            .to_zoned(self.zone.clone());
+        let at = match source.origin {
+            Origin::Modified => from_file(self.modified)?,
+            Origin::Taken => from_file(self.taken)?,
+            Origin::Opened => self.context.opened,
+            Origin::Changed => self.context.changed,
+        };
+        let at = at.to_zoned(self.context.zone.clone());
         source.offset.apply(at).ok_or(missing)
     }
 }
@@ -281,6 +391,24 @@ impl CounterAt<'_> {
             Some(Start::Number(start)) => self.number(*start, step, steps, mask),
             None => self.number(self.fields.start, step, steps, mask),
         }
+    }
+
+    /// The rows of the list, padded to the Counter fields' digits when
+    /// `padded`, where Auto digits are as many as the number needs.
+    fn rows_text(&self, padded: bool) -> String {
+        match (padded, self.fields.digits) {
+            (true, Digits::Fixed(digits)) => {
+                format!("{:0>width$}", self.rows, width = usize::from(digits))
+            }
+            _ => self.rows.to_string(),
+        }
+    }
+
+    /// The last value of the Counter fields' counter, padded as `[C]` pads.
+    fn last_text(&self) -> String {
+        let steps = i64::try_from(self.rows.saturating_sub(1)).unwrap_or(i64::MAX);
+        let fields = self.fields;
+        self.number(fields.start, fields.step, steps, &CounterMask::default())
     }
 
     fn number(&self, start: i64, step: i64, steps: i64, mask: &CounterMask) -> String {
@@ -475,7 +603,20 @@ fn placeholder(content: &str) -> Option<Option<Part>> {
             };
             Part::Folder(folder(level), range)
         }
+        '0'..='9' | '-' | ' ' => Part::Path(range(content)?),
         'C' => Part::Counter(counter(rest)?),
+        'c' => match rest {
+            "" | "1" => Part::Rows { padded: false },
+            "2" => Part::Rows { padded: true },
+            "3" => Part::LastCounter,
+            _ => return None,
+        },
+        'S' if rest.is_empty() => Part::Size,
+        'X' if matches!(rest, "" | "+") => Part::Clipboard {
+            optional: !rest.is_empty(),
+        },
+        'u' if rest.is_empty() => Part::Composed,
+        '%' => variable(rest)?,
         'T' => Part::Source(source(rest)?),
         'I' if matches!(rest, "" | "0" | "1") => return Some(None),
         'U' if rest.is_empty() => Part::Case(Case::Upper),
@@ -565,6 +706,31 @@ fn number(text: &str) -> Option<u32> {
     text.parse().ok().filter(|&n| n > 0)
 }
 
+/// `[%x%…]` after its first `%`: the closing `%`, then a range, or `\` or
+/// a replacement character and then a range. A range is tried first, so a
+/// replacement character is never a digit, a `-` that starts a range or a
+/// space.
+fn variable(text: &str) -> Option<Part> {
+    let (name, after) = text.split_once('%')?;
+    if name.is_empty() {
+        return None;
+    }
+    let (form, range) = match (range(after), after.chars().next()) {
+        (Some(range), _) => (VariableForm::Whole, range),
+        (None, Some('\\')) => (VariableForm::LastPart, range(&after[1..])?),
+        (None, Some(with)) => (
+            VariableForm::Replaced(with),
+            range(&after[with.len_utf8()..])?,
+        ),
+        (None, None) => return None,
+    };
+    Some(Part::Variable {
+        name: name.to_uppercase(),
+        form,
+        range,
+    })
+}
+
 /// `[C…]` after its `C`: `10+5:3`, `+1/100`, `aa+1`, `:a`.
 fn counter(text: &str) -> Option<CounterMask> {
     let mut mask = CounterMask::default();
@@ -610,18 +776,20 @@ fn counter(text: &str) -> Option<CounterMask> {
     rest.is_empty().then_some(mask)
 }
 
-/// `[T…]` after its `T`: `1`, `4`, and an offset such as `+60m`.
+/// `[T…]` after its `T`: `1` to `4`, and an offset such as `+60m`.
 fn source(text: &str) -> Option<Source> {
     let mut chars = text.chars();
-    let taken = match chars.next()? {
-        '1' => false,
-        '4' => true,
+    let origin = match chars.next()? {
+        '1' => Origin::Modified,
+        '2' => Origin::Opened,
+        '3' => Origin::Changed,
+        '4' => Origin::Taken,
         _ => return None,
     };
     let rest = chars.as_str();
     if rest.is_empty() {
         return Some(Source {
-            taken,
+            origin,
             offset: Offset::default(),
         });
     }
@@ -643,7 +811,7 @@ fn source(text: &str) -> Option<Source> {
         _ => return None,
     };
     Some(Source {
-        taken,
+        origin,
         offset: Offset {
             amount: sign * amount,
             unit,

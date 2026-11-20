@@ -125,6 +125,7 @@ impl DialogProc for About<'_> {
             | DialogMessage::Edited { .. }
             | DialogMessage::Timer { .. }
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }
@@ -219,6 +220,7 @@ impl DialogProc for ServiceReport<'_> {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }
@@ -337,6 +339,7 @@ impl DialogProc for CustomDate {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }
@@ -484,6 +487,7 @@ impl DialogProc for CustomSize {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }
@@ -718,6 +722,7 @@ impl DialogProc for Transfer {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }
@@ -891,6 +896,7 @@ impl DialogProc for NewFolder<'_> {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }
@@ -977,6 +983,7 @@ impl DialogProc for DeleteUnseen {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }
@@ -1056,6 +1063,7 @@ impl DialogProc for SelectFiles {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }
@@ -1180,6 +1188,7 @@ impl DialogProc for ViewerFind {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }

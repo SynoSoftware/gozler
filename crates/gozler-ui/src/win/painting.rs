@@ -293,6 +293,7 @@ fn presents(call: &str, file: &str, function: &str) -> bool {
                         | "set_text_caret_at_end"
                         | "select_and_scroll"
                         | "select"
+                        | "select_none"
                         | "show_file_icon"
                         | "show_glyph"
                         | "set_checked"

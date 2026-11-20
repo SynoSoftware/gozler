@@ -394,24 +394,26 @@
 #define IDC_DELETE_UNSEEN_LABEL 4002
 #define IDC_DELETE_UNSEEN_WORD 4003
 
-// Multi-Rename: the masks with their placeholder buttons, search and
-// replace, Case, the counter, Saved renames, the list, the status line,
-// Edit… and Undo; Rename is OK and Close is Cancel.
+// Multi-Rename, laid out as Total Commander's Multi-Rename Tool: the name
+// mask and the extension mask with their placeholder buttons, search and
+// replace, Upper/lowercase, the regular expressions help and the names
+// menu, the counter, Saved renames, the list, the status line, Next step,
+// Undo and Result list; Start! is OK and Close is Cancel.
 #define IDD_MULTI_RENAME 128
-#define IDC_MULTI_RENAME_NAME_LABEL 4101
+#define IDC_MULTI_RENAME_NAME_GROUP 4101
 #define IDC_MULTI_RENAME_NAME 4102
 #define IDC_MULTI_RENAME_INSERT_NAME 4103
 #define IDC_MULTI_RENAME_NAME_RANGE 4104
 #define IDC_MULTI_RENAME_NAME_COUNTER 4105
 #define IDC_MULTI_RENAME_INSERT_DATE 4106
 #define IDC_MULTI_RENAME_INSERT_TIME 4107
-#define IDC_MULTI_RENAME_MORE 4108
-#define IDC_MULTI_RENAME_EXTENSION_LABEL 4109
+#define IDC_MULTI_RENAME_PLUS 4108
+#define IDC_MULTI_RENAME_EXTENSION_GROUP 4109
 #define IDC_MULTI_RENAME_EXTENSION 4110
 #define IDC_MULTI_RENAME_INSERT_EXTENSION 4111
 #define IDC_MULTI_RENAME_EXTENSION_RANGE 4112
 #define IDC_MULTI_RENAME_EXTENSION_COUNTER 4113
-#define IDC_MULTI_RENAME_CASE_LABEL 4114
+#define IDC_MULTI_RENAME_CASE_GROUP 4114
 #define IDC_MULTI_RENAME_CASE 4115
 #define IDC_MULTI_RENAME_SEARCH_LABEL 4116
 #define IDC_MULTI_RENAME_SEARCH 4117
@@ -429,18 +431,28 @@
 #define IDC_MULTI_RENAME_STEP 4129
 #define IDC_MULTI_RENAME_DIGITS_LABEL 4130
 #define IDC_MULTI_RENAME_DIGITS 4131
-#define IDC_MULTI_RENAME_SAVED_LABEL 4132
+#define IDC_MULTI_RENAME_RANGES 4132
 #define IDC_MULTI_RENAME_SAVED 4133
 #define IDC_MULTI_RENAME_LIST 4134
 #define IDC_MULTI_RENAME_STATUS 4135
-#define IDC_MULTI_RENAME_EDIT 4136
+#define IDC_MULTI_RENAME_NAMES 4136
 #define IDC_MULTI_RENAME_UNDO 4137
+#define IDC_MULTI_RENAME_SEARCH_GROUP 4138
+#define IDC_MULTI_RENAME_REGEX_HELP 4139
+#define IDC_MULTI_RENAME_START_SPIN 4140
+#define IDC_MULTI_RENAME_STEP_SPIN 4141
+#define IDC_MULTI_RENAME_NEXT_STEP 4142
+#define IDC_MULTI_RENAME_RESULT_LIST 4143
 
-// Multi-Rename's Range…: the focused row's name, in which the person
-// selects the characters.
+// Multi-Rename's Range: the focused row's text, in which the person
+// selects the characters, the three forms of a range, and the preview of
+// the selected characters.
 #define IDD_PICK_RANGE 129
 #define IDC_PICK_RANGE_NAME 4151
-#define IDC_PICK_RANGE_FROM_END 4152
+#define IDC_PICK_RANGE_FIRST_FROM_END 4152
+#define IDC_PICK_RANGE_LAST_FROM_END 4153
+#define IDC_PICK_RANGE_LENGTH 4154
+#define IDC_PICK_RANGE_PREVIEW 4155
 
 // Multi-Rename's Edit…: one new name per line.
 #define IDD_EDIT_NAMES 130
@@ -451,6 +463,16 @@
 #define IDD_SAVE_RENAME 131
 #define IDC_SAVE_RENAME_LABEL 4171
 #define IDC_SAVE_RENAME_NAME 4172
+
+// Multi-Rename's ?: the syntax of a regular expression, in a read-only box.
+#define IDD_REGULAR_EXPRESSIONS 132
+#define IDC_REGULAR_EXPRESSIONS_TEXT 4181
+
+// Multi-Rename's Result list: the last batch's renames, in a read-only box,
+// with Copy and Close.
+#define IDD_RESULT_LIST 133
+#define IDC_RESULT_LIST_TEXT 4191
+#define IDC_RESULT_LIST_COPY 4192
 
 // Settings > File operations: the speed settings of copies, moves and
 // deletes.

@@ -28,6 +28,8 @@ jiff.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# Multi-Rename's `[u]`, which puts a name in Unicode composed form.
+unicode-normalization.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 gozler-winfs = { path = "../gozler-winfs" }

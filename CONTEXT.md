@@ -355,8 +355,13 @@ entry, such as `[N]` for its name or `[C]` for a counter.
 _Avoid_: token, tag, variable
 
 **Batch**:
-The renames that one Rename of Multi-Rename starts, as one file operation.
+The renames that one Start! of Multi-Rename starts, as one file operation.
 _Avoid_: job, run
+
+**Step**:
+One rule of Multi-Rename applied to the names that the step before made.
+Next step starts another; Start! renames from the names on disk to the
+last step's names in one batch.
 
 **Undo**:
 Multi-Rename's command that renames the entries of its last batch back,

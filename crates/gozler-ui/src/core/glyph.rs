@@ -115,6 +115,8 @@ pub(crate) enum Glyph {
     PowerButton,
     /// Gears: the group of the service.
     Processing,
+    /// An arrow turning forward: Multi-Rename's Next step.
+    Redo,
     /// A circular arrow: Refresh.
     Refresh,
     /// A minus: Remove, and Hide in the File operations window.
@@ -147,7 +149,7 @@ pub(crate) enum Glyph {
 }
 
 impl Glyph {
-    pub(crate) const ALL: [Glyph; 63] = [
+    pub(crate) const ALL: [Glyph; 64] = [
         Glyph::Accept,
         Glyph::Add,
         Glyph::BackToWindow,
@@ -197,6 +199,7 @@ impl Glyph {
         Glyph::Play,
         Glyph::PowerButton,
         Glyph::Processing,
+        Glyph::Redo,
         Glyph::Refresh,
         Glyph::Remove,
         Glyph::Rename,
@@ -266,6 +269,7 @@ impl Glyph {
             Glyph::Play => '\u{E768}',
             Glyph::PowerButton => '\u{E7E8}',
             Glyph::Processing => '\u{E9F5}',
+            Glyph::Redo => '\u{E7A6}',
             Glyph::Refresh => '\u{E72C}',
             Glyph::Remove => '\u{E738}',
             Glyph::Rename => '\u{E8AC}',

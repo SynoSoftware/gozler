@@ -250,6 +250,16 @@ environment checks passed.
 - Close and reopen Indexed folders while a listing waits. Its hint names the
   current session's path and Cancel ends only that session.
 
+## Multi-Rename
+
+- Gozler's and Total Commander's Multi-Rename side by side on the same
+  files: the band of fields, the captions, the columns and the bottom row
+  match, apart from the departures that DESIGN.md's "Multi-Rename" names.
+- Every `Alt` key of Total Commander's dialog moves to the same field in
+  Gozler's.
+- Narrator reads "Match case" on `^` and "Next step" on the arrow button
+  left of Start!.
+
 ## The copy, move and delete engine
 
 - With one folder selected, F5 opens Copy with Copy as the default. Mirror

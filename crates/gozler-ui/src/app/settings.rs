@@ -2836,6 +2836,7 @@ impl DialogProc for SettingsDialog<'_> {
             | DialogMessage::DoubleClicked { .. }
             | DialogMessage::Timer { .. }
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Key { .. }
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
@@ -3053,6 +3054,7 @@ impl DialogProc for CommandShortcut<'_> {
             | DialogMessage::Timer { .. }
             | DialogMessage::Reply
             | DialogMessage::Tree { .. }
+            | DialogMessage::RowDragged { .. }
             | DialogMessage::Focus { .. }
             | DialogMessage::KeysCaptured { .. }
             | DialogMessage::Key { .. }

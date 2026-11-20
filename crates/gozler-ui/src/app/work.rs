@@ -432,6 +432,17 @@ impl Work {
     }
 }
 
+/// Multi-Rename's Load names from file…: the file's text, with the path it
+/// was read from.
+pub(super) fn read_names(
+    path: PathBuf,
+    _worker: &OffThread,
+    _cancel: &CancelToken,
+) -> (PathBuf, io::Result<String>) {
+    let read = std::fs::read(&path).map(|bytes| crate::core::multi_rename::names_text(&bytes));
+    (path, read)
+}
+
 fn write_diagnostics(messages: Diagnostics, _worker: &OffThread, _: &CancelToken) {
     for (path, text) in messages {
         crate::app::write_log(&path, &text);

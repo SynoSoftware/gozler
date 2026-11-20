@@ -11,6 +11,7 @@ use crate::app::file_operations::FileOperations;
 use crate::core::captions::{DialogCaptions, DialogItem, Guard, Question, QuestionBody};
 use crate::core::commands::{Key, Keystroke, Mark, MenuNode};
 use crate::core::fetch::List;
+use crate::core::glyph::Glyph;
 use crate::core::ids::{ControlId as C, DialogId};
 use crate::core::layout::{Dpi, Px, Rect, Size};
 use crate::core::multi_rename::{
@@ -21,16 +22,20 @@ use crate::core::panel::{self, CommandPlace, Side};
 use crate::core::settings::{DialogSize, History, Mode, MultiRenameState, SavedRename};
 use crate::core::text::{Numbers, SizeFormat, Strings};
 use crate::core::work::{Replacement, Retirement};
-use crate::win::controls::{CheckBox, ComboBox, DropDownList, ListColumn, ListView, Tooltip};
+use crate::win::controls::{
+    Button, CheckBox, ComboBox, DropDownList, ListColumn, ListView, Tooltip, UpDown,
+    set_accessible_name,
+};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Menu;
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
-use crate::win::{self, Hwnd, window};
-use asks::{EditNames, PickRange, SaveName};
+use crate::win::{self, Hwnd, clipboard, window};
+use asks::{EditNames, PickRange, RegularExpressions, ResultList, SaveName};
 use gozler_client::CancelToken;
 use gozler_fileops::{InUse, Listed, OperationId, Reason, Rename, Renamed, Request, State};
+use jiff::Timestamp;
 use jiff::tz::TimeZone;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -50,6 +55,9 @@ const UPDATE: usize = 1;
 const POLL: usize = 2;
 /// The timer that runs Save… or Delete… once Saved renames' list closed.
 const SAVED_ACTION: usize = 3;
+/// The timer that opens Edit names with a names file once the dialog is
+/// free.
+const LOADED: usize = 4;
 /// The entries one read of dates taken reads, so the status line counts.
 const DATES_CHUNK: usize = 64;
 
@@ -152,22 +160,31 @@ impl MainWindow {
                 follow,
             )
         };
-        let folders = rows.windows(2).any(|pair| !pair[0].shares_folder(&pair[1]));
+        let opened = Timestamp::now();
+        // Windows compares the names of environment variables without
+        // regard to case.
+        let variables = std::env::vars_os()
+            .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+            .map(|(name, value)| (name.to_uppercase(), value))
+            .collect();
         let state = MultiRename {
             main: self,
+            window: hwnd,
             operations,
             numbers: self.numbers.borrow().clone(),
             strings,
             sizes,
             zone: gozler_winfs::local_time_zone(),
             known: known.map(Arc::new),
-            folders,
+            opened,
+            variables: Arc::new(variables),
             kept: RefCell::new(kept),
-            state: RefCell::new(Shown::new(rows)),
+            state: RefCell::new(Shown::new(rows, opened)),
             work: RefCell::new(None),
             list: OnceCell::new(),
             layout: OnceCell::new(),
             dpi: Cell::new(hwnd.dpi()),
+            status_width: Cell::new(Px(0)),
         };
         let captions = DialogCaptions::new(DialogId::MultiRename, &state.strings);
         if let Err(error) = dialog::run_modal(hwnd, DialogId::MultiRename, &captions, &state) {
@@ -233,15 +250,19 @@ struct Following {
 
 struct MultiRename<'a> {
     main: &'a MainWindow,
+    /// The main window, which owns the clipboard that Result list copies to.
+    window: Hwnd,
     operations: &'a FileOperations,
     strings: Strings,
     numbers: WindowsNumbers,
     sizes: SizeFormat,
     zone: TimeZone,
     known: Option<Arc<Known>>,
-    /// The entries come from more than one folder, so the list shows the
-    /// Folder column.
-    folders: bool,
+    /// When the dialog opened, which `[T2]` reads.
+    opened: Timestamp,
+    /// The environment variables, read once when the dialog opens, by
+    /// their names in uppercase, which `[%x%]` reads.
+    variables: Arc<HashMap<String, String>>,
     /// The saved renames, the histories and the size, which the window
     /// saves when the dialog closes.
     kept: RefCell<MultiRenameState>,
@@ -250,6 +271,9 @@ struct MultiRename<'a> {
     list: OnceCell<ListView>,
     layout: OnceCell<Layout>,
     dpi: Cell<Dpi>,
+    /// The status text's width in the template, which the dialog keeps
+    /// when the bottom row's buttons grow for a longer caption.
+    status_width: Cell<Px>,
 }
 
 /// What the dialog shows.
@@ -274,10 +298,23 @@ struct Shown {
     last: Option<OperationId>,
     /// The saved rename chosen last, which Delete… deletes.
     chosen: Option<String>,
+    /// When the fields last changed, which `[T3]` reads.
+    changed: Timestamp,
+    clipboard: ClipboardText,
+    /// The step that the fields name: 1, and one more for each Next step.
+    step: usize,
+    /// Result list's lines: what the batch that ended last did.
+    results: Vec<String>,
+    /// Why Load names from file… could not read the chosen file, until a
+    /// field changes.
+    load_failed: Option<String>,
+    /// The names file that Load names from file… read, with its path,
+    /// until Edit names can open with it.
+    loaded: Option<(PathBuf, std::io::Result<String>)>,
 }
 
 impl Shown {
-    fn new(rows: Vec<Row>) -> Shown {
+    fn new(rows: Vec<Row>, opened: Timestamp) -> Shown {
         Shown {
             fields: Fields::default(),
             rows: Arc::new(rows),
@@ -291,6 +328,12 @@ impl Shown {
             given: Vec::new(),
             last: None,
             chosen: None,
+            changed: opened,
+            clipboard: ClipboardText::Unread,
+            step: 1,
+            results: Vec::new(),
+            load_failed: None,
+            loaded: None,
         }
     }
 
@@ -353,6 +396,15 @@ enum Names {
     Failed(RuleError),
 }
 
+/// The clipboard's text, which a mask with `[X]` waits for; read again
+/// after each change of a field.
+enum ClipboardText {
+    Unread,
+    Reading,
+    /// `None`: the clipboard holds no text.
+    Read(Option<Arc<str>>),
+}
+
 /// Dates taken, which are read once, the first time a mask uses `[T4]`.
 enum Dates {
     Unread,
@@ -382,6 +434,8 @@ struct Work {
     delivery: OpenWaker,
     names: Task<Naming, Vec<Outcome>>,
     dates: Task<Vec<Vec<u16>>, Vec<Option<i64>>>,
+    clipboard: Task<(), Option<String>>,
+    file: Task<PathBuf, (PathBuf, std::io::Result<String>)>,
 }
 
 /// What the names are computed from.
@@ -392,6 +446,10 @@ struct Naming {
     known: Option<Arc<Known>>,
     zone: TimeZone,
     numbers: WindowsNumbers,
+    opened: Timestamp,
+    changed: Timestamp,
+    variables: Arc<HashMap<String, String>>,
+    clipboard: Option<Arc<str>>,
 }
 
 fn name_rows(naming: Naming, _cancel: &CancelToken) -> Vec<Outcome> {
@@ -402,12 +460,20 @@ fn name_rows(naming: Naming, _cancel: &CancelToken) -> Vec<Outcome> {
     let context = Context {
         zone: &naming.zone,
         formats: &naming.numbers,
+        opened: naming.opened,
+        changed: naming.changed,
+        variables: &naming.variables,
+        clipboard: naming.clipboard.as_deref(),
     };
     multi_rename::preview(&naming.rows, &source, naming.known.as_deref(), &context)
 }
 
 fn read_dates(paths: Vec<Vec<u16>>, _worker: &OffThread, cancel: &CancelToken) -> Vec<Option<i64>> {
     win::shell::dates_taken(&paths, || cancel.is_cancelled())
+}
+
+fn read_clipboard(_: (), worker: &OffThread, _cancel: &CancelToken) -> Option<String> {
+    clipboard::text(worker)
 }
 
 /// The places that a resize moves, as the dialog opened.
@@ -420,12 +486,12 @@ struct Layout {
 
 /// The list's columns, in their order, with each one's share of the width.
 const COLUMNS: [(Column, i32); 6] = [
-    (Column::Name, 22),
-    (Column::NewName, 22),
-    (Column::Note, 18),
+    (Column::OldName, 22),
+    (Column::Extension, 7),
+    (Column::NewName, 25),
     (Column::Size, 10),
-    (Column::Modified, 14),
-    (Column::Folder, 14),
+    (Column::Modified, 16),
+    (Column::Location, 20),
 ];
 
 /// The boxes with a history, which Rename remembers.
@@ -491,14 +557,15 @@ const INSERTS: [(C, C, Option<&str>, &str); 8] = [
 
 /// The controls that a batch that runs disables, besides the list and
 /// the buttons.
-const FIELDS: [C; 22] = [
+const FIELDS: [C; 25] = [
     C::MultiRenameName,
     C::MultiRenameInsertName,
-    C::MultiRenameNameRange,
-    C::MultiRenameNameCounter,
+    C::MultiRenamePlus,
     C::MultiRenameInsertDate,
+    C::MultiRenameNameRange,
+    C::MultiRenameRanges,
     C::MultiRenameInsertTime,
-    C::MultiRenameMore,
+    C::MultiRenameNameCounter,
     C::MultiRenameExtension,
     C::MultiRenameInsertExtension,
     C::MultiRenameExtensionRange,
@@ -512,11 +579,44 @@ const FIELDS: [C; 22] = [
     C::MultiRenameRegex,
     C::MultiRenameWholeName,
     C::MultiRenameStart,
+    C::MultiRenameStartSpin,
     C::MultiRenameStep,
+    C::MultiRenameStepSpin,
     C::MultiRenameDigits,
 ];
 
-/// The Digits list's choices: 1 to 10, then Auto.
+/// The symbol check boxes, each with the tooltip that is also its name for
+/// screen readers.
+const SYMBOLS: [(C, &str); 5] = [
+    (C::MultiRenameMatchCase, "multi_rename.tip_match_case"),
+    (C::MultiRenameFirstOnly, "multi_rename.tip_first_only"),
+    (C::MultiRenameExtensionToo, "multi_rename.tip_extension_too"),
+    (C::MultiRenameRegex, "multi_rename.tip_regex"),
+    (C::MultiRenameWholeName, "multi_rename.tip_whole_name"),
+];
+
+/// The buttons that keep their template's width and place: Total
+/// Commander's grid of placeholders, `?`, and the two icon buttons. The
+/// dialog gives the bottom row's other buttons one width.
+const FIXED: [C; 15] = [
+    C::MultiRenameInsertName,
+    C::MultiRenamePlus,
+    C::MultiRenameInsertDate,
+    C::MultiRenameNameRange,
+    C::MultiRenameRanges,
+    C::MultiRenameInsertTime,
+    C::MultiRenameNameCounter,
+    C::MultiRenameInsertExtension,
+    C::MultiRenameExtensionRange,
+    C::MultiRenameExtensionCounter,
+    C::MultiRenameRegexHelp,
+    C::MultiRenameNames,
+    C::MultiRenameNextStep,
+    C::MultiRenameStartSpin,
+    C::MultiRenameStepSpin,
+];
+
+/// The Digits list's choices: 1 to 10, then the automatic `a`.
 const DIGITS: usize = 10;
 
 impl MultiRename<'_> {
@@ -526,13 +626,6 @@ impl MultiRename<'_> {
 
     fn checked(dialog: Hwnd, id: C) -> bool {
         CheckBox::of_dialog(dialog, id.id()).is_some_and(CheckBox::is_checked)
-    }
-
-    fn columns(&self) -> &'static [(Column, i32)] {
-        match self.folders {
-            true => &COLUMNS,
-            false => &COLUMNS[..COLUMNS.len() - 1],
-        }
     }
 
     /// The fields as the dialog shows them.
@@ -607,14 +700,18 @@ impl MultiRename<'_> {
         }
     }
 
-    /// The Saved renames list: (Default), each saved rename, Save… and
-    /// Delete….
+    /// The Saved renames list: (Default), each saved rename in alphabetical
+    /// order, as Total Commander lists them, Save… and Delete…. While no
+    /// saved rename is chosen, the closed list shows its cue, "F2 Saved
+    /// renames".
     fn show_saved(&self, dialog: Hwnd) {
         let Some(list) = DropDownList::of_dialog(dialog, C::MultiRenameSaved.id()) else {
             return;
         };
         let (items, selected) = {
-            let kept = self.kept.borrow();
+            let mut kept = self.kept.borrow_mut();
+            kept.saved
+                .sort_by_cached_key(|saved| saved.name.to_lowercase());
             let items: Vec<String> = std::iter::once(self.strings.text("multi_rename.default"))
                 .chain(kept.saved.iter().map(|saved| saved.name.as_str()))
                 .chain([
@@ -626,10 +723,16 @@ impl MultiRename<'_> {
             let state = self.state.borrow();
             let selected = (state.chosen.as_ref())
                 .and_then(|name| kept.saved.iter().position(|saved| saved.name == *name))
-                .map_or(0, |index| index + 1);
+                .map(|index| index + 1);
             (items, selected)
         };
-        list.set_items(&items, selected);
+        match selected {
+            Some(selected) => list.set_items(&items, selected),
+            None => {
+                list.set_items(&items, 0);
+                list.select_none();
+            }
+        }
     }
 
     /// Gives each box with a history its texts.
@@ -652,6 +755,8 @@ impl MultiRename<'_> {
             // `Enter` comes before the timer, so Rename refuses the names
             // shown until they belong to the change.
             state.names = Names::Updating;
+            state.clipboard = ClipboardText::Unread;
+            state.load_failed = None;
             if state.rows.iter().any(|row| row.failed.is_some()) {
                 for row in Arc::make_mut(&mut state.rows) {
                     row.failed = None;
@@ -674,7 +779,10 @@ impl MultiRename<'_> {
             if state.batch.is_some() {
                 return;
             }
-            state.fields = fields.clone();
+            if state.fields != fields {
+                state.changed = Timestamp::now();
+                state.fields = fields.clone();
+            }
             if state.edited {
                 Ok(None)
             } else {
@@ -695,16 +803,36 @@ impl MultiRename<'_> {
             self.state.borrow_mut().dates = Dates::Reading(Vec::new());
             self.read_more_dates();
         }
-        let waits = reads_dates && !matches!(self.state.borrow().dates, Dates::Read);
+        // The program that owns the clipboard can make a read wait, so the
+        // work owner reads it, and the names wait for it.
+        let reads_clipboard = rule.as_ref().is_some_and(Rule::reads_clipboard);
+        if reads_clipboard && matches!(self.state.borrow().clipboard, ClipboardText::Unread) {
+            self.state.borrow_mut().clipboard = ClipboardText::Reading;
+            if let Some(work) = self.work.borrow_mut().as_mut() {
+                work.clipboard.replace(());
+            }
+        }
+        let clipboard = match &self.state.borrow().clipboard {
+            ClipboardText::Read(text) => Some(text.clone()),
+            ClipboardText::Unread | ClipboardText::Reading => None,
+        };
+        let waits = (reads_dates && !matches!(self.state.borrow().dates, Dates::Read))
+            || (reads_clipboard && clipboard.is_none());
         self.state.borrow_mut().names = Names::Updating;
         if !waits {
+            let state = self.state.borrow();
             let naming = Naming {
-                rows: Arc::clone(&self.state.borrow().rows),
+                rows: Arc::clone(&state.rows),
                 rule,
                 known: self.known.clone(),
                 zone: self.zone.clone(),
                 numbers: self.numbers.clone(),
+                opened: self.opened,
+                changed: state.changed,
+                variables: Arc::clone(&self.variables),
+                clipboard: clipboard.flatten(),
             };
+            drop(state);
             if let Some(work) = self.work.borrow_mut().as_mut() {
                 work.names.replace(naming);
             }
@@ -733,7 +861,7 @@ impl MultiRename<'_> {
 
     /// Takes what the work owner delivered.
     fn deliver(&self, dialog: Hwnd) {
-        let (names, dates, retired) = {
+        let (names, dates, clipboard, file, retired) = {
             let mut work = self.work.borrow_mut();
             let Some(work) = work.as_mut() else {
                 return;
@@ -741,9 +869,13 @@ impl MultiRename<'_> {
             work.delivery.woken();
             let names = work.names.take();
             let dates = work.dates.take();
+            let clipboard = work.clipboard.take();
+            let file = work.file.take();
             let mut retired = work.names.take_retired();
             retired.append(work.dates.take_retired());
-            (names, dates, retired)
+            retired.append(work.clipboard.take_retired());
+            retired.append(work.file.take_retired());
+            (names, dates, clipboard, file, retired)
         };
         if !retired.is_empty() {
             self.main.created().work.borrow_mut().retire(retired);
@@ -758,7 +890,26 @@ impl MultiRename<'_> {
         if let Some((_, dates)) = dates {
             self.dates_read(dialog, dates);
         }
+        if let Some((_, text)) = clipboard {
+            let reading = {
+                let mut state = self.state.borrow_mut();
+                let reading = matches!(state.clipboard, ClipboardText::Reading);
+                if reading {
+                    state.clipboard = ClipboardText::Read(text.map(Arc::from));
+                }
+                reading
+            };
+            if reading {
+                self.update(dialog);
+            }
+        }
         self.show(dialog);
+        // Edit names runs its own message loop, so it opens after the
+        // other deliveries are taken.
+        if let Some((_, loaded)) = file {
+            self.state.borrow_mut().loaded = Some(loaded);
+            self.open_loaded(dialog);
+        }
     }
 
     /// Keeps the dates of the rows read last, and reads on or names the
@@ -791,7 +942,7 @@ impl MultiRename<'_> {
 
     /// Shows the list, the status line and which controls work.
     fn show(&self, dialog: Hwnd) {
-        let (count, status, can_rename, running, edited, can_edit) = {
+        let (count, status, can_rename, running, edited, can_edit, results) = {
             let state = self.state.borrow();
             (
                 state.rows.len() as u64,
@@ -800,6 +951,7 @@ impl MultiRename<'_> {
                 state.batch.is_some(),
                 state.edited,
                 state.can_edit_list(),
+                !state.results.is_empty(),
             )
         };
         if let Some(list) = self.list.get() {
@@ -821,8 +973,11 @@ impl MultiRename<'_> {
         for (id, enabled) in [
             (C::MultiRenameSaved.id(), !running),
             (C::MultiRenameList.id(), !running),
-            (C::MultiRenameEdit.id(), !running && count > 0 && can_edit),
+            (C::MultiRenameNames.id(), !running && count > 0 && can_edit),
+            // The names Next step takes are the ones shown.
+            (C::MultiRenameNextStep.id(), can_rename),
             (C::MultiRenameUndo.id(), undo),
+            (C::MultiRenameResultList.id(), !running && results),
             (DialogItem::Ok.id(), can_rename),
         ] {
             if let Some(control) = dialog::item(dialog, id) {
@@ -879,22 +1034,28 @@ impl MultiRename<'_> {
                 true => ("multi_rename.undone", "multi_rename.not_undone"),
                 false => ("multi_rename.renamed", "multi_rename.not_renamed"),
             };
-            let mut text = count(done, finished.done, &[]);
+            let mut parts: Vec<String> = state.load_failed.iter().cloned().collect();
+            parts.push(count(done, finished.done, &[]));
             if finished.failed > 0 {
-                text = format!("{text} {}", count(failed, finished.failed, &[]));
+                parts.push(count(failed, finished.failed, &[]));
             }
-            return text;
+            return parts.join(" ");
         }
         if !state.current() {
             return self.strings.text("multi_rename.updating").to_owned();
         }
         let counts = Counts::of(&state.outcomes);
         let renamed = numbers.integer(counts.renamed as u64);
-        let mut parts = vec![count(
+        let mut parts: Vec<String> = state.load_failed.iter().cloned().collect();
+        if state.step > 1 {
+            let step = numbers.integer(state.step as u64);
+            parts.push(self.strings.format("multi_rename.step_status", &[&step]));
+        }
+        parts.push(count(
             "multi_rename.get_new_names",
             counts.rows,
             &[&renamed],
-        )];
+        ));
         if counts.numbered > 0 {
             parts.push(count("multi_rename.numbered_count", counts.numbered, &[]));
         }
@@ -907,17 +1068,17 @@ impl MultiRename<'_> {
         parts.join(" ")
     }
 
-    /// The Note column's text of `outcome`.
-    fn note(&self, outcome: &Outcome) -> String {
+    /// Why the row of `outcome` keeps its name or failed, which New name
+    /// shows in place of a name that cannot be used, where Total Commander
+    /// shows `<Error!>`, and the row's tooltip gives for a failed rename.
+    /// `None` for a row with nothing to say.
+    fn reason(&self, outcome: &Outcome) -> Option<String> {
         let text = |key: &str| self.strings.text(key).to_owned();
-        match outcome {
-            Outcome::New {
-                numbered: false, ..
-            } => String::new(),
-            Outcome::New { numbered: true, .. } => text("multi_rename.numbered"),
-            Outcome::NoChange => text("multi_rename.no_change"),
+        Some(match outcome {
+            Outcome::New { .. } | Outcome::NoChange => return None,
             Outcome::Kept(Problem::NoDateTaken) => text("multi_rename.no_date_taken"),
             Outcome::Kept(Problem::NoDateModified) => text("multi_rename.no_date_modified"),
+            Outcome::Kept(Problem::NoClipboardText) => text("multi_rename.no_clipboard_text"),
             Outcome::Kept(Problem::Invalid(invalid)) => {
                 let reason = match invalid {
                     Invalid::Characters => text("name.characters"),
@@ -934,7 +1095,7 @@ impl MultiRename<'_> {
                     win::error_text(&std::io::Error::from_raw_os_error(failed.error as i32));
                 self.strings.format("multi_rename.failed", &[&reason])
             }
-        }
+        })
     }
 
     /// Rename: one batch with the rows that get a new name, in the list's
@@ -1072,12 +1233,28 @@ impl MultiRename<'_> {
                 rows.retain(|_| keep.next().unwrap_or(true));
                 let mut keep = gone.iter().map(|gone| !gone);
                 state.outcomes.retain(|_| keep.next().unwrap_or(true));
+                // Start! ends the steps; a failed row keeps its new name.
+                for row in rows.iter_mut() {
+                    row.step = None;
+                }
+                state.step = 1;
             }
             state.finished = Some(Finished {
                 undo: batch.undo,
                 done: renamed.len(),
                 failed: listed.len(),
             });
+            state.results = (renamed.iter())
+                .map(|each| format!("{} → {}", each.from.display(), each.to.display()))
+                .chain(listed.iter().filter_map(|listed| {
+                    let Reason::Failed(error) = listed.reason else {
+                        return None;
+                    };
+                    let reason = win::error_text(&std::io::Error::from_raw_os_error(error as i32));
+                    let failed = self.strings.format("multi_rename.failed", &[&reason]);
+                    Some(format!("{}: {failed}", listed.path.display()))
+                }))
+                .collect();
         }
         self.update(dialog);
         if let Some(name) = dialog::item(dialog, C::MultiRenameName.id()) {
@@ -1151,42 +1328,53 @@ impl MultiRename<'_> {
         }
     }
 
-    /// Range…: the person selects characters of the focused row's name or
-    /// extension, and their range goes into the box `id`.
-    fn pick_range(&self, dialog: Hwnd, id: C) {
-        let (letter, text) = {
+    /// Range: the person selects characters of the focused row's text that
+    /// the placeholder starting with `letter` reads, and their range goes
+    /// into the box `target`.
+    fn pick_range(&self, dialog: Hwnd, target: C, letter: &'static str) {
+        let text = {
             let state = self.state.borrow();
             let focused = self.list.get().and_then(|list| list.focused()).unwrap_or(0);
             let Some(row) = state.rows.get(focused as usize) else {
                 return;
             };
-            match id {
-                C::MultiRenameName => ('N', row.stem().to_owned()),
-                _ => ('E', row.extension().to_owned()),
-            }
+            row.range_text(letter)
         };
-        let pick = PickRange::new(text);
+        let pick = PickRange::new(text, letter);
         let captions = DialogCaptions::new(DialogId::PickRange, &self.strings);
         let ended = dialog::run_modal(dialog, DialogId::PickRange, &captions, &pick);
         if matches!(ended, Ok(DialogEnd::Ok))
-            && let Some(range) = pick.range(letter)
+            && let Some(range) = pick.range()
         {
-            Self::insert(dialog, id, &range);
+            Self::insert(dialog, target, &range);
         }
     }
 
-    /// More: a menu of the other placeholders, which go into the name box.
-    fn more(&self, dialog: Hwnd) {
-        let Some(button) = dialog::item(dialog, C::MultiRenameMore.id()) else {
-            return;
-        };
+    /// Opens `items` below the button `button` and returns the chosen
+    /// item's ID.
+    fn menu_below(dialog: Hwnd, button: C, items: &[MenuNode]) -> Option<u16> {
+        let button = dialog::item(dialog, button.id())?;
+        let rect = button.screen_rect();
+        Menu::track_popup(dialog, items, (rect.x.0, rect.bottom().0), &[], None)
+    }
+
+    /// `+`: a menu of the placeholders that have no button, which go into
+    /// the name box; `[X]` only while the clipboard holds text.
+    fn plus(&self, dialog: Hwnd) {
+        let clipboard = clipboard::holds_text();
         let mut items = Vec::new();
         let mut placeholders = Vec::new();
-        for (index, group) in multi_rename::MORE.iter().enumerate() {
-            if index > 0 {
+        for group in multi_rename::MORE {
+            let group: Vec<&(&str, &str)> = (group.iter())
+                .filter(|(placeholder, _)| clipboard || *placeholder != "[X]")
+                .collect();
+            if group.is_empty() {
+                continue;
+            }
+            if !items.is_empty() {
                 items.push(MenuNode::Separator);
             }
-            for &(placeholder, key) in *group {
+            for &&(placeholder, key) in &group {
                 placeholders.push(placeholder);
                 items.push(MenuNode::Item {
                     id: placeholders.len() as u16,
@@ -1196,23 +1384,121 @@ impl MultiRename<'_> {
                 });
             }
         }
-        let rect = button.screen_rect();
-        let point = (rect.x.0, rect.bottom().0);
-        if let Some(id) = Menu::track_popup(dialog, &items, point, &[], None)
+        if let Some(id) = Self::menu_below(dialog, C::MultiRenamePlus, &items)
             && let Some(placeholder) = placeholders.get(usize::from(id).wrapping_sub(1))
         {
             Self::insert(dialog, C::MultiRenameName, placeholder);
         }
     }
 
-    /// Edit…: the person types or pastes the new names.
-    fn edit_names(&self, dialog: Hwnd) {
+    /// `#`: a menu of the texts whose ranges no button inserts; the one
+    /// chosen opens Range.
+    fn ranges(&self, dialog: Hwnd) {
+        let items: Vec<MenuNode> = (multi_rename::RANGES.iter().enumerate())
+            .map(|(index, &(_, key))| MenuNode::Item {
+                id: index as u16 + 1,
+                text: self.strings.text(key).to_owned(),
+                mark: Mark::None,
+                glyph: None,
+            })
+            .collect();
+        if let Some(id) = Self::menu_below(dialog, C::MultiRenameRanges, &items)
+            && let Some(&(letter, _)) = multi_rename::RANGES.get(usize::from(id).wrapping_sub(1))
+        {
+            self.pick_range(dialog, C::MultiRenameName, letter);
+        }
+    }
+
+    /// The names menu (`F10`): Load names from file… and Edit names….
+    fn names_menu(&self, dialog: Hwnd) {
+        let (load, edit) = (1, 2);
+        let items = [
+            MenuNode::Item {
+                id: load,
+                text: self.strings.text("multi_rename.load_names").to_owned(),
+                mark: Mark::None,
+                glyph: None,
+            },
+            MenuNode::Item {
+                id: edit,
+                text: self.strings.text("multi_rename.edit_names").to_owned(),
+                mark: Mark::None,
+                glyph: None,
+            },
+        ];
+        match Self::menu_below(dialog, C::MultiRenameNames, &items) {
+            Some(id) if id == load => self.load_names(dialog),
+            Some(id) if id == edit => self.edit_names(dialog, None),
+            _ => {}
+        }
+    }
+
+    /// Load names from file…: the work owner reads the chosen file, and
+    /// Edit names opens with its lines.
+    fn load_names(&self, dialog: Hwnd) {
+        let title = self.strings.text("multi_rename.load_title");
+        let all = self.strings.text("multi_rename.all_files");
+        let Some(path) = win::shell::pick_file(dialog, title, all, "*.*") else {
+            return;
+        };
+        self.state.borrow_mut().load_failed = None;
+        if let Some(work) = self.work.borrow_mut().as_mut() {
+            work.file.replace(PathBuf::from(path));
+        }
+    }
+
+    /// Opens Edit names with the file that Load names from file… read, once
+    /// the dialog is free: a batch, a dialog open over this one, a menu or
+    /// a drag runs its own loop, inside which Edit names must not open.
+    /// Until then a timer tries again.
+    fn open_loaded(&self, dialog: Hwnd) {
+        let free =
+            dialog.is_enabled() && !window::input_held() && self.state.borrow().batch.is_none();
+        if !free {
+            dialog.set_timer(LOADED, 100);
+            return;
+        }
+        dialog.kill_timer(LOADED);
+        let loaded = self.state.borrow_mut().loaded.take();
+        if let Some((path, read)) = loaded {
+            self.names_loaded(dialog, path, read);
+        }
+    }
+
+    /// The file that Load names from file… read: its names go into Edit
+    /// names, or the status line says why it could not be read.
+    fn names_loaded(&self, dialog: Hwnd, path: PathBuf, read: std::io::Result<String>) {
+        match read {
+            Ok(text) => self.edit_names(dialog, Some(text)),
+            Err(error) => {
+                let failed = self.strings.format(
+                    "multi_rename.load_failed",
+                    &[
+                        &path
+                            .file_name()
+                            .unwrap_or(path.as_os_str())
+                            .to_string_lossy(),
+                        &win::error_text(&error),
+                    ],
+                );
+                self.state.borrow_mut().load_failed = Some(failed);
+                self.show(dialog);
+            }
+        }
+    }
+
+    /// Edit names: the person types or pastes the new names, which start as
+    /// `text`, a file's lines, or as the names the list shows.
+    fn edit_names(&self, dialog: Hwnd, text: Option<String>) {
         let (text, rows) = {
             let state = self.state.borrow();
-            let names: Vec<&str> = (state.rows.iter().zip(&state.outcomes))
-                .map(|(row, outcome)| outcome.name(row))
-                .collect();
-            (names.join("\r\n"), state.rows.len())
+            let text = text.unwrap_or_else(|| {
+                let names: Vec<&str> = (state.rows.iter().zip(&state.outcomes))
+                    .map(|(row, outcome)| outcome.name(row))
+                    .collect();
+                names.join("\r\n")
+            });
+            (text, state.rows.len())
         };
         let edit = EditNames::new(&self.strings, &self.numbers, text, rows);
         let captions = DialogCaptions::new(DialogId::EditNames, &self.strings);
@@ -1228,6 +1514,64 @@ impl MultiRename<'_> {
             state.edited = true;
         }
         self.changed(dialog);
+    }
+
+    /// Next step (`F5`): the masks read the names shown, and the fields go
+    /// back to their defaults for the next rule. Start! renames from the
+    /// names on disk to the last step's names in one batch.
+    fn next_step(&self, dialog: Hwnd) {
+        {
+            let mut state = self.state.borrow_mut();
+            if !state.can_rename() {
+                return;
+            }
+            let state = &mut *state;
+            multi_rename::next_step(
+                Arc::make_mut(&mut state.rows).as_mut_slice(),
+                &state.outcomes,
+            );
+            state.step += 1;
+        }
+        self.apply(dialog, None, Fields::default());
+    }
+
+    /// `?`: the syntax of Search for and Replace with, with Regular
+    /// expression on.
+    fn regex_help(&self, dialog: Hwnd) {
+        let help = RegularExpressions::new(self.strings.text("multi_rename.regex_text"));
+        let captions = DialogCaptions::new(DialogId::RegularExpressions, &self.strings);
+        let _ = dialog::run_modal(dialog, DialogId::RegularExpressions, &captions, &help);
+    }
+
+    /// Result list: what the batch that ended last did, one entry a line.
+    fn result_list(&self, dialog: Hwnd) {
+        let text = self.state.borrow().results.join("\r\n");
+        let list = ResultList::new(text, self.main, self.window);
+        let captions = DialogCaptions::new(DialogId::ResultList, &self.strings);
+        let _ = dialog::run_modal(dialog, DialogId::ResultList, &captions, &list);
+    }
+
+    /// A drag of the row `row`: the row follows the mouse through the list,
+    /// as `Alt+Up` and `Alt+Down` move it.
+    fn drag_row(&self, dialog: Hwnd, row: u64) {
+        let Some(&list) = self.list.get() else {
+            return;
+        };
+        if !self.state.borrow().can_edit_list() {
+            return;
+        }
+        let mut at = row as usize;
+        let mut moved = false;
+        list.follow_row_drag(|over| {
+            let over = over as usize;
+            if over != at && self.move_row(at, over) {
+                at = over;
+                moved = true;
+            }
+        });
+        if moved {
+            self.changed(dialog);
+        }
     }
 
     /// The item that Saved renames shows: (Default), each saved rename,
@@ -1353,7 +1697,7 @@ impl MultiRename<'_> {
 
     /// Sorts the list by the column at `index`; again reverses the order.
     fn sort(&self, index: usize) {
-        let Some(&(column, _)) = self.columns().get(index) else {
+        let Some(&(column, _)) = COLUMNS.get(index) else {
             return;
         };
         let descending = {
@@ -1372,35 +1716,39 @@ impl MultiRename<'_> {
             descending
         };
         if let Some(list) = self.list.get() {
-            list.show_sort(self.columns().len(), Some((index, !descending)));
+            list.show_sort(COLUMNS.len(), Some((index, !descending)));
         }
     }
 
-    /// Moves the focused row up or down one place.
-    fn move_row(&self, down: bool) -> bool {
+    /// Moves the row at `from` to `to`, where it then shows focused and
+    /// selected; `false` when the list cannot change now or `to` is past
+    /// its end.
+    fn move_row(&self, from: usize, to: usize) -> bool {
         let Some(list) = self.list.get() else {
             return false;
         };
-        let Some(row) = list.focused().map(|row| row as usize) else {
-            return false;
-        };
-        let to = {
+        {
             let mut state = self.state.borrow_mut();
-            let to = match down {
-                true => row + 1,
-                false => row.wrapping_sub(1),
-            };
-            if !state.can_edit_list() || to >= state.rows.len() {
-                return true;
+            let count = state.rows.len();
+            if !state.can_edit_list() || from >= count || to >= count {
+                return false;
             }
-            Arc::make_mut(&mut state.rows).swap(row, to);
-            if state.outcomes.len() > to.max(row) {
-                state.outcomes.swap(row, to);
+            let rows = Arc::make_mut(&mut state.rows);
+            let row = rows.remove(from);
+            rows.insert(to, row);
+            if state.outcomes.len() == count {
+                let outcome = state.outcomes.remove(from);
+                state.outcomes.insert(to, outcome);
             }
             state.sorted = None;
-            to
-        };
-        list.show_sort(self.columns().len(), None);
+            // The counter follows the list's order, so the names shown no
+            // longer fit; a drag computes them again when it ends.
+            state.names = Names::Updating;
+        }
+        if let Some(work) = self.work.borrow_mut().as_mut() {
+            work.names.cancel();
+        }
+        list.show_sort(COLUMNS.len(), None);
         list.select_only(Some(to as u64));
         list.ensure_visible(to as u64);
         true
@@ -1522,9 +1870,39 @@ impl MultiRename<'_> {
                 alt: true,
                 shift: false,
             } if in_list => {
-                let moved = self.move_row(key == Key::Down);
-                self.changed(dialog);
-                moved
+                let Some(row) = self.list.get().and_then(|list| list.focused()) else {
+                    return false;
+                };
+                let row = row as usize;
+                let to = match key {
+                    Key::Down => row + 1,
+                    _ => row.wrapping_sub(1),
+                };
+                if self.move_row(row, to) {
+                    self.changed(dialog);
+                }
+                true
+            }
+            Keystroke {
+                key: Key::Function(5),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            } => {
+                self.next_step(dialog);
+                true
+            }
+            Keystroke {
+                key: Key::Function(10),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            } => {
+                // The key works when the names button does.
+                if dialog::item(dialog, C::MultiRenameNames.id()).is_some_and(Hwnd::is_enabled) {
+                    self.names_menu(dialog);
+                }
+                true
             }
             Keystroke {
                 key: Key::Delete,
@@ -1542,9 +1920,9 @@ impl MultiRename<'_> {
             return;
         };
         let width = list.hwnd().client_size().width.0;
-        let shares: i32 = self.columns().iter().map(|(_, share)| share).sum();
+        let shares: i32 = COLUMNS.iter().map(|(_, share)| share).sum();
         list.set_column_widths(
-            (self.columns().iter().enumerate())
+            (COLUMNS.iter().enumerate())
                 .map(|(index, (_, share))| (index, Px(width * share / shares))),
         );
     }
@@ -1588,6 +1966,12 @@ impl DialogProc for MultiRename<'_> {
                 name_rows,
             ),
             dates: Task::new(delivery.clone(), Replacement::Cancel, read_dates),
+            clipboard: Task::new(delivery.clone(), Replacement::Cancel, read_clipboard),
+            file: Task::new(
+                delivery.clone(),
+                Replacement::Cancel,
+                crate::app::work::read_names,
+            ),
             delivery,
         });
         window::own_keys(dialog, true);
@@ -1612,32 +1996,67 @@ impl DialogProc for MultiRename<'_> {
                 mask.keep_caret();
             }
         }
-        Self::show_fields(dialog, &fields);
-        self.show_saved(dialog);
-        let buttons: Vec<Hwnd> = (INSERTS.iter())
-            .map(|(button, ..)| button.id())
-            .chain([C::MultiRenameMore.id()])
-            .filter_map(|id| dialog::item(dialog, id))
-            .collect();
-        if let Ok(tips) = Tooltip::create(dialog, &buttons) {
-            for (button, _, _, tip) in INSERTS {
-                if let Some(control) = dialog::item(dialog, button.id()) {
-                    tips.set(control, self.strings.text(tip));
-                }
+        if let Some(status) = dialog::item(dialog, C::MultiRenameStatus.id()) {
+            self.status_width.set(status.rect_in(dialog).width);
+        }
+        // Windows' default range runs from 100 down to 0.
+        for id in [C::MultiRenameStartSpin, C::MultiRenameStepSpin] {
+            if let Some(spin) = UpDown::of_dialog(dialog, id.id()) {
+                spin.set_range(0, i32::MAX);
             }
-            if let Some(more) = dialog::item(dialog, C::MultiRenameMore.id()) {
-                tips.set(more, self.strings.text("multi_rename.tip_more"));
+        }
+        Self::show_fields(dialog, &fields);
+        if let Some(saved) = DropDownList::of_dialog(dialog, C::MultiRenameSaved.id()) {
+            saved.set_cue(self.strings.text("multi_rename.saved"));
+        }
+        self.show_saved(dialog);
+        // The icon buttons show only their icon, as Total Commander's do;
+        // the caption is their name for screen readers.
+        for (id, glyph) in [
+            (C::MultiRenameNames, Glyph::Edit),
+            (C::MultiRenameNextStep, Glyph::Redo),
+        ] {
+            if let Some(button) = Button::of_dialog(dialog, id.id()) {
+                button.set_lone_icon(Some(glyph));
+            }
+        }
+        for (id, tip) in SYMBOLS {
+            if let Some(control) = dialog::item(dialog, id.id()) {
+                set_accessible_name(control, Some(self.strings.text(tip)));
+            }
+        }
+        let tips: Vec<(C, &str)> = (INSERTS.iter())
+            .map(|&(button, _, _, tip)| (button, tip))
+            .chain(SYMBOLS)
+            .chain([
+                (C::MultiRenamePlus, "multi_rename.tip_plus"),
+                (C::MultiRenameRanges, "multi_rename.tip_ranges"),
+                (C::MultiRenameRegexHelp, "multi_rename.tip_regex_help"),
+                (C::MultiRenameNames, "multi_rename.tip_names"),
+                (C::MultiRenameNextStep, "multi_rename.tip_next_step"),
+                (C::MultiRenameDigits, "multi_rename.tip_digits"),
+            ])
+            .collect();
+        let controls: Vec<Hwnd> = (tips.iter())
+            .filter_map(|(id, _)| dialog::item(dialog, id.id()))
+            .collect();
+        if let Ok(tooltip) = Tooltip::create(dialog, &controls) {
+            for (id, tip) in tips {
+                if let Some(control) = dialog::item(dialog, id.id()) {
+                    tooltip.set(control, self.strings.text(tip));
+                }
             }
         }
         if let Some(list) = ListView::of_dialog(dialog, C::MultiRenameList.id()) {
-            for (index, (column, _)) in self.columns().iter().enumerate() {
+            list.show_info_tips();
+            for (index, (column, _)) in COLUMNS.iter().enumerate() {
                 let (header, right_aligned) = match column {
-                    Column::Name => ("header.name", false),
+                    Column::OldName => ("multi_rename.old_name", false),
+                    Column::Extension => ("multi_rename.extension_header", false),
                     Column::NewName => ("multi_rename.new_name", false),
-                    Column::Note => ("multi_rename.note", false),
                     Column::Size => ("header.size", true),
-                    Column::Modified => ("header.date_modified", false),
-                    Column::Folder => ("header.folder", false),
+                    Column::Modified => ("multi_rename.date_header", false),
+                    Column::Location => ("multi_rename.location", false),
                 };
                 list.insert_column(
                     index,
@@ -1668,12 +2087,28 @@ impl DialogProc for MultiRename<'_> {
                 self.undo(dialog);
                 true
             }
-            DialogMessage::Command { id } if id == C::MultiRenameEdit.id() => {
-                self.edit_names(dialog);
+            DialogMessage::Command { id } if id == C::MultiRenameNames.id() => {
+                self.names_menu(dialog);
                 true
             }
-            DialogMessage::Command { id } if id == C::MultiRenameMore.id() => {
-                self.more(dialog);
+            DialogMessage::Command { id } if id == C::MultiRenamePlus.id() => {
+                self.plus(dialog);
+                true
+            }
+            DialogMessage::Command { id } if id == C::MultiRenameRanges.id() => {
+                self.ranges(dialog);
+                true
+            }
+            DialogMessage::Command { id } if id == C::MultiRenameRegexHelp.id() => {
+                self.regex_help(dialog);
+                true
+            }
+            DialogMessage::Command { id } if id == C::MultiRenameNextStep.id() => {
+                self.next_step(dialog);
+                true
+            }
+            DialogMessage::Command { id } if id == C::MultiRenameResultList.id() => {
+                self.result_list(dialog);
                 true
             }
             // Close ends the dialog; a batch that runs goes on.
@@ -1683,10 +2118,20 @@ impl DialogProc for MultiRename<'_> {
                     Some(&(_, target, Some(placeholder), _)) => {
                         Self::insert(dialog, target, placeholder);
                     }
-                    Some(&(_, target, None, _)) => self.pick_range(dialog, target),
+                    Some(&(_, target, None, _)) => {
+                        let letter = match target {
+                            C::MultiRenameName => "N",
+                            _ => "E",
+                        };
+                        self.pick_range(dialog, target, letter);
+                    }
                     // A check box.
                     None => self.changed(dialog),
                 }
+                true
+            }
+            DialogMessage::RowDragged { id, row } if id == C::MultiRenameList.id() => {
+                self.drag_row(dialog, row);
                 true
             }
             DialogMessage::Edited { id } if id == C::MultiRenameSaved.id() => {
@@ -1727,6 +2172,10 @@ impl DialogProc for MultiRename<'_> {
                 self.poll(dialog);
                 true
             }
+            DialogMessage::Timer { id: LOADED } => {
+                self.open_loaded(dialog);
+                true
+            }
             DialogMessage::Timer { id: SAVED_ACTION } => {
                 self.run_saved(dialog);
                 true
@@ -1748,10 +2197,13 @@ impl DialogProc for MultiRename<'_> {
         let entry = state.rows.get(index)?;
         // While new names are computed, the list shows the earlier ones.
         let outcome = state.outcomes.get(index);
-        Some(match self.columns().get(column)?.0 {
-            Column::Name => entry.name.clone(),
-            Column::NewName => outcome?.name(entry).to_owned(),
-            Column::Note => self.note(outcome?),
+        Some(match COLUMNS.get(column)?.0 {
+            Column::OldName => entry.name.clone(),
+            Column::Extension => entry.extension().to_owned(),
+            Column::NewName => match outcome? {
+                kept @ Outcome::Kept(_) => self.reason(kept)?,
+                outcome => outcome.name(entry).to_owned(),
+            },
             Column::Size => match (entry.entry.is_folder, entry.entry.size) {
                 (true, _) => self.strings.text("panel.folder").to_owned(),
                 (false, Some(size)) => self.sizes.text(&self.strings, &self.numbers, size),
@@ -1760,39 +2212,47 @@ impl DialogProc for MultiRename<'_> {
             Column::Modified => (entry.entry.modified)
                 .map(|modified| self.numbers.date_time(modified))
                 .unwrap_or_default(),
-            Column::Folder => entry.folder(),
+            Column::Location => entry.folder(),
         })
     }
 
-    fn buttons_sized(&self, dialog: Hwnd, width: Px) {
-        // The extension's buttons start at its box, as the name's do.
-        let place = |id: C| dialog::item(dialog, id.id()).map(|item| (item, item.rect_in(dialog)));
-        if let (Some((_, first)), Some((_, second)), Some((_, label))) = (
-            place(C::MultiRenameInsertName),
-            place(C::MultiRenameNameRange),
-            place(C::MultiRenameExtensionLabel),
+    fn info_tip(&self, id: u16, row: usize) -> Option<String> {
+        if id != C::MultiRenameList.id() {
+            return None;
+        }
+        match self.state.borrow().outcomes.get(row)? {
+            failed @ Outcome::Failed(_) => self.reason(failed),
+            _ => None,
+        }
+    }
+
+    fn keeps_width(&self, id: u16) -> bool {
+        FIXED.iter().any(|control| control.id() == id)
+    }
+
+    fn buttons_sized(&self, dialog: Hwnd, _width: Px) {
+        // The next step button sits left of Start!, which size_buttons
+        // moved; the status text ends at it.
+        let place = |id: u16| dialog::item(dialog, id).map(|item| (item, item.rect_in(dialog)));
+        let mut taken = Px(0);
+        if let (Some((next, rect)), Some((_, ok)), Some((status, text))) = (
+            place(C::MultiRenameNextStep.id()),
+            place(DialogItem::Ok.id()),
+            place(C::MultiRenameStatus.id()),
         ) {
-            let gap = second.x - first.x - width;
-            let moves: Vec<(Hwnd, Rect)> = [
-                C::MultiRenameInsertExtension,
-                C::MultiRenameExtensionRange,
-                C::MultiRenameExtensionCounter,
-            ]
-            .into_iter()
-            .filter_map(place)
-            .enumerate()
-            .map(|(index, (button, rect))| {
-                let x = label.x + Px((width + gap).0 * index as i32);
-                (button, Rect { x, ..rect })
-            })
-            .collect();
-            win::move_children(&moves);
+            let gap = Px((ok.x - text.right() - rect.width).0 / 2);
+            let x = ok.x - gap - rect.width;
+            let width = x - gap - text.x;
+            // The dialog grows by what wider buttons took from the counts.
+            taken = (self.status_width.get() - width).max(Px(0));
+            win::move_children(&[(next, Rect { x, ..rect }), (status, Rect { width, ..text })]);
         }
         let controls = [
             C::MultiRenameList,
             C::MultiRenameStatus,
-            C::MultiRenameEdit,
+            C::MultiRenameNextStep,
             C::MultiRenameUndo,
+            C::MultiRenameResultList,
         ]
         .into_iter()
         .map(C::id)
@@ -1801,19 +2261,23 @@ impl DialogProc for MultiRename<'_> {
         .collect();
         let outer = dialog.screen_rect();
         let dpi = dialog.dpi();
+        let minimum = Size {
+            width: outer.width + taken,
+            height: outer.height,
+        };
         let _ = self.layout.set(Layout {
             dpi,
             client: dialog.client_size(),
-            minimum: Size {
-                width: outer.width,
-                height: outer.height,
-            },
+            minimum,
             controls,
         });
         let saved = self.kept.borrow().size;
-        if let Some(size) = saved {
-            let width = size.width.to_px(dpi).max(outer.width);
-            let height = size.height.to_px(dpi).max(outer.height);
+        let (width, height) = match saved {
+            Some(size) => (size.width.to_px(dpi), size.height.to_px(dpi)),
+            None => (outer.width, outer.height),
+        };
+        let (width, height) = (width.max(minimum.width), height.max(minimum.height));
+        if (width, height) != (outer.width, outer.height) {
             dialog.set_rect(Rect {
                 x: outer.x - Px((width - outer.width).0 / 2),
                 y: outer.y - Px((height - outer.height).0 / 2),
@@ -1869,9 +2333,15 @@ impl DialogProc for MultiRename<'_> {
 
     fn closed(&self, dialog: Hwnd) {
         window::own_keys(dialog, false);
+        for (id, _) in SYMBOLS {
+            if let Some(control) = dialog::item(dialog, id.id()) {
+                set_accessible_name(control, None);
+            }
+        }
         dialog.kill_timer(UPDATE);
         dialog.kill_timer(POLL);
         dialog.kill_timer(SAVED_ACTION);
+        dialog.kill_timer(LOADED);
         let fields = Self::read_fields(dialog);
         self.state.borrow_mut().fields = fields;
         let rect = dialog.screen_rect();
@@ -1884,8 +2354,12 @@ impl DialogProc for MultiRename<'_> {
             work.delivery.close();
             work.names.cancel();
             work.dates.cancel();
+            work.clipboard.cancel();
+            work.file.cancel();
             let mut retired = work.names.close_delivery();
             retired.append(work.dates.close_delivery());
+            retired.append(work.clipboard.close_delivery());
+            retired.append(work.file.close_delivery());
             self.main.created().work.borrow_mut().retire(retired);
         }
     }

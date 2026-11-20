@@ -23,9 +23,9 @@ use std::cell::RefCell;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, S_OK, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
-    DTN_DATETIMECHANGE, EMF_CENTERED, LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_GETEMPTYMARKUP,
-    LVN_GETINFOTIPW, LVN_ITEMCHANGED, NM_CLICK, NM_DBLCLK, NM_RETURN, NMHDR, NMLISTVIEW,
-    NMLVDISPINFOW, NMLVEMPTYMARKUP, NMLVGETINFOTIPW, NMTREEVIEWW, NMTVITEMCHANGE,
+    DTN_DATETIMECHANGE, EMF_CENTERED, LVN_BEGINDRAG, LVN_COLUMNCLICK, LVN_GETDISPINFOW,
+    LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED, NM_CLICK, NM_DBLCLK, NM_RETURN, NMHDR,
+    NMLISTVIEW, NMLVDISPINFOW, NMLVEMPTYMARKUP, NMLVGETINFOTIPW, NMTREEVIEWW, NMTVITEMCHANGE,
     TASKDIALOG_BUTTON, TASKDIALOG_NOTIFICATIONS, TASKDIALOGCONFIG, TASKDIALOGCONFIG_0,
     TASKDIALOGCONFIG_1, TD_INFORMATION_ICON, TD_WARNING_ICON, TDF_ALLOW_DIALOG_CANCELLATION,
     TDF_POSITION_RELATIVE_TO_WINDOW, TDM_SET_BUTTON_ELEVATION_REQUIRED_STATE, TDN_CREATED,
@@ -119,6 +119,11 @@ pub(crate) enum DialogMessage {
         item: TreeItem,
         change: TreeChange,
     },
+    /// The person started to drag row `row` of the list view `id`.
+    RowDragged {
+        id: u16,
+        row: u64,
+    },
     Other,
 }
 
@@ -185,6 +190,12 @@ pub(crate) trait DialogProc {
     /// other button.
     fn clear_glyph(&self, _id: u16) -> Option<Glyph> {
         None
+    }
+    /// Whether the push button `id` keeps the width and the place its
+    /// template gives it, such as a button of Multi-Rename's grid of
+    /// placeholders, which copies Total Commander's.
+    fn keeps_width(&self, _id: u16) -> bool {
+        false
     }
 }
 
@@ -369,6 +380,15 @@ unsafe extern "system" fn procedure<D: DialogProc>(
                         Err(_) => DialogMessage::Other,
                     }
                 }
+                LVN_BEGINDRAG => {
+                    // SAFETY: LVN_BEGINDRAG's lparam points to an
+                    // NMLISTVIEW.
+                    let notice = unsafe { &*(lparam.0 as *const NMLISTVIEW) };
+                    match u64::try_from(notice.iItem) {
+                        Ok(row) => DialogMessage::RowDragged { id, row },
+                        Err(_) => DialogMessage::Other,
+                    }
+                }
                 NM_CLICK | NM_RETURN => DialogMessage::LinkActivated { id },
                 NM_DBLCLK => DialogMessage::DoubleClicked { id },
                 DTN_DATETIMECHANGE | LVN_ITEMCHANGED => DialogMessage::Edited { id },
@@ -449,6 +469,7 @@ unsafe extern "system" fn procedure<D: DialogProc>(
         | DialogMessage::Timer { .. }
         | DialogMessage::Reply
         | DialogMessage::Tree { .. }
+        | DialogMessage::RowDragged { .. }
         | DialogMessage::Other => None,
     };
     if running.state.message(dialog, message) {
@@ -694,6 +715,7 @@ impl Children {
         let (buttons, others): (Vec<Hwnd>, Vec<Hwnd>) = children
             .into_iter()
             .filter(|child| parents.contains(&child.parent()))
+            .filter(|child| !state.keeps_width(control_id(*child)))
             .partition(|child| is_push_button(*child));
         let (clears, buttons): (Vec<Hwnd>, Vec<Hwnd>) = buttons
             .into_iter()

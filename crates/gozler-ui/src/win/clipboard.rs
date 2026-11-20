@@ -10,10 +10,13 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use windows::Win32::Foundation::{E_OUTOFMEMORY, GlobalFree, HANDLE, HGLOBAL};
 use windows::Win32::System::DataExchange::{
-    AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardSequenceNumber,
-    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
+    GetClipboardSequenceNumber, IsClipboardFormatAvailable, OpenClipboard,
+    RegisterClipboardFormatW, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
 };
@@ -285,6 +288,42 @@ impl ClipboardBlock {
 pub(crate) fn holds_files() -> bool {
     // SAFETY: plain values.
     unsafe { IsClipboardFormatAvailable(CF_HDROP) }.is_ok()
+}
+
+/// Whether the clipboard holds text, which Multi-Rename's `[X]` inserts.
+pub(crate) fn holds_text() -> bool {
+    // SAFETY: plain values.
+    unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) }.is_ok()
+}
+
+/// The clipboard's text, up to its first NUL; `None` when it holds none or
+/// another program keeps it open. Runs off the window's thread, because
+/// the program that owns the clipboard can make the read wait.
+pub(crate) fn text(_worker: &super::work::OffThread) -> Option<String> {
+    // SAFETY: plain values; the clipboard is closed below.
+    unsafe { OpenClipboard(None) }.ok()?;
+    // SAFETY: the clipboard is open, and the block stays locked while its
+    // units are read, within the size Windows gives it.
+    let text = unsafe {
+        GetClipboardData(CF_UNICODETEXT).ok().and_then(|data| {
+            let block = HGLOBAL(data.0);
+            let units = GlobalLock(block).cast::<u16>();
+            if units.is_null() {
+                return None;
+            }
+            let units = std::slice::from_raw_parts(units, GlobalSize(block) / 2);
+            let end = units
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap_or(units.len());
+            let text = String::from_utf16_lossy(&units[..end]);
+            let _ = GlobalUnlock(block);
+            Some(text)
+        })
+    };
+    // SAFETY: this thread opened the clipboard above.
+    let _ = unsafe { CloseClipboard() };
+    text
 }
 
 mod work;

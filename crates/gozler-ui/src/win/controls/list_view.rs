@@ -447,6 +447,61 @@ impl ListView {
         u64::try_from(row).ok()
     }
 
+    /// Follows a drag of a row that began in this list: calls `over` with
+    /// the row under the mouse each time the mouse moves, until the left
+    /// button goes up, `Esc` is pressed or another window takes the mouse.
+    pub(crate) fn follow_row_drag(self, mut over: impl FnMut(u64)) {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetCapture, ReleaseCapture, SetCapture, VK_ESCAPE,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, GetCursorPos, GetMessageW, MSG, PostQuitMessage, TranslateMessage,
+            WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+        };
+        // SAFETY: this thread owns the list, which keeps the mouse until the
+        // loop below ends.
+        unsafe { SetCapture(self.0.0) };
+        let mut message = MSG::default();
+        loop {
+            // SAFETY: `message` is a local that the call fills in.
+            let got = unsafe { GetMessageW(&mut message, None, 0, 0) }.0;
+            if got == 0 {
+                // WM_QUIT belongs to the window's own loop.
+                // SAFETY: plain values.
+                unsafe { PostQuitMessage(message.wParam.0 as i32) };
+                break;
+            }
+            if got < 0
+                || message.message == WM_LBUTTONUP
+                || (message.message == WM_KEYDOWN && message.wParam.0 == usize::from(VK_ESCAPE.0))
+            {
+                break;
+            }
+            if message.message == WM_MOUSEMOVE {
+                let mut point = POINT::default();
+                // SAFETY: `point` is a local that the call fills in.
+                if unsafe { GetCursorPos(&mut point) }.is_ok()
+                    && let Some(row) = self.row_at((point.x, point.y))
+                {
+                    over(row);
+                }
+                continue;
+            }
+            // SAFETY: `message` came from GetMessageW on this thread.
+            unsafe {
+                let _ = TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            // SAFETY: plain values.
+            if unsafe { GetCapture() } != self.0.0 {
+                break;
+            }
+        }
+        // SAFETY: plain values; releasing a capture this thread no longer
+        // holds does nothing.
+        let _ = unsafe { ReleaseCapture() };
+    }
+
     /// The edge that the list scrolls toward while dragged files rest at
     /// `point`, in screen coordinates, as File Explorer's list does: the
     /// header and the row height below it, or the last row height above the
