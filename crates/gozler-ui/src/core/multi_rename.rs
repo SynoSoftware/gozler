@@ -1386,7 +1386,9 @@ mod tests {
 
     /// Undo names each entry's old name from the folder it is in now: up
     /// out of folders the batch moved it into, and not up out of a folder
-    /// whose name differs only in case. The last rename goes first.
+    /// whose name differs only in case. The last rename goes first. The
+    /// paths are Windows paths, which only Windows splits at `\`.
+    #[cfg(windows)]
     #[test]
     fn undo_names_the_old_path_from_the_new_one() {
         let renamed = |from: &str, to: &str| Renamed {
