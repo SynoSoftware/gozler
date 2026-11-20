@@ -60,6 +60,9 @@ thread_local! {
     static UPDATES: RefCell<Updates> = RefCell::new(Updates::default());
     /// The window whose updates are published, until its `WM_DESTROY`.
     static MAIN: Cell<Option<Main>> = const { Cell::new(None) };
+    /// The bitmap of the cover's copy, kept between passes while the
+    /// client's size stays, and deleted at `WM_DESTROY` of the main window.
+    static COPY: Cell<Option<CoverCopy>> = const { Cell::new(None) };
     static FRAMES: RefCell<Option<FrameLog>> = const { RefCell::new(None) };
     static DEFERRED_PAINT: Cell<DeferredPaint> = const {
         Cell::new(DeferredPaint { since: None, present: Present::Idle })
@@ -79,6 +82,13 @@ struct Main {
     cover: Option<Hwnd>,
     /// The client's size at the last pass that wanted the cover.
     covered_size: Option<(i32, i32)>,
+}
+
+/// The cover's bitmap and the client size it was made for.
+#[derive(Clone, Copy)]
+struct CoverCopy {
+    bitmap: HBITMAP,
+    size: (i32, i32),
 }
 
 struct FrameLog {
@@ -278,7 +288,12 @@ pub(super) unsafe fn enter(window: HWND, message: u32, lparam: LPARAM) -> Scope 
             ..DEFERRED_PAINT.get()
         }),
         WM_DESTROY if MAIN.get().is_some_and(|main| main.window == Hwnd(window)) => {
-            MAIN.set(None);
+            if let Some(cover) = MAIN.take().and_then(|main| main.cover) {
+                send_image(cover, None);
+            }
+            if let Some(copy) = COPY.take() {
+                delete_bitmap(copy.bitmap);
+            }
             UPDATES.with_borrow_mut(Updates::forget);
         }
         _ => {}
@@ -862,11 +877,9 @@ fn raise_cover(main: Hwnd, cover: Hwnd, area: i64) -> Cover {
     let Some(copy) = copy_client(main, width, height) else {
         return Cover::CopyFailed;
     };
-    // The control keeps a bitmap without alpha as it is, and gives it back
-    // when the next image replaces it.
-    if let Some(previous) = send_image(cover, Some(copy)) {
-        delete_bitmap(previous);
-    }
+    // The control keeps a bitmap without alpha as it is. It never owns the
+    // bitmap: [`COPY`] does, so what it gives back is not deleted.
+    send_image(cover, Some(copy));
     shape_cover(main, cover, origin, width, height);
     // SAFETY: plain values.
     let above = unsafe { GetWindow(main.0, GW_HWNDPREV) }.ok();
@@ -922,7 +935,7 @@ fn lower_cover(cover: Hwnd) {
     hide_cover(cover);
 }
 
-/// Hides `cover` and lets go of its copy.
+/// Hides `cover` and takes its copy off it; [`COPY`] keeps the bitmap.
 fn hide_cover(cover: Hwnd) {
     // SAFETY: plain values. Under DWM the windows below keep their pixels,
     // so nothing below needs painting.
@@ -937,9 +950,7 @@ fn hide_cover(cover: Hwnd) {
             SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
         )
     };
-    if let Some(shown) = send_image(cover, None) {
-        delete_bitmap(shown);
-    }
+    send_image(cover, None);
 }
 
 /// Gives `cover` the bitmap `image`, or none, and returns the one it showed.
@@ -1027,7 +1038,9 @@ fn shape_cover(main: Hwnd, cover: Hwnd, origin: POINT, width: i32, height: i32) 
 /// controls are in it too, because they paint into the main window's
 /// surface. It has no alpha channel: GDI leaves the alpha of the text it
 /// draws at zero, and the static control would show such pixels as
-/// transparent, so every text would be missing from the cover.
+/// transparent, so every text would be missing from the cover. The bitmap
+/// is [`COPY`]'s: it is made again only when the size changes, and the
+/// copy overwrites every pixel of it.
 fn copy_client(main: Hwnd, width: i32, height: i32) -> Option<HBITMAP> {
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -1048,10 +1061,27 @@ fn copy_client(main: Hwnd, width: i32, height: i32) -> Option<HBITMAP> {
         if window.is_invalid() {
             return None;
         }
+        let kept = COPY.get().filter(|kept| kept.size == (width, height));
+        let copy = match kept {
+            Some(kept) => kept.bitmap,
+            None => {
+                if let Some(stale) = COPY.take() {
+                    delete_bitmap(stale.bitmap);
+                }
+                let mut bits = std::ptr::null_mut();
+                let made =
+                    CreateDIBSection(Some(window), &info, DIB_RGB_COLORS, &mut bits, None, 0)
+                        .unwrap_or_default();
+                if !made.is_invalid() {
+                    COPY.set(Some(CoverCopy {
+                        bitmap: made,
+                        size: (width, height),
+                    }));
+                }
+                made
+            }
+        };
         let memory = CreateCompatibleDC(Some(window));
-        let mut bits = std::ptr::null_mut();
-        let copy = CreateDIBSection(Some(window), &info, DIB_RGB_COLORS, &mut bits, None, 0)
-            .unwrap_or_default();
         let copied = !memory.is_invalid() && !copy.is_invalid() && {
             let previous = SelectObject(memory, HGDIOBJ(copy.0));
             let copied = BitBlt(memory, 0, 0, width, height, Some(window), 0, 0, SRCCOPY).is_ok();
@@ -1062,14 +1092,7 @@ fn copy_client(main: Hwnd, width: i32, height: i32) -> Option<HBITMAP> {
             let _ = DeleteDC(memory);
         }
         ReleaseDC(Some(main.0), window);
-        if copied {
-            Some(copy)
-        } else {
-            if !copy.is_invalid() {
-                delete_bitmap(copy);
-            }
-            None
-        }
+        copied.then_some(copy)
     }
 }
 
