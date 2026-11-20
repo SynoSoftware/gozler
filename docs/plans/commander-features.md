@@ -21,6 +21,8 @@ run when their affected owner needs them; the whole plan is not a gate.
 This roadmap prioritizes everyday file-management tasks, with Total
 Commander as one reference rather than a command checklist. It promises
 neither that program's complete command set nor compatible numeric IDs.
+Entry 11 is the exception: at the owner's request (2026-11-15) it takes
+every selection command that Commander lacks.
 The command reference is its
 [list of internal commands](https://www.ghisler.ch/wiki/index.php?title=List_of_internal_commands),
 consulted on 2026-10-30. Names in the reference column identify the source
@@ -119,7 +121,7 @@ extension of this roadmap.
 | 8 | Open or create a document | Open with, Show in File Explorer, working F4 Edit and New text file | Windows app chooser; `cm_Edit`, `cm_EditNewFile` |
 | 9 | Unpack a download or send a bundle | Extract ZIP to a chosen folder and create a ZIP from selected entries | Windows ZIP workflow; TC pack/unpack commands |
 | 10 | Arrange the two working folders | Swap panels and show the active folder in the other panel | `cm_Exchange`, `cm_MatchSrc` |
-| 11 | Select a related group | Invert selection and select/unselect by the focused file's extension | `cm_ExchangeSelection`, `cm_SelectCurrentExtension` |
+| 11 | Select and reselect entries | Total Commander's selection commands that Commander lacks, as [Selection commands](#selection-commands) lists: the last operation's selection back, invert, select by the focused entry's extension, name or folder, its mask syntax, and the selection saved to a file | `cm_RestoreSelection`, `cm_ExchangeSelection`, `cm_SelectCurrentExtension` and the others listed there |
 | 12 | Rename many files | Multi-Rename: masks, counter, search and replace, case, Edit names, saved renames and Undo (DESIGN.md: Multi-Rename) | `cm_MultiRenameFiles` |
 | 13 | Compare two versions | The built-in compare window, with line and word marks, edit mode and Save; a chosen comparison tool runs instead while one is set (DESIGN.md: Compare by content) | `cm_CompareFilesByContent`, `cm_IntCompareFilesByContent` |
 | 14 | Check a download or copied bundle | Create/verify checksum files and report mismatches or unreadable files | `cm_CRCcreate`, `cm_CRCcheck` |
@@ -238,6 +240,57 @@ only of the new bar and its history state for later owner review.
 - **Branch view:** reuse the indexed search/listing path and entry identity.
   Missing index coverage is shown as incomplete or unavailable. Do not
   introduce a synchronous directory walk to fill a gap.
+
+## Selection commands
+
+Entry 11 adds the selection commands of Total Commander 11.58 that Commander
+does not have. Commander already has `Insert`, `Space`, `Shift` with the
+cursor keys, `Ctrl+A`, `Ctrl`+click, `Shift`+click, Select files… (`Num +`),
+Unselect files… (`Num -`), `Esc` and Edit > Clear selection, and the setting
+that decides whether these include folders (DESIGN.md: Selecting entries).
+The sources are Total Commander's internal commands (`TOTALCMD.INC`), its
+`KEYBOARD.TXT` and help, and SynapseCommander's
+`C:\SynoSoftware\synapsecommander\docs\specs\selection.md`, in another
+repository, which compares each command with Commander.
+
+- Each command below is in the Edit menu, where Select files… is, and on the
+  Keyboard page; the keys below are its default shortcuts. The commands
+  without a default shortcut go into one Edit submenu, so the menu stays
+  short.
+- They extend the existing selection owner. A command that goes through
+  every row of the panel runs as a mask does, through the work owner,
+  so the window does not wait.
+- `..` is never selected. "With the other folder choice" means the opposite
+  of the Selection setting, for that one command, as Total Commander's
+  `Shift` keys do. The commands with a fixed choice of files, folders or
+  both get no default shortcut; they exist because nothing else selects
+  only the folders, for example to move every subfolder.
+- In a search panel they act on its results, as the panel's other keys do.
+- The rows below are in priority order. `Num /` and the unfinished entries
+  come first, because without them the person selects the same entries
+  again by hand to copy one selection to two places, or to try a failed
+  copy again.
+
+| User task | Default shortcut | What it does | Total Commander |
+|---|---|---|---|
+| Get back the selection of the last operation | `Num /` | Selects again what the panel's last file command captured, or what Save selection stored after it, by full path, so another folder's entries with the same names are never selected. Entries that are gone or not shown are counted, not hidden: "Selected 18 of 20; 2 are no longer here" | `cm_RestoreSelection` |
+| Keep unfinished entries selected | — | When a copy ends, the entries it copied completely are cleared and the others stay selected, so `F5` tries them again; a move and a delete do the same. This happens only while the panel still shows that folder and nothing was selected there since the operation started; otherwise the operation's report lists the unfinished entries and the selection stays as the person left it. Today Commander clears the whole selection when the operation is submitted, and DESIGN.md calls that "as in Total Commander", which is wrong (Total Commander's help: Copy files) | copy dialog |
+| Clear by mask without leaving folders selected | `Num -`; `Shift+Num -` clears files only | `Num -` clears the matching files and folders always, whatever the Selection setting says. Today a folder that matches stays selected when the setting excludes folders, and the next Delete then deletes it permanently with the rest. `cm_ClearSelCfg`, which follows the setting, is left out for that reason | `cm_ShrinkSelection`, `cm_ClearFiles` |
+| Invert the selection | `Num *`; `Shift+Num *` with the other folder choice | Selects what was not selected and clears what was | `cm_ExchangeSelection`, `cm_ExchangeSelBoth`, `cm_ExchangeSelFiles`, `cm_ExchangeSelFolders` |
+| Select or clear every entry with the focused entry's extension | `Alt+Num +`, `Alt+Num -` | Uses the focused entry's extension as the mask | `cm_SelectCurrentExtension`, `cm_UnselectCurrentExtension` |
+| Select or clear everything by key | `Ctrl+Num +`, `Ctrl+Num -`; `Ctrl+Shift+Num +` with the other folder choice; `Ctrl+Shift+Num -` files only | `Ctrl+Num -` always clears files and folders. `Ctrl+A` and `Esc` keep their meaning | `cm_SelectAll`, `cm_ClearAll`, `cm_SelectAllBoth`, `cm_SelectAllFiles`, `cm_SelectAllFolders`, `cm_ClearAllFiles`, `cm_ClearAllFolders`, `cm_ClearAllCfg` |
+| Use a mask with the other folder choice | `Shift+Num +` | Select files… for that one mask; Unselect files… with folders only has no default shortcut | `cm_SelectBoth`, `cm_SelectFiles`, `cm_SelectFolders`, `cm_ClearFolders` |
+| Write masks as in Total Commander | `Num +`, `Num -` | Spaces separate masks, as well as `;`, and double quotes keep a space inside one mask, as in Total Commander: `"My report*.docx"`. A mask saved by an earlier version is read with `;` as its only separator, so it keeps its meaning. After `\|` come the masks to leave out: `*.*\|*.bak *.old`. A mask that starts with `<` is a regular expression. `*.jpg>*.cr2` selects the `.jpg` files and each `.cr2` file with the same name. The box keeps a history of masks; `Shift+Del` removes one | `cm_SpreadSelection`, `cm_ShrinkSelection` |
+| Start a mask from the focused entry's extension | none | Opens Select files… or Unselect files… with `*.ext` already typed | `cm_SpreadSelectionCurrentExt`, `cm_ShrinkSelectionCurrentExt` |
+| Select or clear the entries with the focused entry's name, name and extension, or folder | none | Most useful in a search panel, whose results come from many folders | `cm_SelectCurrentName`, `cm_UnselectCurrentName`, `cm_SelectCurrentNameExt`, `cm_UnselectCurrentNameExt`, `cm_SelectCurrentPath`, `cm_UnselectCurrentPath` |
+| Save the selection now, for `Num /` | none | Replaces what `Num /` brings back with the current selection. Without it, a selection built by hand for a later copy is lost when another command runs first | `cm_SaveSelection` |
+| Save the selection to a file, or select the names in a file or on the clipboard | none | Save writes the selected names one per line, full paths in a search panel, in UTF-8 with a byte-order mark, which Total Commander also reads; its ANSI and Unicode variants add nothing. Loading selects the matching entries and counts the rest: "Selected 180 of 200 names; 20 are not in this folder" | `cm_SaveSelectionToFile`, `cm_SaveSelectionToFileA`, `cm_SaveSelectionToFileW`, `cm_LoadSelectionFromFile`, `cm_LoadSelectionFromClip` |
+| Select, clear or toggle the focused entry and move down | none | `Insert` toggles, so over rows that are partly selected it clears the ones the person meant to keep; Select and Clear set one state | `cm_Select`, `cm_UnSelect`, `cm_Reverse` |
+| Select with the mouse as Total Commander does | — | A click on an entry's icon selects or clears that entry alone and keeps the others selected; with Total Commander's default settings this is on. The icon hit test comes before the plain-click rule (DESIGN.md: Selecting entries), so that click never clears the selection. A drag that starts behind an entry's name selects the entries in a rectangle. A list view that selects whole rows starts its own rectangle only on the empty area, so the drag behind a name needs a design under "Windows draws the window" | Configuration > Operation: Select by clicking on icon, rubber band selection |
+
+Total Commander's predefined selection types, which select by size, date or
+attributes through a saved search, are left out: a search panel with a
+filter finds the same entries, and `Ctrl+A` selects them.
 
 ## Usability follow-through
 
