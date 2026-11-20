@@ -50,11 +50,14 @@ use core::cmp::Ordering;
 use core::ops::Deref;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{self, AtomicBool};
 
 mod snapshot;
 
-pub use snapshot::{ResultSnapshot, ResultSnapshotGone, SnapshotRow, SnapshotRows, TooManyVolumes};
+pub use snapshot::{
+    IntoSnapshotError, ResultSnapshot, ResultSnapshotGone, SnapshotRow, SnapshotRows,
+    SortAgainError, Stopped, TooManyVolumes,
+};
 
 /// A row of a volume whose file IDs fit in 64 bits, as NTFS's do. It has the
 /// size and alignment of a [`SortRecord`], so the records become rows in
@@ -949,6 +952,10 @@ impl<V: IndexedVolume> ResultRows<V> {
         let mut volumes = Vec::with_capacity(found.len());
         let mut answers = Vec::with_capacity(found.len());
         for (volume, seen_by, matches) in found {
+            if stop.load(atomic::Ordering::Relaxed) {
+                coverage.volumes_incomplete = true;
+                break;
+            }
             // Without a hold, so the journal does not wait for the sort.
             let ordered = matches.order();
             let read = ordered.read_rows(&volume.read().index, &seen_by);
@@ -1347,7 +1354,7 @@ mod tests {
             };
             let (snapshot, kept) = ResultRows::search(volumes.clone(), &query, None, first, Viewer::Everything, &AtomicBool::new(false))
                 .expect("no scope")
-                .into_snapshot()
+                .into_snapshot(&AtomicBool::new(false))
                 .expect("at most four volumes");
             for sort in all_sorts() {
                 // Every row of every volume, sorted by the result order.
@@ -1395,9 +1402,9 @@ mod tests {
                 prop_assert_eq!(&merged, &expected, "{:?} on {:?}", sort, mounts);
 
                 let (sorted, kept_again) = snapshot
-                    .sort_again(kept.clone(), sort, Viewer::Everything)
+                    .sort_again(kept.clone(), sort, Viewer::Everything, &AtomicBool::new(false))
                     .expect("no index changed")
-                    .into_snapshot()
+                    .into_snapshot(&AtomicBool::new(false))
                     .expect("at most four volumes");
                 let read = snapshot_paths(&sorted, kept_again, 0, None).expect("no index changed");
                 let expected: Vec<Option<Vec<u8>>> = expected.into_iter().map(Some).collect();
@@ -1637,7 +1644,9 @@ mod tests {
             reply.push(Some(path));
             true
         }) {}
-        let (snapshot, kept) = search().into_snapshot().expect("two volumes");
+        let (snapshot, kept) = search()
+            .into_snapshot(&AtomicBool::new(false))
+            .expect("two volumes");
         assert_eq!(snapshot.total(), 4200);
         let all = snapshot_paths(&snapshot, kept.clone(), 0, None).expect("not gone");
         assert_eq!(all, reply, "the reply's order");
@@ -1707,7 +1716,9 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("no scope");
-        let (snapshot, kept) = rows.into_snapshot().expect("one volume");
+        let (snapshot, kept) = rows
+            .into_snapshot(&AtomicBool::new(false))
+            .expect("one volume");
         // b.txt, the second file the helper makes after the folders.
         let b = Frn::ntfs(FOLDERS.len() as u64 + 1 + 100, 1);
         let mut changed = volume.index.write().expect("no test panics holding it");
@@ -1729,10 +1740,15 @@ mod tests {
             key: SortKey::Name,
             dir: SortDir::Desc,
         };
-        let sorted = snapshot.sort_again(kept.clone(), by_name_down, Viewer::Everything);
+        let sorted = snapshot.sort_again(
+            kept.clone(),
+            by_name_down,
+            Viewer::Everything,
+            &AtomicBool::new(false),
+        );
         let (sorted, kept_again) = sorted
             .expect("the same index")
-            .into_snapshot()
+            .into_snapshot(&AtomicBool::new(false))
             .expect("one volume");
         assert_eq!(
             snapshot_paths(&sorted, kept_again, 0, None),
@@ -1745,8 +1761,13 @@ mod tests {
             Err(ResultSnapshotGone)
         );
         assert!(matches!(
-            snapshot.sort_again(kept, by_name_down, Viewer::Everything),
-            Err(ResultSnapshotGone)
+            snapshot.sort_again(
+                kept,
+                by_name_down,
+                Viewer::Everything,
+                &AtomicBool::new(false)
+            ),
+            Err(SortAgainError::Gone(ResultSnapshotGone))
         ));
     }
 

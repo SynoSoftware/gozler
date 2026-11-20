@@ -34,6 +34,7 @@ use crate::query::order::SortRecord;
 use crate::query::paths::{FolderCopy, ResultNames};
 use crate::types::{EntryIdx, SortSpec};
 use rustc_hash::FxHashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Rows of the merged order between two checkpoints.
 const CHECKPOINT_ROWS: usize = 4096;
@@ -78,6 +79,30 @@ pub struct TooManyVolumes;
 #[error("the result snapshot is gone; search again")]
 pub struct ResultSnapshotGone;
 
+/// The work ended because `stop` was set: the caller sets it when no one
+/// waits for the answer, so nothing is left to keep or send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("stopped: no one waits for the answer")]
+pub struct Stopped;
+
+/// Why [`ResultRows::into_snapshot`] kept nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum IntoSnapshotError {
+    #[error(transparent)]
+    TooManyVolumes(#[from] TooManyVolumes),
+    #[error(transparent)]
+    Stopped(#[from] Stopped),
+}
+
+/// Why [`ResultSnapshot::sort_again`] sorted nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum SortAgainError {
+    #[error(transparent)]
+    Gone(#[from] ResultSnapshotGone),
+    #[error(transparent)]
+    Stopped(#[from] Stopped),
+}
+
 /// A row of a result snapshot as a read finds it.
 #[derive(Clone, Copy, Debug)]
 pub enum SnapshotRow<'a> {
@@ -95,14 +120,21 @@ impl<V: IndexedVolume> ResultRows<V> {
     ///
     /// # Errors
     ///
-    /// [`TooManyVolumes`] for a search over more volumes than the merged
-    /// order names.
-    pub fn into_snapshot(mut self) -> Result<(ResultSnapshot, Vec<V>), TooManyVolumes> {
+    /// [`IntoSnapshotError::TooManyVolumes`] for a search over more volumes
+    /// than the merged order names, and [`IntoSnapshotError::Stopped`] when
+    /// `stop` was set before the merge ended.
+    pub fn into_snapshot(
+        mut self,
+        stop: &AtomicBool,
+    ) -> Result<(ResultSnapshot, Vec<V>), IntoSnapshotError> {
         let volumes = self.reply.volumes.len();
         if volumes > MAX_VOLUMES {
-            return Err(TooManyVolumes);
+            return Err(TooManyVolumes.into());
         }
-        let order = (volumes > 1).then(|| self.merge());
+        let order = (volumes > 1).then(|| self.merge(stop));
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped.into());
+        }
         let snapshot = ResultSnapshot {
             total: match &order {
                 Some(order) => order.tags.len() as u64,
@@ -119,22 +151,24 @@ impl<V: IndexedVolume> ResultRows<V> {
 
     /// Walks the merged order once and keeps it, then drops from each
     /// volume's rows those the walk could not send.
-    fn merge(&mut self) -> MergedOrder {
+    fn merge(&mut self, stop: &AtomicBool) -> MergedOrder {
         let mut kept: Vec<Vec<bool>> = (self.reply.volumes.iter())
             .map(|v| vec![false; v.answer.rows.len()])
             .collect();
         let mut placed = vec![0u32; kept.len()];
         let mut tags = Vec::with_capacity(self.reply.rows_left());
         let mut checkpoints = Vec::new();
-        while self.page_placed(MERGE_PAGE_ROWS, |v, at, _, _| {
-            if tags.len() % CHECKPOINT_ROWS == 0 {
-                checkpoints.push(placed.clone().into_boxed_slice());
-            }
-            tags.push(u8::try_from(v).expect("into_snapshot checked the volume count"));
-            kept[v][at] = true;
-            placed[v] += 1;
-            true
-        }) {}
+        while !stop.load(Ordering::Relaxed)
+            && self.page_placed(MERGE_PAGE_ROWS, |v, at, _, _| {
+                if tags.len() % CHECKPOINT_ROWS == 0 {
+                    checkpoints.push(placed.clone().into_boxed_slice());
+                }
+                tags.push(u8::try_from(v).expect("into_snapshot checked the volume count"));
+                kept[v][at] = true;
+                placed[v] += 1;
+                true
+            })
+        {}
         for (volume, kept) in self.reply.volumes.iter_mut().zip(&kept) {
             volume.answer.rows.retain_kept(kept);
         }
@@ -190,8 +224,9 @@ impl ResultSnapshot {
     ///
     /// # Errors
     ///
-    /// [`ResultSnapshotGone`] when a volume's index was replaced since the
-    /// search, or its entries got new indexes.
+    /// [`SortAgainError::Gone`] when a volume's index was replaced since the
+    /// search, or its entries got new indexes, and
+    /// [`SortAgainError::Stopped`] when `stop` was set.
     ///
     /// # Panics
     ///
@@ -201,7 +236,8 @@ impl ResultSnapshot {
         volumes: Vec<V>,
         sort: SortSpec,
         viewer: Viewer<'_>,
-    ) -> Result<ResultRows<V>, ResultSnapshotGone> {
+        stop: &AtomicBool,
+    ) -> Result<ResultRows<V>, SortAgainError> {
         assert_eq!(
             volumes.len(),
             self.answers.len(),
@@ -209,11 +245,14 @@ impl ResultSnapshot {
         );
         let mut answers = Vec::with_capacity(self.answers.len());
         for (volume, answer) in volumes.iter().zip(&self.answers) {
+            if stop.load(Ordering::Relaxed) {
+                return Err(Stopped.into());
+            }
             let (matches, seen_by) = {
                 let held = volume.read();
                 let index: &VolumeIndex = &held.index;
                 if index.instance() != answer.instance {
-                    return Err(ResultSnapshotGone);
+                    return Err(ResultSnapshotGone.into());
                 }
                 let seen_by = viewer.seen_by(index);
                 let mut records = Vec::with_capacity(answer.rows.len());

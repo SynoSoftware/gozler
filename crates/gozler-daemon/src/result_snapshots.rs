@@ -191,7 +191,10 @@ mod tests {
             &AtomicBool::new(false),
         )
         .expect("no scope");
-        let snapshot = found.into_snapshot().expect("one volume").0;
+        let snapshot = found
+            .into_snapshot(&AtomicBool::new(false))
+            .expect("one volume")
+            .0;
         assert_eq!(snapshot.total(), rows as u64);
         Arc::new(snapshot)
     }

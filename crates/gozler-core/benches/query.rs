@@ -476,9 +476,16 @@ fn sort_snapshot_again(
     sort: SortSpec,
 ) -> u64 {
     let sorted = snapshot
-        .sort_again(vec![volume.clone()], sort, Viewer::Everything)
+        .sort_again(
+            vec![volume.clone()],
+            sort,
+            Viewer::Everything,
+            &AtomicBool::new(false),
+        )
         .expect("the index stays");
-    let (sorted, volumes) = sorted.into_snapshot().expect("one volume");
+    let (sorted, volumes) = sorted
+        .into_snapshot(&AtomicBool::new(false))
+        .expect("one volume");
     let mut rows = sorted.read(volumes, 0, Some(CHUNK_ROWS), Viewer::Everything);
     let mut read = 0u64;
     while rows
@@ -515,7 +522,7 @@ fn bench_sort_change(c: &mut Criterion<measure::Measure>) {
         &AtomicBool::new(false),
     )
     .expect("no scope")
-    .into_snapshot()
+    .into_snapshot(&AtomicBool::new(false))
     .expect("one volume");
     let by_size = SortSpec {
         key: SortKey::Size,

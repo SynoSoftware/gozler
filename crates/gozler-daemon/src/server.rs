@@ -30,8 +30,8 @@ use gozler_core::proto::{
     encode_response_frame, encode_snapshot_page,
 };
 use gozler_core::query::{
-    CompiledQuery, HeldVolume, MatchSums, ResultRows, ResultSnapshot, RowsSpec, TotalsError,
-    Viewer, search_totals,
+    CompiledQuery, HeldVolume, IntoSnapshotError, MatchSums, ResultRows, ResultSnapshot, RowsSpec,
+    SortAgainError, TotalsError, Viewer, search_totals,
 };
 use gozler_core::scope::{Scope, VolumeMounts};
 use gozler_winfs::{PipeSecurity, build_pipe_security};
@@ -515,7 +515,7 @@ fn serve(
             return read_snapshot(volumes, snapshots, &read, viewer, emit);
         }
         Request::SortResultSnapshot(sort) => {
-            return sort_snapshot(volumes, snapshots, user, &sort, viewer, emit);
+            return sort_snapshot(volumes, snapshots, user, &sort, viewer, stop, emit);
         }
         Request::Hello { .. } | Request::Status { .. } | Request::SettingsSaved => {
             unreachable!("answered before the client's access is taken")
@@ -557,7 +557,7 @@ fn serve(
                         replaces,
                         cap: snapshot_cap(volumes),
                     };
-                    make_snapshot(snapshots, made, found, &rows, viewer, emit);
+                    make_snapshot(snapshots, made, found, &rows, viewer, stop, emit);
                 }
                 Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
             }
@@ -588,11 +588,17 @@ fn make_snapshot(
     found: ResultRows<Arc<VolumeState>>,
     rows: &Rows,
     viewer: Viewer<'_>,
+    stop: &AtomicBool,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
-    let (snapshot, volumes) = match found.into_snapshot() {
+    let (snapshot, volumes) = match found.into_snapshot(stop) {
         Ok(kept) => kept,
-        Err(too_many) => return reply(emit, refusal(too_many.to_string())),
+        Err(IntoSnapshotError::TooManyVolumes(too_many)) => {
+            return reply(emit, refusal(too_many.to_string()));
+        }
+        // The client left: nothing is kept, so no slot is taken and the
+        // snapshot this one replaces stays.
+        Err(IntoSnapshotError::Stopped(_)) => return,
     };
     let id = match gozler_winfs::random_u128() {
         Ok(bits) => ResultSnapshotId(bits),
@@ -659,6 +665,7 @@ fn sort_snapshot(
     user: &[u8],
     sort: &SortSnapshotRequest,
     viewer: Viewer<'_>,
+    stop: &AtomicBool,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
     let found = snapshots.get(sort.id, Instant::now());
@@ -668,15 +675,18 @@ fn sort_snapshot(
     let Some(held) = live_volumes(&held, volumes) else {
         return reply(emit, snapshot_gone());
     };
-    let Ok(sorted) = snapshot.sort_again(held, sort.rows.sort, viewer) else {
-        return reply(emit, snapshot_gone());
+    let sorted = match snapshot.sort_again(held, sort.rows.sort, viewer, stop) {
+        Ok(sorted) => sorted,
+        Err(SortAgainError::Gone(_)) => return reply(emit, snapshot_gone()),
+        // The client left: no one reads an answer.
+        Err(SortAgainError::Stopped(_)) => return,
     };
     let made = Made {
         user,
         replaces: Some(sort.id),
         cap: snapshot_cap(volumes),
     };
-    make_snapshot(snapshots, made, sorted, &sort.rows, viewer, emit);
+    make_snapshot(snapshots, made, sorted, &sort.rows, viewer, stop, emit);
 }
 
 /// Streams the rows of `snapshot` that `read` asks for, from `volumes`, its
@@ -1731,13 +1741,13 @@ mod tests {
         );
     }
 
-    /// A result snapshot search whose client left keeps nothing, so it does
-    /// not replace the result snapshot the window still reads. Without it, a
+    /// A result snapshot search or sort whose client left keeps nothing, so it
+    /// does not replace the result snapshot the window still reads. Without it, a
     /// fast scroll that abandons requests takes the user's snapshot slots
     /// with short answers that no one reads (#137).
     #[test]
     fn a_stopped_search_keeps_no_result_snapshot() {
-        use gozler_core::proto::SnapshotRowsRequest;
+        use gozler_core::proto::{SnapshotRowsRequest, SortSnapshotRequest};
         let vols = set(&[live_volume(r"C:\")]);
         let snapshots = ResultSnapshots::new();
         let make = |replaces| {
@@ -1782,6 +1792,21 @@ mod tests {
             panic!("a result snapshot: {:?}", frames[0])
         };
         assert!(serve_with(&make(Some(id)), true).is_empty());
+        let sort = request_frame(&Request::SortResultSnapshot(SortSnapshotRequest {
+            id,
+            rows: Rows {
+                sort: SortSpec::default_for(SortKey::Size),
+                offset: 0,
+                limit: Some(1),
+                want_size: false,
+                want_mtime: false,
+                want_created: false,
+                want_attributes: false,
+                want_identity: false,
+                want_sums: false,
+            },
+        }));
+        assert!(serve_with(&sort, true).is_empty());
         let read = request_frame(&Request::ResultSnapshotRows(SnapshotRowsRequest {
             id,
             offset: 0,

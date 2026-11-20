@@ -29,7 +29,7 @@ pub use parse::{
 };
 pub use paths::{FolderId, ResultNames};
 pub use rows::{
-    HeldVolume, IndexedVolume, NotIndexed, PathRow, QueryOutcome, ResultRows, ResultSnapshot,
-    ResultSnapshotGone, RowView, RowsSpec, SearchTotals, SnapshotRow, SnapshotRows, TooManyVolumes,
-    TotalsError, Viewer, run_query, search_totals,
+    HeldVolume, IndexedVolume, IntoSnapshotError, NotIndexed, PathRow, QueryOutcome, ResultRows,
+    ResultSnapshot, ResultSnapshotGone, RowView, RowsSpec, SearchTotals, SnapshotRow, SnapshotRows,
+    SortAgainError, Stopped, TooManyVolumes, TotalsError, Viewer, run_query, search_totals,
 };
