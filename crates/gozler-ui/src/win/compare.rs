@@ -269,10 +269,15 @@ impl RichText {
         Ok(RichText(hwnd))
     }
 
-    /// Replaces the text with `rtf`. The control tells nothing of the
-    /// change, which is no edit of the person's.
+    /// Replaces the text with `rtf`, whose rows the control then holds. The
+    /// control tells nothing of the change, which is no edit of the
+    /// person's.
     pub(crate) fn set_rtf(self, rtf: &str) {
-        self.quietly(|| self.stream_in(rtf, SF_RTF));
+        // A whole stream takes the document's last paragraph mark for the
+        // one that ends every RichEdit text, so a last row that is empty
+        // would be lost. A mark after the last row keeps every row.
+        let body = (rtf.strip_suffix('}')).expect("an RTF document ends with its closing brace");
+        self.quietly(|| self.stream_in(&[body.as_bytes(), br"\par}"], SF_RTF));
     }
 
     /// Replaces `rows`, which are not empty, with the rows of `rtf`, which
@@ -300,7 +305,7 @@ impl RichText {
                     Some(LPARAM(&raw const range as isize)),
                 )
             };
-            self.stream_in(rtf, SF_RTF | SFF_SELECTION);
+            self.stream_in(&[rtf.as_bytes()], SF_RTF | SFF_SELECTION);
         });
     }
 
@@ -320,11 +325,11 @@ impl RichText {
         });
     }
 
-    /// Streams `rtf` in as `format` says.
-    fn stream_in(self, rtf: &str, format: u32) {
+    /// Streams the RTF in `parts`, one after the other, in as `format` says.
+    fn stream_in(self, parts: &[&[u8]], format: u32) {
         struct Source<'a> {
-            bytes: &'a [u8],
-            at: usize,
+            parts: std::slice::Iter<'a, &'a [u8]>,
+            rest: &'a [u8],
         }
         unsafe extern "system" fn read(
             cookie: usize,
@@ -332,23 +337,26 @@ impl RichText {
             wanted: i32,
             given: *mut i32,
         ) -> u32 {
-            // SAFETY: the cookie is the source that `set_rtf` passed, alive
+            // SAFETY: the cookie is the source that `stream_in` passed, alive
             // while EM_STREAMIN runs; the control's buffer holds `wanted`
             // bytes.
             unsafe {
                 let source = &mut *(cookie as *mut Source<'_>);
-                let count = usize::try_from(wanted)
-                    .unwrap_or(0)
-                    .min(source.bytes.len() - source.at);
-                std::ptr::copy_nonoverlapping(source.bytes.as_ptr().add(source.at), buffer, count);
-                source.at += count;
+                while source.rest.is_empty()
+                    && let Some(part) = source.parts.next()
+                {
+                    source.rest = *part;
+                }
+                let count = usize::try_from(wanted).unwrap_or(0).min(source.rest.len());
+                std::ptr::copy_nonoverlapping(source.rest.as_ptr(), buffer, count);
+                source.rest = &source.rest[count..];
                 *given = count as i32;
             }
             0
         }
         let mut source = Source {
-            bytes: rtf.as_bytes(),
-            at: 0,
+            parts: parts.iter(),
+            rest: &[],
         };
         let mut stream = EDITSTREAM {
             dwCookie: &raw mut source as usize,
@@ -767,17 +775,19 @@ pub(crate) fn palette() -> Palette {
             gap_back: rgb(system_color(COLOR_BTNFACE)),
         };
     }
-    // Fluent's red for errors and removals.
+    // Fluent's red for errors and removals. As in Total Commander, the
+    // words that differ show in red on the text's own background, and a row
+    // that differs, or has no line, is grey in the line-number column.
     let red = Rgb(0xC4, 0x2B, 0x1C);
-    let tint = window.mixed(red, 18);
+    let grey = window.mixed(text, 8);
     Palette {
         text,
         muted,
         mark_text: red,
-        mark_back: tint,
+        mark_back: window,
         differs_text: red,
-        differs_back: tint,
-        gap_back: window.mixed(text, 8),
+        differs_back: grey,
+        gap_back: grey,
     }
 }
 

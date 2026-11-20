@@ -1247,6 +1247,7 @@ mod tests {
     const PLAIN: Matching = Matching {
         case_sensitive: true,
         ignore_spaces: false,
+        ignore_frequent: false,
     };
 
     const CR: u16 = 0x0D;
@@ -1721,6 +1722,7 @@ mod tests {
                     matching: Matching {
                         case_sensitive,
                         ignore_spaces: false,
+                        ignore_frequent: false,
                     },
                     only_differences: only,
                 }),

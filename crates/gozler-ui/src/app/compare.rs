@@ -20,12 +20,12 @@ use crate::core::compare_window::session::{
     Answer, Caret, Effect, Event, Fresh, Request, RowOptions, SaveFile, SavedFile, Session, Settled,
 };
 use crate::core::compare_window::{
-    CompareCommand, CompareKey, CompareSizes, DEFAULT_ZOOM, KeyFocus, MenuState, Note, compare_key,
-    compare_layout, context_menu, differences_text, encoding_text, menu_bar, menu_states,
-    note_text, number_row, title, zoomed,
+    CompareCommand, CompareKey, CompareSizes, DEFAULT_ZOOM, KeyFocus, MenuState, Note,
+    command_state, compare_key, compare_layout, context_menu, differences_text, encoding_menu,
+    encodings_enabled, encodings_text, menu_states, note_text, number_row, title, zoomed,
 };
 use crate::core::ids::{ControlId, DialogId, IconId};
-use crate::core::layout::{Px, Size, WHEEL_DELTA, image_button_width, status_last_part};
+use crate::core::layout::{Dpi, Px, Rect, Size, WHEEL_DELTA, image_button_width};
 use crate::core::panel::Side;
 use crate::core::settings::{CompareState, Placement};
 use crate::core::text::{self, Numbers as _, Strings};
@@ -33,11 +33,13 @@ use crate::core::viewer::Encoding;
 use crate::core::viewer::Mode;
 use crate::core::viewer::find::Query;
 use crate::win::compare::{RichText, SIDE_SCROLLED, palette, rtf_font};
-use crate::win::controls::{Button, CheckBox, Edit, Label, ProgressBar, StatusBar, Tooltip};
+use crate::win::controls::{
+    Button, CheckBox, Edit, Label, ProgressBar, StatusBar, Tooltip, set_accessible_name,
+};
 use crate::win::dialog::{DialogEnd, choose, error_box, info_box, run_modal};
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::locale::{WindowsNumbers, code_page_encoded};
-use crate::win::menu::{Menu, replace_menu_bar};
+use crate::win::menu::Menu;
 use crate::win::notify::Command;
 use crate::win::shell::{FileType, accept_files, pick_file, save_dialog};
 use crate::win::viewer::caption_height;
@@ -65,6 +67,9 @@ const CLIPBOARD_TIMER: usize = 4;
 const CONTEXT_ROWS: usize = 3;
 /// The digits of the extra lines box: those of [`compare::MAX_EXTRA_LINES`].
 const EXTRA_DIGITS: usize = compare::MAX_EXTRA_LINES.ilog10() as usize + 1;
+/// The width and height, in DIPs, of a window when none was moved or closed
+/// before.
+const DEFAULT_SIZE: (i32, i32) = (1040, 600);
 
 /// The open compare windows, as the main window or the process of
 /// `--compare` holds them, and what they remember in `ui.json`.
@@ -247,12 +252,10 @@ impl CompareWindows {
         }
     }
 
-    /// Shows or hides the icons of every window's menus and buttons.
+    /// Shows or hides the icons of every window's buttons.
     pub(super) fn apply_glyphs(&self) {
         for comparison in self.opened() {
-            if let Some(hwnd) = comparison.hwnd.get() {
-                comparison.apply_glyphs(hwnd);
-            }
+            comparison.apply_glyphs();
         }
     }
 
@@ -471,19 +474,24 @@ enum Place {
 
 /// A window's controls, created in Tab order.
 struct Controls {
-    /// Left: and Right:, each made just before its path box, which Windows
-    /// names after it for screen readers.
-    labels: [Label; 2],
     paths: [Edit; 2],
     browse: [Button; 2],
     compare: Button,
     next: Button,
     previous: Button,
+    find: Button,
+    find_next: Button,
+    /// Binary, Case sensitive, Ignore repeated spaces and Ignore frequent
+    /// lines.
+    options: [CheckBox; 4],
     edit_mode: CheckBox,
-    /// Case sensitive, Ignore repeated spaces and Show only differences.
-    checks: [CheckBox; 3],
+    only: CheckBox,
     extra_label: Label,
     extra: Edit,
+    above: CheckBox,
+    save: Button,
+    /// Each side's encoding, which opens the encodings' menu.
+    encodings: Button,
     cancel: Button,
     progress: ProgressBar,
     /// Why no comparison shows, in the sides' place.
@@ -494,29 +502,34 @@ struct Controls {
     numbers: Cell<[RichText; 2]>,
     list: RichText,
     status: StatusBar,
-    /// The tooltips of Next and Previous, which name their keys.
+    /// The buttons' tooltips, which name their commands' keys.
     tips: Tooltip,
 }
 
 impl Controls {
     fn create(hwnd: Hwnd) -> windows::core::Result<Controls> {
-        let left_label = Label::create(hwnd, ControlId::CompareLeftLabel.id())?;
         let left_path = Edit::create(hwnd, ControlId::CompareLeftPath.id())?;
         let left_browse = Button::create(hwnd, ControlId::CompareLeftBrowse.id())?;
-        let right_label = Label::create(hwnd, ControlId::CompareRightLabel.id())?;
         let right_path = Edit::create(hwnd, ControlId::CompareRightPath.id())?;
         let right_browse = Button::create(hwnd, ControlId::CompareRightBrowse.id())?;
         let compare = Button::create(hwnd, ControlId::CompareRun.id())?;
         let next = Button::create(hwnd, ControlId::CompareNext.id())?;
         let previous = Button::create(hwnd, ControlId::ComparePrevious.id())?;
-        let edit_mode = CheckBox::create(hwnd, ControlId::CompareEditMode.id())?;
-        let checks = [
+        let find = Button::create(hwnd, ControlId::CompareFind.id())?;
+        let find_next = Button::create(hwnd, ControlId::CompareFindNext.id())?;
+        let options = [
+            CheckBox::create(hwnd, ControlId::CompareBinary.id())?,
             CheckBox::create(hwnd, ControlId::CompareCase.id())?,
             CheckBox::create(hwnd, ControlId::CompareSpaces.id())?,
-            CheckBox::create(hwnd, ControlId::CompareOnly.id())?,
+            CheckBox::create(hwnd, ControlId::CompareFrequent.id())?,
         ];
+        let edit_mode = CheckBox::create(hwnd, ControlId::CompareEditMode.id())?;
+        let only = CheckBox::create(hwnd, ControlId::CompareOnly.id())?;
         let extra_label = Label::create(hwnd, ControlId::CompareExtraLabel.id())?;
         let extra = Edit::create_number(hwnd, ControlId::CompareExtra.id(), EXTRA_DIGITS)?;
+        let above = CheckBox::create(hwnd, ControlId::CompareAbove.id())?;
+        let save = Button::create(hwnd, ControlId::CompareSave.id())?;
+        let encodings = Button::create(hwnd, ControlId::CompareEncodings.id())?;
         let cancel = Button::create(hwnd, ControlId::CompareCancel.id())?;
         let progress = ProgressBar::create(hwnd, ControlId::CompareProgress.id())?;
         let message = Label::create_centred(hwnd, ControlId::CompareMessage.id())?;
@@ -530,18 +543,33 @@ impl Controls {
         ];
         let list = RichText::create_list(hwnd, ControlId::CompareList.id())?;
         let status = StatusBar::create(hwnd, ControlId::CompareStatus.id(), true)?;
-        let tips = Tooltip::create(hwnd, &[next.hwnd(), previous.hwnd()])?;
+        let tips = Tooltip::create(
+            hwnd,
+            &[
+                next.hwnd(),
+                previous.hwnd(),
+                find.hwnd(),
+                find_next.hwnd(),
+                save.hwnd(),
+                encodings.hwnd(),
+            ],
+        )?;
         Ok(Controls {
-            labels: [left_label, right_label],
             paths: [left_path, right_path],
             browse: [left_browse, right_browse],
             compare,
             next,
             previous,
+            find,
+            find_next,
+            options,
             edit_mode,
-            checks,
+            only,
             extra_label,
             extra,
+            above,
+            save,
+            encodings,
             cancel,
             progress,
             message,
@@ -561,16 +589,17 @@ impl Controls {
         self.numbers.get()
     }
 
-    /// The labels, the check boxes and the message, which show on the
-    /// window's background.
-    fn on_background(&self) -> [Hwnd; 8] {
+    /// The check boxes, the extra lines' label and the message, which show
+    /// on the window's background.
+    fn on_background(&self) -> [Hwnd; 9] {
         [
-            self.labels[0].hwnd(),
-            self.labels[1].hwnd(),
+            self.options[0].hwnd(),
+            self.options[1].hwnd(),
+            self.options[2].hwnd(),
+            self.options[3].hwnd(),
             self.edit_mode.hwnd(),
-            self.checks[0].hwnd(),
-            self.checks[1].hwnd(),
-            self.checks[2].hwnd(),
+            self.only.hwnd(),
+            self.above.hwnd(),
             self.extra_label.hwnd(),
             self.message.hwnd(),
         ]
@@ -688,9 +717,21 @@ impl CompareWindow {
     }
 
     /// Everything the new window needs before it compares: its keys, its
-    /// controls, menus and texts, and the first job of its worker.
+    /// size, controls and texts, and the first job of its worker.
     fn start(&self, hwnd: Hwnd, source: Source, tool: Option<String>) -> windows::core::Result<()> {
         self.hwnd.set(Some(hwnd));
+        if self.placement.get().is_none() {
+            // Windows' default size fills most of a large screen, while two
+            // files read side by side in less, as in Total Commander.
+            let at = hwnd.screen_rect();
+            let size =
+                |dip: i32| Px(dip).rescale(Dpi::new(96).expect("96 is not zero"), hwnd.dpi());
+            hwnd.set_rect(Rect {
+                width: size(DEFAULT_SIZE.0),
+                height: size(DEFAULT_SIZE.1),
+                ..at
+            });
+        }
         window::own_keys(hwnd, true);
         let _ = self.controls.set(Controls::create(hwnd)?);
         accept_files(hwnd);
@@ -804,7 +845,7 @@ impl CompareWindow {
                     // matches the state.
                     if let Some(c) = self.controls() {
                         let state = self.state.get();
-                        c.checks[2].set_checked(state.only_differences);
+                        c.only.set_checked(state.only_differences);
                         c.extra.hwnd().set_text(&state.extra_lines.to_string());
                     }
                 }
@@ -842,7 +883,8 @@ impl CompareWindow {
         }
         let message_changed = self.message_shown.replace(message) != message;
         self.show_message();
-        if progress_changed || message_changed {
+        let encodings_changed = self.apply_encodings();
+        if progress_changed || message_changed || encodings_changed {
             self.layout(hwnd);
         }
         self.apply_read_only();
@@ -851,45 +893,85 @@ impl CompareWindow {
         self.show_status();
     }
 
-    /// The controls that show the session and the saved state: Edit mode,
-    /// the extra lines, which apply while Show only differences is on, and
-    /// the commands.
+    /// The controls that show the session and the saved state: the extra
+    /// lines, which apply while Show only differences is on, and the
+    /// commands.
     fn apply_controls(&self) {
         let Some(c) = self.controls() else {
             return;
         };
-        let (editing, can_edit) = {
-            let session = self.session.borrow();
-            (session.editing(), session.can_edit())
-        };
-        // Windows checks the box at the click, before the session decides.
-        c.edit_mode.set_checked(editing);
-        c.edit_mode.hwnd().set_enabled(can_edit);
         let only = self.state.get().only_differences;
         c.extra_label.hwnd().set_enabled(only);
         c.extra.hwnd().set_enabled(only);
         self.apply_commands();
     }
 
-    /// Compare, Next and Previous, as their menu items are.
+    /// The buttons and the check boxes of commands, as their commands are;
+    /// Binary is Hex while checked and Text while not.
     fn apply_commands(&self) {
+        use CompareCommand as C;
         let Some(c) = self.controls() else {
             return;
         };
         let state = self.menu_state();
-        let shown = state.shown.is_some();
-        c.compare.hwnd().set_enabled(state.can_compare);
-        c.next.hwnd().set_enabled(shown && state.next);
-        c.previous.hwnd().set_enabled(shown && state.previous);
+        let enabled = |command| command_state(state, command).0;
+        for (button, command) in [
+            (c.compare, C::Compare),
+            (c.next, C::NextDifference),
+            (c.previous, C::PreviousDifference),
+            (c.find, C::Find),
+            (c.find_next, C::FindNext),
+            (c.save, C::Save),
+        ] {
+            button.hwnd().set_enabled(enabled(command));
+        }
+        c.encodings.hwnd().set_enabled(encodings_enabled(state));
+        // Windows checks a box at the click, before the session decides.
+        let hex = command_state(state, C::Hex).1;
+        let binary = if hex { C::Text } else { C::Hex };
+        let checks = [
+            (c.options[0], (enabled(binary), hex)),
+            (c.edit_mode, command_state(state, C::EditMode)),
+            (c.only, command_state(state, C::OnlyDifferences)),
+            (c.above, command_state(state, C::AboveEachOther)),
+        ];
+        for (check, (enabled, checked)) in checks {
+            check.set_checked(checked);
+            check.hwnd().set_enabled(enabled);
+        }
         // A disabled button takes no keys, so the focus goes on in the side.
         let focused = Hwnd::focused();
-        if [c.next.hwnd(), c.previous.hwnd()]
-            .into_iter()
-            .any(|button| Some(button) == focused && !button.is_enabled())
+        if [
+            c.next.hwnd(),
+            c.previous.hwnd(),
+            c.find.hwnd(),
+            c.find_next.hwnd(),
+            c.save.hwnd(),
+            c.encodings.hwnd(),
+            c.options[0].hwnd(),
+            c.edit_mode.hwnd(),
+        ]
+        .into_iter()
+        .any(|button| Some(button) == focused && !button.is_enabled())
             && let Some(target) = self.focus_target()
         {
             target.focus();
         }
+    }
+
+    /// The encodings button's caption, each side's encoding; `true` when it
+    /// changed, which changes the button's width.
+    fn apply_encodings(&self) -> bool {
+        let Some(c) = self.controls() else {
+            return false;
+        };
+        let encodings = (self.session.borrow().showing()).map(|showing| showing.encodings());
+        let caption = encodings_text(&self.strings.borrow(), encodings);
+        let changed = c.encodings.hwnd().text() != caption;
+        if changed {
+            c.encodings.hwnd().set_text(&caption);
+        }
+        changed
     }
 
     /// Where the focus goes when the window shows or is activated: the side
@@ -1232,27 +1314,32 @@ impl CompareWindow {
         // Swap sides gives no patches: the controls keep their rows.
         let mut outdated = false;
         if let Some(Rendering { patches, prints }) = self.rendering.take() {
+            let mut whole = [false; 2];
             for (side, patch) in Side::BOTH.into_iter().zip(patches) {
                 let control = c.sides()[side.index()];
                 if let Some(patch) = patch {
                     let held = self.prints.borrow()[side.index()].len().max(1);
-                    if patch.rows.start == 0 && patch.rows.end >= held {
+                    whole[side.index()] = patch.rows.start == 0 && patch.rows.end >= held;
+                    if whole[side.index()] {
                         control.set_rtf(&patch.rtf);
                     } else {
                         control.replace_rows(patch.rows, &patch.rtf);
                     }
                 }
             }
-            let prints = prints.map(Arc::new);
+            self.prints.replace(prints.map(Arc::new));
             for side in Side::BOTH {
                 // A control that took a patch otherwise than it was built
-                // for holds other rows, so its rows stream again whole.
-                let control = c.sides()[side.index()];
-                if control.row_count() != prints[side.index()].len().max(1) {
-                    outdated = true;
+                // for holds other rows, so its rows stream again whole. A
+                // whole stream that left other rows, as a form feed in a
+                // row does, would leave them again, so it sends no
+                // Outdated, which would stream it again without end.
+                let built = self.prints.borrow()[side.index()].len().max(1);
+                if c.sides()[side.index()].row_count() != built {
+                    self.forget_prints(side);
+                    outdated |= !whole[side.index()];
                 }
             }
-            self.prints.replace(prints);
         }
         if outdated {
             for side in Side::BOTH {
@@ -1486,7 +1573,11 @@ impl CompareWindow {
             c.compare.hwnd(),
             c.next.hwnd(),
             c.previous.hwnd(),
+            c.find.hwnd(),
+            c.find_next.hwnd(),
             c.extra.hwnd(),
+            c.save.hwnd(),
+            c.encodings.hwnd(),
             c.cancel.hwnd(),
             c.status.hwnd(),
         ];
@@ -1511,22 +1602,23 @@ impl CompareWindow {
         }));
     }
 
-    /// The check boxes, the extra lines and the zoom as the state says.
+    /// The matching options, the extra lines and the zoom as the state
+    /// says; the other check boxes follow their commands.
     fn apply_state(&self) {
         let Some(c) = self.controls() else {
             return;
         };
         let state = self.state.get();
-        c.checks[0].set_checked(state.case_sensitive);
-        c.checks[1].set_checked(state.ignore_spaces);
-        c.checks[2].set_checked(state.only_differences);
+        c.options[1].set_checked(state.case_sensitive);
+        c.options[2].set_checked(state.ignore_spaces);
+        c.options[3].set_checked(state.ignore_frequent);
         c.extra.hwnd().set_text(&state.extra_lines.to_string());
         for control in c.rich() {
             control.set_zoom(state.zoom);
         }
     }
 
-    /// The menus, the captions and the title in the window's language.
+    /// The captions, the tooltips and the title in the window's language.
     fn apply_strings(&self, hwnd: Hwnd) {
         let Some(c) = self.controls() else {
             return;
@@ -1534,41 +1626,56 @@ impl CompareWindow {
         {
             let strings = self.strings.borrow();
             let captions = [
-                (c.labels[0].hwnd(), "compare.left_label"),
-                (c.labels[1].hwnd(), "compare.right_label"),
                 (c.browse[0].hwnd(), "compare.browse"),
                 (c.browse[1].hwnd(), "compare.browse_right"),
                 (c.compare.hwnd(), "compare.compare"),
                 (c.next.hwnd(), "compare.next"),
                 (c.previous.hwnd(), "compare.previous"),
+                (c.find.hwnd(), "compare.find"),
+                (c.find_next.hwnd(), "compare.find_next"),
+                (c.options[0].hwnd(), "compare.binary"),
+                (c.options[1].hwnd(), "compare.case_sensitive"),
+                (c.options[2].hwnd(), "compare.ignore_spaces"),
+                (c.options[3].hwnd(), "compare.ignore_frequent"),
                 (c.edit_mode.hwnd(), "compare.edit_mode_box"),
-                (c.checks[0].hwnd(), "compare.case_sensitive"),
-                (c.checks[1].hwnd(), "compare.ignore_spaces"),
-                (c.checks[2].hwnd(), "compare.only_differences"),
+                (c.only.hwnd(), "compare.only_differences"),
                 (c.extra_label.hwnd(), "compare.extra_lines"),
+                (c.above.hwnd(), "compare.stacked"),
+                (c.save.hwnd(), "compare.save_button"),
                 (c.cancel.hwnd(), "button.cancel"),
             ];
             for (control, key) in captions {
                 control.set_text(strings.text(key));
             }
-            c.tips
-                .set(c.next.hwnd(), &CompareCommand::NextDifference.tip(&strings));
-            c.tips.set(
-                c.previous.hwnd(),
-                &CompareCommand::PreviousDifference.tip(&strings),
-            );
+            // No label precedes a path box, so it has no name of its own.
+            for (path, key) in c.paths.into_iter().zip(["compare.left", "compare.right"]) {
+                let name = text::without_access_key(strings.text(key));
+                set_accessible_name(path.hwnd(), Some(&name));
+            }
+            let tips = [
+                (c.next, CompareCommand::NextDifference),
+                (c.previous, CompareCommand::PreviousDifference),
+                (c.find, CompareCommand::Find),
+                (c.find_next, CompareCommand::FindNext),
+                (c.save, CompareCommand::Save),
+            ];
+            for (button, command) in tips {
+                c.tips.set(button.hwnd(), &command.tip(&strings));
+            }
+            let encoding = text::without_access_key(strings.text("viewer.encoding"));
+            c.tips.set(c.encodings.hwnd(), &encoding);
         }
-        self.apply_glyphs(hwnd);
+        self.apply_encodings();
+        self.apply_glyphs();
         self.apply_title(hwnd);
         self.show_message();
         self.show_status();
         self.layout(hwnd);
     }
 
-    /// The menu bar and the buttons' icons, at the window's DPI, in the
-    /// system colours of now and only while icons show.
-    fn apply_glyphs(&self, hwnd: Hwnd) {
-        let _ = replace_menu_bar(hwnd, &menu_bar(&self.strings.borrow()));
+    /// The buttons' icons, at the window's DPI, in the system colours of
+    /// now and only while icons show.
+    fn apply_glyphs(&self) {
         let Some(c) = self.controls() else {
             return;
         };
@@ -1578,6 +1685,8 @@ impl CompareWindow {
             (c.compare, "compare.compare"),
             (c.next, "compare.next"),
             (c.previous, "compare.previous"),
+            (c.find, "compare.find"),
+            (c.save, "compare.save_button"),
             (c.cancel, "button.cancel"),
         ];
         for (button, key) in buttons {
@@ -1601,8 +1710,8 @@ impl CompareWindow {
 
     /// The status bar: what runs, or why the rows that show could not be
     /// built again, or the differences, the caret's among them, with the
-    /// notes, then each side's encoding. While no comparison shows, the
-    /// message in the sides' place says why.
+    /// notes. While no comparison shows, the message in the sides' place
+    /// says why.
     fn show_status(&self) {
         let Some(c) = self.controls() else {
             return;
@@ -1611,9 +1720,9 @@ impl CompareWindow {
         let strings = self.strings.borrow();
         let numbers = self.numbers.borrow();
         let session = self.session.borrow();
-        let mut parts = [String::new(), String::new(), String::new()];
+        let mut status = String::new();
         if session.comparing() {
-            parts[0] = strings.text("compare.comparing").to_owned();
+            status = strings.text("compare.comparing").to_owned();
         } else if let Some(showing) = session.showing() {
             let view = showing.view();
             let index = view.rows.difference_index(caret);
@@ -1638,16 +1747,9 @@ impl CompareWindow {
                     .flatten()
                     .map(|note| note_text(&strings, &*numbers, note)),
             );
-            parts[0] = texts.join(" · ");
-            let hex = text::without_access_key(strings.text("viewer.hex"));
-            for (side, encoding) in Side::BOTH.into_iter().zip(showing.encodings()) {
-                let name = encoding.map_or(hex.as_str(), |encoding| encoding.name());
-                parts[side.index() + 1] = encoding_text(&strings, side, name);
-            }
+            status = texts.join(" · ");
         }
-        for (index, part) in parts.iter().enumerate() {
-            c.status.set_text(index, part);
-        }
+        c.status.set_text(0, &status);
     }
 
     /// The two-line list: the caret's row from each side, one above the
@@ -1721,28 +1823,36 @@ impl CompareWindow {
             None => [3, 3],
         };
         let chars = |count: usize| Px(fonts.char_width.0 * i32::try_from(count).unwrap_or(0));
+        let encodings = self.controls().map_or(Px(0), |c| {
+            image_button_width(meter.width(&c.encodings.hwnd().text()), dpi)
+        });
         Some(CompareSizes {
             line: Px(meter.height().0 * 3 / 2 + 2),
             text: meter.height(),
-            labels: [
-                caption("compare.left_label"),
-                caption("compare.right_label"),
-            ],
             browse: button("compare.browse").max(button("compare.browse_right")),
             buttons: [
                 button("compare.compare"),
                 button("compare.next"),
                 button("compare.previous"),
+                button("compare.find"),
+                button("compare.find_next"),
             ],
-            cancel: button("button.cancel"),
-            checks: [
-                caption("compare.edit_mode_box"),
+            options: [
+                caption("compare.binary"),
                 caption("compare.case_sensitive"),
                 caption("compare.ignore_spaces"),
+                caption("compare.ignore_frequent"),
+            ],
+            views: [
+                caption("compare.edit_mode_box"),
                 caption("compare.only_differences"),
+                caption("compare.stacked"),
             ],
             extra_label: caption("compare.extra_lines"),
             extra: meter.width(&"9".repeat(EXTRA_DIGITS)),
+            save: button("compare.save_button"),
+            encodings,
+            cancel: button("button.cancel"),
             row: fonts.row_height,
             numbers: digits.map(chars),
         })
@@ -1785,21 +1895,26 @@ impl CompareWindow {
         });
         win::place_children(
             &[
-                (c.labels[0].hwnd(), layout.labels[0]),
                 (c.paths[0].hwnd(), layout.paths[0]),
                 (c.browse[0].hwnd(), layout.browse[0]),
-                (c.labels[1].hwnd(), layout.labels[1]),
                 (c.paths[1].hwnd(), layout.paths[1]),
                 (c.browse[1].hwnd(), layout.browse[1]),
                 (c.compare.hwnd(), layout.buttons[0]),
                 (c.next.hwnd(), layout.buttons[1]),
                 (c.previous.hwnd(), layout.buttons[2]),
-                (c.edit_mode.hwnd(), layout.checks[0]),
-                (c.checks[0].hwnd(), layout.checks[1]),
-                (c.checks[1].hwnd(), layout.checks[2]),
-                (c.checks[2].hwnd(), layout.checks[3]),
+                (c.find.hwnd(), layout.buttons[3]),
+                (c.find_next.hwnd(), layout.buttons[4]),
+                (c.options[0].hwnd(), layout.options[0]),
+                (c.options[1].hwnd(), layout.options[1]),
+                (c.options[2].hwnd(), layout.options[2]),
+                (c.options[3].hwnd(), layout.options[3]),
+                (c.edit_mode.hwnd(), layout.views[0]),
+                (c.only.hwnd(), layout.views[1]),
                 (c.extra_label.hwnd(), layout.extra_label),
                 (c.extra.hwnd(), layout.extra),
+                (c.above.hwnd(), layout.views[2]),
+                (c.save.hwnd(), layout.save),
+                (c.encodings.hwnd(), layout.encodings),
                 (c.progress.hwnd(), layout.progress),
                 (c.cancel.hwnd(), layout.cancel),
                 (c.message.hwnd(), layout.message),
@@ -1829,20 +1944,6 @@ impl CompareWindow {
         {
             target.focus();
         }
-        let encoding = {
-            let fonts = self.fonts.borrow();
-            let strings = self.strings.borrow();
-            fonts.as_ref().map_or(Px(0), |fonts| {
-                let meter = TextMeter::new(&fonts.ui);
-                let widest = Side::BOTH.map(|side| {
-                    meter.width(&encoding_text(&strings, side, "Windows-1252 UTF-16 LE"))
-                });
-                status_last_part(widest[0].max(widest[1]), dpi)
-            })
-        };
-        let width = size.width;
-        c.status
-            .set_parts(&[(width - encoding - encoding).max(Px(0)), encoding]);
         self.sync_from(self.active.get());
     }
 
@@ -2157,7 +2258,6 @@ impl CompareWindow {
             C::Hex => self.send(hwnd, Event::View { hex: true }),
             C::OnlyDifferences => {
                 self.save_state(|state| state.only_differences = !state.only_differences);
-                c.checks[2].set_checked(self.state.get().only_differences);
                 self.send_options(hwnd);
             }
             C::TwoLineList => {
@@ -2168,6 +2268,7 @@ impl CompareWindow {
             C::AboveEachOther => {
                 self.save_state(|state| state.above_each_other = !state.above_each_other);
                 self.layout(hwnd);
+                self.apply_commands();
             }
             C::ZoomIn => self.set_zoom(hwnd, zoomed(self.state.get().zoom, 1)),
             C::ZoomOut => self.set_zoom(hwnd, zoomed(self.state.get().zoom, -1)),
@@ -2618,9 +2719,26 @@ impl CompareWindow {
         let corner = side.hwnd().screen_rect();
         let point = point.unwrap_or((corner.x.0 + 16, corner.y.0 + 16));
         let nodes = context_menu(&self.strings.borrow());
+        self.track_menu(hwnd, &nodes, point);
+    }
+
+    /// The encodings button's menu, below the button, as a drop-down
+    /// button's menu opens.
+    fn encoding_menu(&self, hwnd: Hwnd) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let button = c.encodings.hwnd().screen_rect();
+        let nodes = encoding_menu(&self.strings.borrow());
+        self.track_menu(hwnd, &nodes, (button.x.0, button.bottom().0));
+    }
+
+    /// Opens a menu of `nodes` at `point`, in screen coordinates, and runs
+    /// the command chosen in it.
+    fn track_menu(&self, hwnd: Hwnd, nodes: &[crate::core::commands::MenuNode], point: (i32, i32)) {
         let states = menu_states(self.menu_state());
         // The menu runs its own message loop, so nothing is borrowed here.
-        let chosen = Menu::track_popup(hwnd, &nodes, point, &states, None);
+        let chosen = Menu::track_popup(hwnd, nodes, point, &states, None);
         if let Some(command) = chosen.and_then(CompareCommand::from_id) {
             self.on_command(hwnd, command);
         }
@@ -2710,27 +2828,44 @@ impl CompareWindow {
                 return self.apply_commands();
             }
         }
-        if c.compare.clicked(event) {
-            self.compare_boxes(hwnd);
-        } else if c.next.clicked(event) {
-            self.on_command(hwnd, CompareCommand::NextDifference);
-        } else if c.previous.clicked(event) {
-            self.on_command(hwnd, CompareCommand::PreviousDifference);
-        } else if c.edit_mode.clicked(event) {
-            self.on_command(hwnd, CompareCommand::EditMode);
+        let commands = [
+            (c.compare, CompareCommand::Compare),
+            (c.next, CompareCommand::NextDifference),
+            (c.previous, CompareCommand::PreviousDifference),
+            (c.find, CompareCommand::Find),
+            (c.find_next, CompareCommand::FindNext),
+            (c.save, CompareCommand::Save),
+        ];
+        let checks = [
+            (c.edit_mode, CompareCommand::EditMode),
+            (c.only, CompareCommand::OnlyDifferences),
+            (c.above, CompareCommand::AboveEachOther),
+        ];
+        if let Some((_, command)) = commands.iter().find(|(button, _)| button.clicked(event)) {
+            self.on_command(hwnd, *command);
+        } else if let Some((_, command)) = checks.iter().find(|(check, _)| check.clicked(event)) {
+            self.on_command(hwnd, *command);
+        } else if c.options[0].clicked(event) {
+            let hex = c.options[0].is_checked();
+            self.on_command(
+                hwnd,
+                if hex {
+                    CompareCommand::Hex
+                } else {
+                    CompareCommand::Text
+                },
+            );
+        } else if c.encodings.clicked(event) {
+            self.encoding_menu(hwnd);
         } else if c.cancel.clicked(event) {
             self.cancel_compare(hwnd);
-        } else if c.checks[0].clicked(event) {
-            let checked = c.checks[0].is_checked();
-            self.save_state(|state| state.case_sensitive = checked);
-            self.send_options(hwnd);
-        } else if c.checks[1].clicked(event) {
-            let checked = c.checks[1].is_checked();
-            self.save_state(|state| state.ignore_spaces = checked);
-            self.send_options(hwnd);
-        } else if c.checks[2].clicked(event) {
-            let checked = c.checks[2].is_checked();
-            self.save_state(|state| state.only_differences = checked);
+        } else if let Some(index) = (1..4).find(|index| c.options[*index].clicked(event)) {
+            let checked = c.options[index].is_checked();
+            self.save_state(|state| match index {
+                1 => state.case_sensitive = checked,
+                2 => state.ignore_spaces = checked,
+                _ => state.ignore_frequent = checked,
+            });
             self.send_options(hwnd);
         } else if c.extra.changed(event) {
             let Ok(lines) = c.extra.text().trim().parse::<u32>() else {
@@ -2748,7 +2883,7 @@ impl CompareWindow {
     /// The colours of the marks follow the system's, so the rows show
     /// again in the new ones.
     fn apply_colors(&self, hwnd: Hwnd) {
-        self.apply_glyphs(hwnd);
+        self.apply_glyphs();
         self.show_list();
         self.send(hwnd, Event::Colours);
     }
@@ -2759,6 +2894,7 @@ fn matching_of(state: CompareState) -> Matching {
     Matching {
         case_sensitive: state.case_sensitive,
         ignore_spaces: state.ignore_spaces,
+        ignore_frequent: state.ignore_frequent,
     }
 }
 
@@ -2781,7 +2917,7 @@ impl WindowProc for CompareWindow {
             Message::DpiChanged { suggested, .. } => {
                 hwnd.set_rect(suggested);
                 self.apply_fonts(hwnd);
-                self.apply_glyphs(hwnd);
+                self.apply_glyphs();
                 self.layout(hwnd);
                 Some(LRESULT(0))
             }
@@ -2884,19 +3020,6 @@ impl WindowProc for CompareWindow {
                 self.drop_files(hwnd, files, point);
                 Some(LRESULT(0))
             }
-            Message::InitMenuPopup => {
-                let states = menu_states(self.menu_state());
-                if let Some(menu) = Menu::of(hwnd) {
-                    for (id, enabled, checked) in states {
-                        menu.set_state(id, enabled, checked);
-                    }
-                }
-                Some(LRESULT(0))
-            }
-            Message::Command(Command::Menu(id)) => {
-                self.on_command(hwnd, CompareCommand::from_id(id)?);
-                Some(LRESULT(0))
-            }
             Message::Command(Command::Control(event)) => {
                 self.on_control(hwnd, event);
                 Some(LRESULT(0))
@@ -2954,6 +3077,11 @@ impl WindowProc for CompareWindow {
                     retired.append(work.close());
                 }
                 retire(retired);
+                if let Some(c) = self.controls() {
+                    for path in c.paths {
+                        set_accessible_name(path.hwnd(), None);
+                    }
+                }
                 window::own_keys(hwnd, false);
                 if let Some(shared) = self.shared.upgrade() {
                     shared

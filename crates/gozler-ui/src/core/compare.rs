@@ -51,7 +51,15 @@ pub(crate) struct Matching {
     pub(crate) case_sensitive: bool,
     /// On: a run of spaces and tabs is one space.
     pub(crate) ignore_spaces: bool,
+    /// On: lines that occur often, such as blank lines, pair two parts that
+    /// differ only beside other lines that match ([`fold_frequent`]).
+    pub(crate) ignore_frequent: bool,
 }
+
+/// A line is frequent when it occurs at least this often in a file...
+const FREQUENT_TIMES: usize = 3;
+/// ...and is at least one in this many of the file's lines.
+const FREQUENT_SHARE: usize = 50;
 
 /// The files that Compare by content found in the panels' selections.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -384,6 +392,11 @@ pub(crate) fn match_lines(
     }
     let (left_texts, right_texts) = (texts(left), texts(right));
     let [a, b] = keys(&left_texts, &right_texts, matching);
+    let frequent = if matching.ignore_frequent {
+        frequent_keys(&a, &b)
+    } else {
+        Vec::new()
+    };
     let mut hunks = Vec::new();
     let (mut i, mut j) = (0, 0);
     let ends = anchors
@@ -395,7 +408,8 @@ pub(crate) fn match_lines(
         if x < i || y < j {
             continue;
         }
-        for hunk in diff::diff(&a[i..x], &b[j..y], cancelled)? {
+        let part = diff::diff(&a[i..x], &b[j..y], cancelled)?;
+        for hunk in fold_frequent(part, &a[i..x], &frequent) {
             hunks.push(diff::Hunk {
                 a: hunk.a.start + i..hunk.a.end + i,
                 b: hunk.b.start + j..hunk.b.end + j,
@@ -410,20 +424,73 @@ pub(crate) fn match_lines(
         }
         (i, j) = (x + 1, y + 1);
     }
-    Some(rows_of(&hunks, a.len(), b.len()))
+    Some(rows_of(&hunks, &a, &b))
 }
 
-/// The rows that `hunks` give: equal lines pair; within a hunk the lines
-/// pair in order, and the longer side's other lines face empty rows.
-fn rows_of(hunks: &[diff::Hunk], left_len: usize, right_len: usize) -> Vec<Row> {
+/// Whether each key is that of a frequent line: one that occurs at least
+/// [`FREQUENT_TIMES`] in a file and makes up one in [`FREQUENT_SHARE`] of
+/// its lines, such as blank lines and braces.
+fn frequent_keys(a: &[u32], b: &[u32]) -> Vec<bool> {
+    let size = a.iter().chain(b).max().map_or(0, |key| *key as usize + 1);
+    let mut frequent = vec![false; size];
+    for keys in [a, b] {
+        let mut counts = vec![0usize; size];
+        for &key in keys {
+            counts[key as usize] += 1;
+        }
+        for (key, count) in counts.into_iter().enumerate() {
+            if count >= FREQUENT_TIMES && count * FREQUENT_SHARE >= keys.len() {
+                frequent[key] = true;
+            }
+        }
+    }
+    frequent
+}
+
+/// `hunks` of a part whose first sequence is `a`, joined across each run of
+/// equal lines between two of them that only `frequent` lines make up and
+/// that is no longer than the hunk on either side, as Total Commander's
+/// Ignore frequent lines does not resync on such lines. So two paragraphs
+/// that differ and share only their blank lines pair line for line, rather
+/// than falling apart at each blank line. Lines that are equal in a joined
+/// hunk still pair as equal rows ([`rows_of`]). With no frequent lines,
+/// `hunks` stay as they are.
+fn fold_frequent(hunks: Vec<diff::Hunk>, a: &[u32], frequent: &[bool]) -> Vec<diff::Hunk> {
+    if frequent.is_empty() {
+        return hunks;
+    }
+    let size = |hunk: &diff::Hunk| hunk.a.len().max(hunk.b.len());
+    let mut folded: Vec<diff::Hunk> = Vec::with_capacity(hunks.len());
+    for hunk in hunks {
+        if let Some(last) = folded.last_mut() {
+            let run = last.a.end..hunk.a.start;
+            if run.len() <= size(last)
+                && run.len() <= size(&hunk)
+                && a[run].iter().all(|key| frequent[*key as usize])
+            {
+                last.a.end = hunk.a.end;
+                last.b.end = hunk.b.end;
+                continue;
+            }
+        }
+        folded.push(hunk);
+    }
+    folded
+}
+
+/// The rows that `hunks` of the keys `a` and `b` give: equal lines pair;
+/// within a hunk the lines pair in order, and differ unless their keys are
+/// equal, and the longer side's other lines face empty rows.
+fn rows_of(hunks: &[diff::Hunk], a: &[u32], b: &[u32]) -> Vec<Row> {
     let line = |index: usize| u32::try_from(index).ok();
+    let (left_len, right_len) = (a.len(), b.len());
     let mut rows = Vec::with_capacity(left_len.max(right_len));
     let (mut i, mut j) = (0, 0);
     // The empty hunk at the ends adds the equal lines after the last one.
     let ends = (hunks.iter().map(|hunk| (hunk.a.clone(), hunk.b.clone())))
         .chain([(left_len..left_len, right_len..right_len)]);
-    for (a, b) in ends {
-        while i < a.start && j < b.start {
+    for (hunk_a, hunk_b) in ends {
+        while i < hunk_a.start && j < hunk_b.start {
             rows.push(Row {
                 left: line(i),
                 right: line(j),
@@ -432,14 +499,18 @@ fn rows_of(hunks: &[diff::Hunk], left_len: usize, right_len: usize) -> Vec<Row> 
             i += 1;
             j += 1;
         }
-        for k in 0..a.len().max(b.len()) {
+        for k in 0..hunk_a.len().max(hunk_b.len()) {
+            let (left, right) = (
+                (k < hunk_a.len()).then_some(hunk_a.start + k),
+                (k < hunk_b.len()).then_some(hunk_b.start + k),
+            );
             rows.push(Row {
-                left: if k < a.len() { line(a.start + k) } else { None },
-                right: if k < b.len() { line(b.start + k) } else { None },
-                differs: true,
+                left: left.and_then(line),
+                right: right.and_then(line),
+                differs: !matches!((left, right), (Some(x), Some(y)) if a[x] == b[y]),
             });
         }
-        (i, j) = (a.end, b.end);
+        (i, j) = (hunk_a.end, hunk_b.end);
     }
     rows
 }
@@ -1479,6 +1550,7 @@ mod tests {
     const PLAIN: Matching = Matching {
         case_sensitive: true,
         ignore_spaces: false,
+        ignore_frequent: false,
     };
 
     /// The four rules of Total Commander, folders left out. One file found,
@@ -1584,8 +1656,45 @@ mod tests {
         let loose = Matching {
             case_sensitive: false,
             ignore_spaces: true,
+            ignore_frequent: false,
         };
         assert!(!rows(loose)[0].differs);
+    }
+
+    /// Files that share only their blank lines pair line for line, and a
+    /// blank line facing a blank line is equal, as in Total Commander
+    /// (reported defect: they fell apart at each blank line into 19
+    /// differences, where Total Commander found 5). Repeated lines that
+    /// match in runs longer than the lines between them keep their pairs.
+    #[test]
+    fn frequent_lines_do_not_resync_lines_that_differ() {
+        let frequent = Matching {
+            ignore_frequent: true,
+            ..PLAIN
+        };
+        let left = strings(&["a1", "", "a2", "a3", "", "a4", "", "a5"]);
+        let right = strings(&["b1", "", "b2", "", "b3", "b4", "", "b5"]);
+        let rows = match_lines(&left, &right, frequent, &[], &|| false).expect("nothing cancels");
+        let pairs: Vec<_> = rows.iter().map(|row| (row.left, row.right)).collect();
+        let in_order: Vec<_> = (0..8).map(|n| (Some(n), Some(n))).collect();
+        assert_eq!(pairs, in_order);
+        let differs: Vec<_> = rows.iter().map(|row| row.differs).collect();
+        assert_eq!(differs, [true, false, true, true, true, true, false, true]);
+        let apart = match_lines(&left, &right, PLAIN, &[], &|| false).expect("nothing cancels");
+        assert!(apart.len() > rows.len());
+        let left: Vec<String> = ["x", "y"]
+            .repeat(20)
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let right: Vec<String> = ["x", "z", "y"]
+            .repeat(20)
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let rows = match_lines(&left, &right, frequent, &[], &|| false).expect("nothing cancels");
+        assert_eq!(rows.len(), 60);
+        assert_eq!(count_differences(rows.iter().map(|row| row.differs)), 20);
     }
 
     /// The rows pair lines and face an inserted line with an empty row; a

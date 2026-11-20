@@ -884,6 +884,8 @@ pub(crate) struct CompareState {
     pub(crate) case_sensitive: bool,
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) ignore_spaces: bool,
+    #[serde(default = "on", deserialize_with = "on_or_default")]
+    pub(crate) ignore_frequent: bool,
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) only_differences: bool,
     #[serde(default = "default_extra_lines", deserialize_with = "extra_lines")]
@@ -902,6 +904,7 @@ impl Default for CompareState {
             placement: None,
             case_sensitive: false,
             ignore_spaces: on(),
+            ignore_frequent: on(),
             only_differences: false,
             extra_lines: default_extra_lines(),
             two_line_list: on(),
@@ -1544,6 +1547,7 @@ mod tests {
                     placement: None,
                     case_sensitive: true,
                     ignore_spaces: false,
+                    ignore_frequent: false,
                     only_differences: true,
                     extra_lines: 5,
                     two_line_list: false,

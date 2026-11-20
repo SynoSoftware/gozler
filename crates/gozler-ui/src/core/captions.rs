@@ -162,7 +162,7 @@ impl DialogItem {
 /// caption shows the same icon on every button that has it (DESIGN.md:
 /// Look). A fix that needs administrator permission shows the
 /// administrator shield instead, so its caption has no icon here.
-const BUTTON_GLYPHS: [(&str, Glyph); 36] = [
+const BUTTON_GLYPHS: [(&str, Glyph); 38] = [
     ("button.ok", Glyph::Accept),
     ("button.cancel", Glyph::Cancel),
     ("button.close", Glyph::Cancel),
@@ -195,6 +195,8 @@ const BUTTON_GLYPHS: [(&str, Glyph); 36] = [
     ("compare.compare", Glyph::Refresh),
     ("compare.next", Glyph::ChevronDown),
     ("compare.previous", Glyph::ChevronUp),
+    ("compare.find", Glyph::Search),
+    ("compare.save_button", Glyph::Save),
     ("multi_rename.start_button", Glyph::Rename),
     ("multi_rename.undo", Glyph::Undo),
     ("multi_rename.result_list", Glyph::Document),
