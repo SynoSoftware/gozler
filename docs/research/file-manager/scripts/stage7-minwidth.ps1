@@ -2,7 +2,7 @@
 # window is sized to 100 by 100 pixels, its WM_GETMINMAXINFO answer keeps it
 # at its minimum, and the client rectangle is read back. Writes minwidth.txt.
 param([string] $Exe = 'C:\SynoSoftware\TinyTorrent2\3rdParty\goz\target\release\gozler-ui.exe')
-. (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'stage7-common.ps1')
 $root = $PSScriptRoot
 
 Add-Type -TypeDefinition @'

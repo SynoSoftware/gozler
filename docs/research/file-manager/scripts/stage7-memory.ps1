@@ -1,7 +1,7 @@
 # One run that measures what a search panel costs in private bytes, against
 # the budget of stage7-design.md section 3. It writes memory.txt beside it.
 param([string] $Exe = 'C:\SynoSoftware\TinyTorrent2\3rdParty\goz\target\release\gozler-ui.exe')
-. (Join-Path $PSScriptRoot 'common.ps1')
+. (Join-Path $PSScriptRoot 'stage7-common.ps1')
 $root = $PSScriptRoot
 $lines = [Collections.Generic.List[string]]::new()
 function Note([string] $line) { $lines.Add($line); $line }

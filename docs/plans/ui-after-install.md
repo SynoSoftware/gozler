@@ -97,10 +97,47 @@ owner has run it, and file an issue for each item that fails.
 - The labels the window shares with File Explorer, such as "Open file
   location" and "Copy as path", match File Explorer's wording.
 
+## Panels and the Viewer
+
+- Press `Enter` on a folder, and `Backspace`. The list keeps the old rows
+  until the new folder's rows replace them in one step, and never shows empty
+  in between. A folder that takes longer than 250 ms to list, such as a large
+  folder or a share, shows the new folder with "Reading…". While the old rows
+  still show, `Enter`, `Delete`, `F5` and `F6` do nothing, and quick search
+  waits. `Backspace` pressed twice quickly goes up from the folder being
+  opened, not from the folder still on screen (DESIGN.md: A panel).
+- Rename the folder a panel shows from File Explorer: within 2 seconds the
+  panel opens the nearest folder that exists. Repeat on a FAT or exFAT USB
+  drive, where `FileIdInfo` may fail; the panel must still notice.
+- Select all in a folder of tens of thousands of files and press `F8`: the
+  panel stays responsive while the rows go.
+- In a panel's list, `Alt`+letter starts quick search, and releasing `Alt`
+  afterwards does not open the menu bar; `Alt` pressed and released alone
+  still opens it. In a search panel's box, `Alt+L` reaches Look in, while in
+  the list `Alt+L` stays quick search.
+- Search in a panel in a folder reached through a junction or a mount prefix:
+  the Folder column shows the right folder for each result.
+- In the Viewer, `Esc`, `Q`, `F10` and `Alt+F4` close it, and the main window
+  keeps its focused row, so `F3`, `Esc`, `Down`, `F3` walks through the files.
+  A held `Esc` closes one Viewer only, and holding the `F3` that opened a
+  Viewer neither opens its Find dialog nor finds a match. File > Exit closes
+  every Viewer, and a second Viewer opens offset by the caption height.
+- Memory and minimum width on the current build: run
+  `docs/research/file-manager/scripts/stage7-memory.ps1` and
+  `stage7-minwidth.ps1`, and write the figures into DESIGN.md "Memory budget".
+  The last figures predate the Viewer, Compare and Multi-Rename.
+
 ## Settings
 
 - Apply saves edited settings without losing the current page or focus. Switch
   the language and check the search and panel column headers.
+- Show every page: its push buttons share one width, and the lists, tooltips,
+  search highlight, Reset and Apply work. A page is made when it first shows,
+  so a search typed before a page was shown must find it, and Show icons
+  changed before a page was shown must apply to it.
+- Apply and OK after an Include change, with the permission prompt accepted,
+  declined and failing. While the prompt shows, the main window keeps working,
+  and OK, Cancel, Apply and Reset are disabled.
 - Each open command runs for its own case, and emptying a box brings back File
   Explorer's way. Enter, double-click and Open follow that rule in Search,
   folder panels and search panels. Show in Commander navigates to the selected
@@ -153,6 +190,8 @@ owner has run it, and file an issue for each item that fails.
 - Close while an administrator prompt is open for Include, Rebuild or a service
   fix. The UI closes immediately. Accepted changes finish if permission is given;
   settings persistence proceeds independently of that prompt.
+- Restart Explorer while a copy runs: the taskbar button shows the copy's
+  progress again.
 - While Paste waits for another program, cancel it and navigate elsewhere.
   Late clipboard data cannot start the cancelled transfer or change its target.
 - While another program holds the clipboard open, Copy and Paste leave the UI
