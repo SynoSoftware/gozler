@@ -12,7 +12,7 @@ use super::fetch::{
 use super::work::{INLINE_ITEMS, Retirement};
 use gozler_client::Repair;
 use gozler_core::links::Links;
-use gozler_core::proto::{ResultItem, ResultSnapshotId};
+use gozler_core::proto::{ResultItem, ResultSnapshotId, typed_parts};
 use gozler_core::query::{MatchSums, MatchedParts, ParsedQuery, QueryError};
 use gozler_core::search::Search;
 use gozler_core::types::SortSpec;
@@ -186,6 +186,7 @@ impl Fix {
             DaemonFailure::NotReady
             | DaemonFailure::NotGozler
             | DaemonFailure::Refused { .. }
+            | DaemonFailure::Unreadable { .. }
             | DaemonFailure::Lost => None,
         }
     }
@@ -272,6 +273,11 @@ pub(crate) struct ShownRows {
     total: u64,
     /// As the latest chunk says, with `total`.
     sums: Option<MatchSums>,
+    /// The parts of the search that the service could not read, from every
+    /// reply of it, as the person typed them, such as `child:readme`. A read
+    /// of its result snapshot names none, because the
+    /// request that made the snapshot named them.
+    skipped: Vec<String>,
     chunks: Vec<CachedChunk>,
     /// Only Search compiles bold ranges. `None` until its worker answers,
     /// and when terms do not compile, which the daemon refuses before rows.
@@ -445,6 +451,14 @@ impl Results {
         match &self.shown {
             Shown::Rows(rows) => rows.sums,
             Shown::Nothing | Shown::Message(_) => None,
+        }
+    }
+
+    /// The parts of the shown search that the service could not read.
+    pub(crate) fn skipped(&self) -> &[String] {
+        match &self.shown {
+            Shown::Rows(rows) => &rows.skipped,
+            Shown::Nothing | Shown::Message(_) => &[],
         }
     }
 
@@ -744,10 +758,13 @@ impl Results {
         match in_flight {
             Some(InFlight::Search(_, ask, _)) => {
                 // A sorted result snapshot holds the matches the shown sums
-                // count, and holds no sums when scrolling made it.
-                let sums = match (&self.shown, ask.snapshot) {
-                    (Shown::Rows(shown), FromSnapshot::Sort(_)) => chunk.sums.or(shown.sums),
-                    _ => chunk.sums,
+                // count, and holds no sums when scrolling made it. The parts
+                // the search skipped still apply to those matches.
+                let (sums, skipped) = match (&self.shown, ask.snapshot) {
+                    (Shown::Rows(shown), FromSnapshot::Sort(_)) => {
+                        (chunk.sums.or(shown.sums), shown.skipped.clone())
+                    }
+                    _ => (chunk.sums, Vec::new()),
                 };
                 if chunk.made.is_some() {
                     self.last_snapshot = chunk.made;
@@ -757,12 +774,14 @@ impl Results {
                     ask,
                     total: chunk.total,
                     sums,
+                    skipped,
                     chunks: Vec::new(),
                     matched: None,
                     coverage_scope: None,
                     clock: 0,
                     snapshot: chunk.made,
                 };
+                shown.add_skipped(chunk.skipped);
                 shown.insert(chunk.start, chunk.rows, first_page, &mut self.retired);
                 self.set_shown(Shown::Rows(shown));
                 RowsChange::NewSearch {
@@ -782,6 +801,7 @@ impl Results {
                 };
                 shown.total = chunk.total;
                 shown.sums = chunk.sums.or(shown.sums);
+                shown.add_skipped(chunk.skipped);
                 shown.insert(chunk.start, chunk.rows, first_page, &mut self.retired);
                 RowsChange::Rows {
                     rows,
@@ -806,6 +826,19 @@ impl std::fmt::Debug for ShownRows {
 }
 
 impl ShownRows {
+    /// Adds the parts that a reply of the search skipped and that no
+    /// earlier reply named, as the person typed them.
+    fn add_skipped(&mut self, parts: Vec<String>) {
+        if parts.is_empty() {
+            return;
+        }
+        for part in typed_parts(&self.ask.search.query, &parts) {
+            if !self.skipped.contains(&part) {
+                self.skipped.push(part);
+            }
+        }
+    }
+
     /// Where the rows up to `end` come from: the list's result snapshot
     /// once it has one, a new one that replaces `last` when they reach past
     /// the first chunk, which the search answered, and otherwise the
@@ -901,6 +934,7 @@ pub(crate) mod tests {
             volumes_incomplete: false,
             metadata_pending: false,
             sums: None,
+            skipped: Vec::new(),
             rest_follows: false,
             made: None,
         }

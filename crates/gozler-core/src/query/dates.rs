@@ -56,6 +56,7 @@ pub struct QueryStart {
 /// An inclusive range of FILETIMEs: 100-nanosecond ticks since 1601-01-01
 /// UTC, the form the index holds dates in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DateRange {
     pub min: i64,
     pub max: i64,

@@ -63,6 +63,9 @@ impl Failure {
                 ClientError::Refused { code, .. } => match code {
                     ProtoError::BadQuery => ExitCode::InvalidInput,
                     ProtoError::Unsupported => ExitCode::Communication,
+                    // Only a newer gozlerd reads this request, as for
+                    // `ClientError::TooOld`.
+                    ProtoError::UnknownRequest => ExitCode::Communication,
                     ProtoError::Overflow => ExitCode::Internal,
                     // gozler never reads a result snapshot.
                     ProtoError::ResultSnapshotGone => ExitCode::Internal,
@@ -125,6 +128,13 @@ impl Failure {
                     ),
                     ClientError::Lost => line("daemon closed the connection"),
                     ClientError::Cancelled => line("the request was cancelled"),
+                    ClientError::Refused {
+                        code: ProtoError::UnknownRequest,
+                        message,
+                    } => line(&format!(
+                        "the running gozlerd cannot read {message} in this request; a newer \
+                         gozlerd runs it"
+                    )),
                     ClientError::Communication(message) | ClientError::Refused { message, .. } => {
                         line(message)
                     }
@@ -318,6 +328,16 @@ mod tests {
                 refused(ProtoError::Overflow).into(),
                 1,
                 "gozler: the daemon's text",
+            ),
+            (
+                ClientError::Refused {
+                    code: ProtoError::UnknownRequest,
+                    message: "Search.returns".into(),
+                }
+                .into(),
+                7,
+                "gozler: the running gozlerd cannot read Search.returns in this request; a \
+                 newer gozlerd runs it",
             ),
             (
                 ClientError::Lost.into(),

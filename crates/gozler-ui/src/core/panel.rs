@@ -4266,6 +4266,7 @@ pub(crate) mod tests {
             volumes_incomplete: false,
             metadata_pending: false,
             sums: None,
+            skipped: Vec::new(),
             rest_follows: false,
             made: None,
         };

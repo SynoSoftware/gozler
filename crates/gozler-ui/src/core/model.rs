@@ -4906,6 +4906,12 @@ pub(crate) mod tests {
                 },
                 false,
             ),
+            (
+                DaemonFailure::Unreadable {
+                    part: "Search.returns".into(),
+                },
+                false,
+            ),
         ] {
             let mut model = model();
             let fetch = search(&mut model, "report");

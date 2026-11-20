@@ -167,6 +167,7 @@
     "volume_offline": "{0} is offline. De resultaten zijn mogelijk onvolledig.",
     "volume_failed": "{0} kon niet worden geïndexeerd. De resultaten zijn mogelijk onvolledig.",
     "metadata": "Sommige grootten en datums op {0} zijn onbekend.",
+    "skipped": "De service heeft {0} overgeslagen, want alleen een nieuwere versie leest dit. De resultaten zijn mogelijk onvolledig.",
     "update_available": "Gozler {0} is beschikbaar. Selecteer om bij te werken.",
     "service_memory": "Service {0}",
     "ui_memory": "Interface {0}",
@@ -328,6 +329,7 @@
     "not_gozler": "Een ander programma antwoordde in plaats van de Gozler-service, dus de zoekopdracht heeft geen verbinding gemaakt. Start Windows opnieuw, zodat de service als eerste start, en zoek dan opnieuw.",
     "too_old": "De service is verouderd, dus u kunt niet zoeken.",
     "refused": "De service kan deze zoekopdracht niet uitvoeren. Wijzig de zoekopdracht en probeer het opnieuw.\n\n{0}",
+    "unreadable": "Voor deze zoekopdracht is een nieuwere versie van de service nodig.\n\n{0}",
     "lost": "De verbinding met de service is verbroken. Opnieuw verbinden…"
   },
   "fix": {

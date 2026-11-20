@@ -15,8 +15,8 @@ use super::{Answer, Command, Count, EsPlan, build_search, parse_argv};
 use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
 use crate::layout::{LayoutFile, LayoutName};
 use crate::proto::{
-    Request, Response, Returns, SearchRequest, SentFolders, decode_request, decode_response_frame,
-    encode_page, encode_request,
+    Decoded, Request, Response, Returns, SearchRequest, SentFolders, decode_request,
+    decode_response_frame, encode_page, encode_request,
 };
 use crate::query::{
     CompiledQuery, HeldVolume, IndexedVolume, QueryError, QueryStart, ResultNames, ResultRows,
@@ -965,7 +965,11 @@ fn answer(volumes: &[Volume], search: &SearchRequest) -> Result<Vec<Response>, S
     let mut frame = Vec::new();
     encode_request(&Request::Search(search.clone()), &mut frame);
     // The payload follows the frame's 4-byte length.
-    let Ok(Request::Search(search)) = decode_request(&frame[4..]) else {
+    let Ok(Decoded {
+        request: Request::Search(search),
+        ..
+    }) = decode_request(&frame[4..])
+    else {
         panic!("a search decodes as the search it was");
     };
     let query = CompiledQuery::new(&search.query).map_err(|e| e.to_string())?;
@@ -986,7 +990,7 @@ fn answer(volumes: &[Volume], search: &SearchRequest) -> Result<Vec<Response>, S
             let mut names = ResultNames::default();
             let mut pages = Vec::new();
             loop {
-                let (frame, more) = encode_page(&mut rows, wanted, &mut sent);
+                let (frame, more) = encode_page(&mut rows, &wanted.wants, &mut sent);
                 pages.push(decode_response_frame(&frame[4..], &mut names).expect("decodes"));
                 if !more {
                     return Ok(pages);

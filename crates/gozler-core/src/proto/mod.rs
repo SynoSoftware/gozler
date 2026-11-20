@@ -7,10 +7,13 @@
 //! compact binary encoding of [`binary`] for results pages.
 //!
 //! - [`types`]: serde payload types and protocol constants.
-//! - [`frame`]: [`encode_frame`] / [`FrameDecoder`], the request JSON helpers
-//!   and the tagged response frames.
+//! - [`frame`]: [`encode_frame`] / [`FrameDecoder`], the request encoder and
+//!   the tagged response frames.
+//! - [`decode`]: [`decode_request`], which reads what it can of a newer
+//!   client's request.
 
 pub mod binary;
+pub mod decode;
 pub mod frame;
 pub mod types;
 
@@ -18,13 +21,14 @@ pub use binary::{
     PageEnd, PageItem, RESP_TAG_JSON, RESP_TAG_RESULTS, ResultsPage, SentFolders,
     decode_results_payload, encode_page, encode_snapshot_page,
 };
+pub use decode::{DecodeError, Decoded, decode_request, typed_parts};
 pub use frame::{
-    FrameDecoder, FrameError, RespFrameError, decode_request, decode_response_frame, encode_frame,
-    encode_request, encode_response_frame,
+    FrameDecoder, FrameError, RespFrameError, decode_response_frame, encode_frame, encode_request,
+    encode_response_frame,
 };
 pub use types::{
     CallerSees, DaemonStatus, FileIdentity, LeftOutVolume, MAX_CLIENT_FRAME, MAX_SERVER_FRAME,
     MemPair, OLDEST_PROTO_VERSION, PAGE_ROWS, PIPE_NAME, PROTO_VERSION, ProtoError, QueryResults,
     QueryTotals, Request, Response, ResultItem, ResultSnapshotId, Returns, Rows, SERVICE_NAME,
-    SearchRequest, SnapshotRowsRequest, SortSnapshotRequest, VolumeMemory, VolumeStatus,
+    SearchRequest, SnapshotRowsRequest, SortSnapshotRequest, VolumeMemory, VolumeStatus, Want,
 };

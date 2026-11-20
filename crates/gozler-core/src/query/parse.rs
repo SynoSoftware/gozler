@@ -38,6 +38,7 @@ pub enum Kind {
 
 /// An inclusive byte-size range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SizeRange {
     pub min: u64,
     pub max: u64,
@@ -115,11 +116,13 @@ pub const SIZE_WORDS: &[SizeWord] = &[
 /// A parsed query: the entries that match every clause.
 ///
 /// The client sends it to the daemon as part of a
-/// [`SearchRequest`](crate::proto::SearchRequest), so it is a wire type: it
-/// only grows, by new [`Test`] variants and new fields, and each such change
-/// raises [`PROTO_VERSION`](crate::proto::PROTO_VERSION), so a daemon that
-/// cannot read the new form refuses the client's `Hello` instead.
+/// [`SearchRequest`](crate::proto::SearchRequest), so it is a wire type. A
+/// new [`Test`] variant is an addition: an older daemon skips a term it
+/// cannot read and says so ([`decode_request`](crate::proto::decode_request)).
+/// An unknown field here, in a [`Clause`] or in a [`Term`] refuses the
+/// request, because the daemon cannot tell what it would change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ParsedQuery {
     pub clauses: Vec<Clause>,
     /// Whether text terms match case-sensitively, after any `case:` directive.
@@ -129,6 +132,7 @@ pub struct ParsedQuery {
 /// Terms of which at least one must match; a clause with no terms matches
 /// nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Clause {
     pub terms: Vec<Term>,
 }
@@ -149,6 +153,7 @@ impl Clause {
 /// match unknown values, negated or not, so an unread file is not reported as
 /// small. [`Test::Unknown`] tests missing metadata explicitly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Term {
     pub negated: bool,
     pub test: Test,
@@ -156,8 +161,11 @@ pub struct Term {
 
 /// What a [`Term`] tests. Text is as typed, apart from paths, which hold `\`
 /// separators and no relative form; the daemon folds it unless the query
-/// matches case.
+/// matches case. A struct variant with a field the daemon does not know
+/// fails to decode, so the daemon skips its term instead of ignoring the
+/// field.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Test {
     /// The name contains this text.
     Name(String),
@@ -246,6 +254,55 @@ pub enum Metadata {
 pub enum LengthTarget {
     Name,
     FullPath,
+}
+
+impl Test {
+    /// The test as a person types it, so a message can name it: the text of
+    /// a text test, and a search function with its value where the value is
+    /// text. A range shows only its function, such as `dm:`, because the
+    /// client resolved what was typed, such as `today`, into numbers.
+    pub fn typed(&self) -> String {
+        let function = |function: Function| {
+            let names = SEARCH_FUNCTIONS.iter().find(|f| f.function == function);
+            format!("{}:", names.map_or("", |f| f.names[0]))
+        };
+        match self {
+            Test::Name(text)
+            | Test::Path(text)
+            | Test::NameWildcard(text)
+            | Test::PathWildcard(text)
+            | Test::NameWholeWord(text)
+            | Test::PathWholeWord(text)
+            | Test::NameWordStart(text)
+            | Test::PathWordStart(text)
+            | Test::NameStart(text)
+            | Test::PathStart(text) => text.clone(),
+            Test::Parent(folder) => function(Function::Parent) + folder,
+            Test::NameRegex(pattern) | Test::PathRegex(pattern) => {
+                function(Function::Regex) + pattern
+            }
+            Test::Ordered { terms, .. } => terms.join(" "),
+            Test::Extension(extensions) => function(Function::Ext) + &extensions.join(";"),
+            Test::Size(_) => function(Function::Size),
+            Test::Kind(Kind::File) => function(Function::File),
+            Test::Kind(Kind::Folder) => function(Function::Folder),
+            Test::DateModified(_) => function(Function::Date(DateField::Modified)),
+            Test::DateCreated(_) => function(Function::Date(DateField::Created)),
+            Test::Attributes(_) => function(Function::Attributes),
+            Test::Unknown(metadata) => {
+                let tested = match metadata {
+                    Metadata::Size => Function::Size,
+                    Metadata::DateModified => Function::Date(DateField::Modified),
+                    Metadata::DateCreated => Function::Date(DateField::Created),
+                };
+                function(tested) + "unknown"
+            }
+            Test::Length { target, .. } => function(Function::Length(*target)),
+            Test::Child(text) => function(Function::Child) + text,
+            Test::Depth(_) => function(Function::Depth),
+            Test::ChildCount { kind, .. } => function(Function::ChildCount(*kind)),
+        }
+    }
 }
 
 impl ParsedQuery {

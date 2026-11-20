@@ -234,7 +234,8 @@ fn run(
             Ask::Selection(_, ask) => selection(&mut client, ask).map(Outcome::Selection),
             Ask::FolderSize(search) => client
                 .totals(search.request(Returns::Totals))
-                .map(Outcome::Totals),
+                // A folder's size has no query term to skip.
+                .map(|(totals, _)| Outcome::Totals(totals)),
             Ask::Export(ask) => Ok(export(
                 &mut client,
                 &ask,
@@ -270,10 +271,10 @@ fn rows(
 ) -> Result<Chunk, ClientError> {
     let mut all: Option<QueryResults> = None;
     let made = Cell::new(None);
-    client.rows(
+    let skipped = client.rows(
         ask.request(),
         |id| made.set(Some(id)),
-        |page| {
+        |page, skipped| {
             match &mut all {
                 None => {
                     if let Some(first) = first
@@ -286,6 +287,7 @@ fn rows(
                             volumes_incomplete: page.volumes_incomplete,
                             metadata_pending: page.metadata_pending,
                             sums: page.sums,
+                            skipped: skipped.to_vec(),
                             rest_follows: true,
                             made: made.get(),
                         }));
@@ -305,6 +307,7 @@ fn rows(
         volumes_incomplete: all.volumes_incomplete,
         metadata_pending: all.metadata_pending,
         sums: all.sums,
+        skipped,
         rest_follows: false,
         made: made.get(),
     })
@@ -328,7 +331,7 @@ fn selection(client: &mut Client, ask: SelectionAsk) -> Result<SelectionRows, Cl
     client.rows(
         ask.span.request(),
         |id| made = Some(id),
-        |page| {
+        |page, _| {
             for item in page.items {
                 if ask.keeps(position) {
                     rows.push((position, item));
@@ -384,7 +387,9 @@ fn export(
                 }
                 Ok::<(), ExportStop>(())
             });
-            match pages.and_then(|()| writer.finish().map_err(ExportStop::Write)) {
+            // The list that shows the search already names its skipped
+            // parts, and the export is that search.
+            match pages.and_then(|_| writer.finish().map_err(ExportStop::Write)) {
                 // Cancel export that comes after the last page still leaves
                 // no file, as the person asked.
                 Ok(()) if !cancel.is_cancelled() => return Outcome::Exported { rows: written },
@@ -420,6 +425,10 @@ fn failure(error: ClientError, programs: &Programs) -> DaemonFailure {
         ClientError::TooOld => DaemonFailure::TooOld {
             programs: programs.clone(),
         },
+        ClientError::Refused {
+            code: ProtoError::UnknownRequest,
+            message,
+        } => DaemonFailure::Unreadable { part: message },
         ClientError::Refused { message, .. } => DaemonFailure::Refused { detail: message },
         ClientError::Communication(_) | ClientError::Lost | ClientError::Cancelled => {
             DaemonFailure::Lost

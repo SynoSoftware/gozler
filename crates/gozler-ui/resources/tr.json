@@ -167,6 +167,7 @@
     "volume_offline": "{0} çevrimdışı. Sonuçlar eksik olabilir.",
     "volume_failed": "{0} dizinlenemedi. Sonuçlar eksik olabilir.",
     "metadata": "{0} üzerindeki bazı boyutlar ve tarihler bilinmiyor.",
+    "skipped": "Hizmet {0} öğesini atladı; bunu yalnızca daha yeni bir sürüm okur. Sonuçlar eksik olabilir.",
     "update_available": "Gozler {0} kullanılabilir. Güncelleştirmek için seçin.",
     "service_memory": "Hizmet {0}",
     "ui_memory": "Arabirim {0}",
@@ -328,6 +329,7 @@
     "not_gozler": "Gozler hizmeti yerine başka bir program yanıt verdi, bu yüzden arama bağlanmadı. Hizmetin önce başlaması için Windows'u yeniden başlatın, sonra yeniden arayın.",
     "too_old": "Hizmet güncel değil, bu yüzden arama yapamazsınız.",
     "refused": "Hizmet bu aramayı çalıştıramıyor. Aramayı değiştirip yeniden deneyin.\n\n{0}",
+    "unreadable": "Bu arama için hizmetin daha yeni bir sürümü gerekiyor.\n\n{0}",
     "lost": "Hizmetle bağlantı kesildi. Yeniden bağlanılıyor…"
   },
   "fix": {

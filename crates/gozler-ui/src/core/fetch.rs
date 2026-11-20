@@ -11,7 +11,7 @@ use gozler_core::include::IndexSettings;
 use gozler_core::output::ResultFormat;
 use gozler_core::proto::{
     DaemonStatus, PROTO_VERSION, QueryTotals, Request, ResultItem, ResultSnapshotId, Returns, Rows,
-    SearchRequest, SnapshotRowsRequest, SortSnapshotRequest,
+    SearchRequest, SnapshotRowsRequest, SortSnapshotRequest, Want,
 };
 use gozler_core::query::MatchSums;
 use gozler_core::search::Search;
@@ -163,22 +163,26 @@ impl ChunkAsk {
         // A list holds fewer than 2^32 rows, because an index does.
         let offset = u32::try_from(self.start).unwrap_or(u32::MAX);
         let limit = Some(u32::try_from(self.len).unwrap_or(u32::MAX));
+        // Only an index with Dates created on sends them, eight bytes a row,
+        // and attributes four, so showing either column needs no second
+        // request.
+        let mut wants = vec![
+            Want::Size,
+            Want::DateModified,
+            Want::DateCreated,
+            Want::Attributes,
+        ];
+        // The status bar shows them beside the total. The service sums every
+        // match for them, so only the first chunk asks, and the later chunks
+        // keep its sums.
+        if self.start == 0 {
+            wants.push(Want::Sums);
+        }
         let rows = Rows {
             sort: self.sort,
             offset,
             limit,
-            want_size: true,
-            want_mtime: true,
-            // Only an index with Dates created on sends them, eight bytes a
-            // row, and attributes four, so showing either column needs no
-            // second request.
-            want_created: true,
-            want_attributes: true,
-            want_identity: false,
-            // The status bar shows them beside the total. The service sums
-            // every match for them, so only the first chunk asks, and the
-            // later chunks keep its sums.
-            want_sums: self.start == 0,
+            wants,
         };
         match self.snapshot {
             FromSnapshot::No => Request::Search(self.search.clone().request(Returns::Rows(rows))),
@@ -189,11 +193,7 @@ impl ChunkAsk {
                 id,
                 offset,
                 limit,
-                want_size: rows.want_size,
-                want_mtime: rows.want_mtime,
-                want_created: rows.want_created,
-                want_attributes: rows.want_attributes,
-                want_identity: rows.want_identity,
+                wants: rows.wants,
             }),
             FromSnapshot::Sort(id) => Request::SortResultSnapshot(SortSnapshotRequest { id, rows }),
         }
@@ -244,16 +244,18 @@ pub(crate) struct ExportAsk {
 
 impl ExportAsk {
     pub(crate) fn request(&self) -> SearchRequest {
+        let mut wants = vec![Want::Size, Want::DateModified];
+        if self.want_created {
+            wants.push(Want::DateCreated);
+        }
+        if self.want_attributes {
+            wants.push(Want::Attributes);
+        }
         self.search.clone().request(Returns::Rows(Rows {
             sort: self.sort,
             offset: 0,
             limit: None,
-            want_size: true,
-            want_mtime: true,
-            want_created: self.want_created,
-            want_attributes: self.want_attributes,
-            want_identity: false,
-            want_sums: false,
+            wants,
         }))
     }
 }
@@ -415,6 +417,9 @@ pub(crate) struct Chunk {
     /// Every match's files and folders and their sizes; `None` from a
     /// service that does not send them.
     pub(crate) sums: Option<MatchSums>,
+    /// The parts of the request that the service could not read, so it
+    /// answered without them.
+    pub(crate) skipped: Vec<String>,
     /// More rows of the chunk follow in another reply: these are its first
     /// page's, which the list shows while the rest arrives.
     pub(crate) rest_follows: bool,
@@ -440,6 +445,12 @@ pub(crate) enum DaemonFailure {
     /// The service refused the request; `detail` is its English text.
     Refused {
         detail: String,
+    },
+    /// The service cannot read `part` of the request, which only a newer
+    /// service reads, such as a new kind of request or sort key; `part` is
+    /// its path in the request.
+    Unreadable {
+        part: String,
     },
     Lost,
 }
@@ -542,15 +553,18 @@ impl LocalService {
 impl DaemonFailure {
     /// Whether the failure ends by itself, so the window asks for status
     /// until the service answers. An older service ends when the setup
-    /// replaces it; a refused request and a failed owner check fail the same way
-    /// again.
+    /// replaces it; a refused or unreadable request and a failed owner check
+    /// fail the same way again, so a poll would send the same request each
+    /// time.
     pub(crate) fn recovers(&self) -> bool {
         match self {
             DaemonFailure::NotRunning(_)
             | DaemonFailure::NotReady
             | DaemonFailure::TooOld { .. }
             | DaemonFailure::Lost => true,
-            DaemonFailure::NotGozler | DaemonFailure::Refused { .. } => false,
+            DaemonFailure::NotGozler
+            | DaemonFailure::Refused { .. }
+            | DaemonFailure::Unreadable { .. } => false,
         }
     }
 }

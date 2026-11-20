@@ -81,6 +81,7 @@ fn show_in_commander_gives_the_destination_panel_keyboard_focus() {
             volumes_incomplete: false,
             metadata_pending: false,
             sums: None,
+            skipped: Vec::new(),
             rest_follows: false,
             made: None,
         }),

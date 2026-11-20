@@ -602,6 +602,10 @@ impl CompiledQuery {
         bits
     }
 
+    fn has_empty_clause(&self) -> bool {
+        self.clauses.iter().any(|clause| clause.terms.is_empty())
+    }
+
     /// Whether `root`, the name of a volume's root in the form the query
     /// compares, fails a clause of one positive start that it alone decides,
     /// so that nothing on the volume matches. A root mounted nowhere has no
@@ -1974,6 +1978,12 @@ fn scan_with<'q, 'i>(
     walk_floor: usize,
 ) -> Scan<'q, 'i> {
     let mut scan = Scan::new(index, mount_prefix, query, seen_by, stop);
+    // A clause with no terms passes no entry, so this saves visiting every
+    // candidate to reject it. The daemon leaves such a clause when it skips
+    // a term it cannot read (`proto::decode_request`).
+    if query.has_empty_clause() {
+        return scan;
+    }
     // A start that the root's name fails matches nothing on this volume.
     let root = root_name(mount_prefix);
     let root = if query.match_case {
@@ -4295,7 +4305,7 @@ mod tests {
 
     mod untrusted {
         use super::*;
-        use crate::proto::{Request, Returns, SearchRequest, decode_request};
+        use crate::proto::{Decoded, Request, Returns, SearchRequest, decode_request};
         use proptest::prelude::*;
 
         fn arb_test() -> impl Strategy<Value = Test> {
@@ -4415,7 +4425,7 @@ mod tests {
                     json[at.index(len)] = *byte;
                 }
                 json.truncate(cut.index(len + 1));
-                if let Ok(Request::Search(search)) = decode_request(&json)
+                if let Ok(Decoded { request: Request::Search(search), .. }) = decode_request(&json)
                     && let Ok(query) = CompiledQuery::new(&search.query)
                 {
                     let _ = run_totals(&docs_index(), r"C:\", &query, None, &SeenBy::Everything, &AtomicBool::new(false));

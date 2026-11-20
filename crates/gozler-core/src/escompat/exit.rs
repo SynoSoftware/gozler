@@ -83,7 +83,8 @@ impl ExitCode {
             ExitCode::Complete => "Complete results, including no matches",
             ExitCode::Internal => "Internal error",
             ExitCode::Incomplete => {
-                "Results may be incomplete: a volume is not ready or lacks sizes and dates"
+                "Results may be incomplete: a volume is not ready or lacks sizes and dates, \
+                 or gozlerd skipped part of the query"
             }
             ExitCode::Untrusted => "The pipe server is not the trusted gozlerd",
             ExitCode::InvalidInput => "Invalid input: a missing or bad value, or a bad query",

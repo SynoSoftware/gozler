@@ -709,8 +709,9 @@ fn indexing_progress(
 
 /// The status bar's right group: the service's failure while the list
 /// shows rows or another message, so the window says that the service
-/// stopped also when it keeps its rows (DESIGN.md: T10); else the index
-/// state, only when it affects the answer (DESIGN.md: Status bar); else a
+/// stopped also when it keeps its rows (DESIGN.md: T10); else the parts of
+/// the search that the service skipped; else the index state, only when it
+/// affects the answer (DESIGN.md: Status bar); else a
 /// newer release that Check for updates found (DESIGN.md: The General
 /// page).
 pub(crate) fn index_status(model: &Model) -> String {
@@ -736,6 +737,12 @@ pub(crate) fn index_status(model: &Model) -> String {
             })
             .unwrap_or_default();
     };
+    // A skipped part leaves matches out on every volume, so it comes before
+    // a volume's state.
+    let skipped = (model.list(list)).map_or(&[][..], |shown| shown.results().skipped());
+    if !skipped.is_empty() {
+        return strings.format("status.skipped", &[&skipped.join(", ")]);
+    }
     let coverage = model.coverage(list);
     if let Some(volume) = coverage.volumes().find(|volume| {
         matches!(

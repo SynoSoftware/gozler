@@ -18,7 +18,7 @@
 //! <branches> <name|path|merge> [limit|all] [sums]`
 
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
-use gozler_core::proto::{Rows, SentFolders, encode_page};
+use gozler_core::proto::{Rows, SentFolders, Want, encode_page};
 use gozler_core::query::{
     CompiledQuery, HeldVolume, IndexedVolume, ResultRows, Viewer, parse_query,
 };
@@ -264,12 +264,11 @@ fn main() {
         sort,
         offset: 0,
         limit,
-        want_size: false,
-        want_mtime: false,
-        want_created: false,
-        want_attributes: false,
-        want_identity: false,
-        want_sums,
+        wants: if want_sums {
+            vec![Want::Sums]
+        } else {
+            Vec::new()
+        },
     };
 
     // The scan under the volume's index read lock, the sort without it, and
@@ -297,7 +296,7 @@ fn main() {
     let mut sent = SentFolders::default();
     let (mut pipe, mut pages) = (0usize, 0usize);
     loop {
-        let (page, more) = encode_page(&mut rows, &wanted, &mut sent);
+        let (page, more) = encode_page(&mut rows, &wanted.wants, &mut sent);
         pipe += page.len();
         pages += 1;
         if !more {

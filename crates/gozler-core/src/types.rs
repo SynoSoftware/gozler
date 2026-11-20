@@ -111,6 +111,7 @@ pub enum SortDir {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SortSpec {
     pub key: SortKey,
     pub dir: SortDir,

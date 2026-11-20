@@ -380,10 +380,8 @@ superset plan built a feature about every 25 minutes and the ReFS plan landed
   answer. gozlerd still serves only its own version, of gozler or of goz,
   and keeps no old layout, because `gozler` and `gozlerd` install together
   from one build, and a layout kept for an old client would bind every
-  later change. `docs/plans/compatible-protocol.md` says what counts as an
-  addition. No daemon skips yet: until that plan's stage 1 lands, every
-  payload change still raises `PROTO_VERSION`, because a daemon of protocol
-  21 or older cannot skip what it cannot read.
+  later change. "Additions and breaks" in `docs/DESIGN.md` says what counts
+  as an addition and how the daemon skips what it cannot read.
   Read `gozler_core::proto::types` and `gozler_core::proto::binary` before
   you change a payload; no result carries its full path, because a path grows
   with the folder depth.

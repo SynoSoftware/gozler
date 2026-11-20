@@ -24,13 +24,14 @@ use gozler_core::include::IndexSettings;
 use gozler_core::index::{PathStatus, VolumeIndex};
 use gozler_core::links::{FolderLink, Links};
 use gozler_core::proto::{
-    CallerSees, DaemonStatus, MAX_CLIENT_FRAME, MemPair, OLDEST_PROTO_VERSION, PIPE_NAME,
-    PROTO_VERSION, ProtoError, Request, Response, ResultSnapshotId, Returns, Rows, SentFolders,
-    SnapshotRowsRequest, SortSnapshotRequest, VolumeMemory, VolumeStatus, encode_page,
-    encode_response_frame, encode_snapshot_page,
+    CallerSees, DaemonStatus, DecodeError, Decoded, MAX_CLIENT_FRAME, MemPair,
+    OLDEST_PROTO_VERSION, PIPE_NAME, PROTO_VERSION, ProtoError, Request, Response,
+    ResultSnapshotId, Returns, Rows, SentFolders, SnapshotRowsRequest, SortSnapshotRequest,
+    VolumeMemory, VolumeStatus, Want, decode_request, encode_page, encode_response_frame,
+    encode_snapshot_page,
 };
 use gozler_core::query::{
-    CompiledQuery, HeldVolume, IntoSnapshotError, MatchSums, ResultRows, ResultSnapshot, RowsSpec,
+    CompiledQuery, HeldVolume, IntoSnapshotError, ResultRows, ResultSnapshot, RowsSpec,
     SortAgainError, TotalsError, Viewer, search_totals,
 };
 use gozler_core::scope::{Scope, VolumeMounts};
@@ -460,6 +461,11 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
 /// sent it, and the Include count answers only a user who sees every file:
 /// its folder and name rules over the whole index would let any other user
 /// count hidden entries until the counts spell their names.
+///
+/// A request from a newer client may hold parts this daemon cannot read
+/// ([`decode_request`]): the reply names the skipped parts in
+/// [`Response::Skipped`] before the answer, or refuses the request with
+/// [`ProtoError::UnknownRequest`].
 #[allow(clippy::too_many_arguments)]
 fn serve(
     volumes: &VolumeSet,
@@ -471,13 +477,26 @@ fn serve(
     stop: &AtomicBool,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
-    let request = match gozler_core::proto::decode_request(frame) {
-        Ok(Request::Hello {
+    let Decoded { request, skipped } = match decode_request(frame) {
+        Ok(decoded) => decoded,
+        Err(DecodeError::Unknown(part)) => {
+            return reply(
+                emit,
+                Response::Error {
+                    code: ProtoError::UnknownRequest,
+                    message: part,
+                },
+            );
+        }
+        Err(error) => return reply(emit, refusal(error.to_string())),
+    };
+    let request = match request {
+        Request::Hello {
             proto_min,
             proto_max,
             ..
-        }) => return reply(emit, hello(volumes, proto_min, proto_max)),
-        Ok(Request::Status { links_held }) => {
+        } => return reply(emit, hello(volumes, proto_min, proto_max)),
+        Request::Status { links_held } => {
             let mut status = build_status(volumes, include, snapshots, access.caller_sees());
             if let (Some(held), Access::Sees(visibility)) = (links_held, access) {
                 let links = folder_links(volumes, visibility.viewer());
@@ -485,17 +504,19 @@ fn serve(
             }
             return reply(emit, Response::Status(status));
         }
-        Ok(Request::SettingsSaved) => {
+        Request::SettingsSaved => {
             include.reload();
             return reply(emit, Response::SettingsApplied);
         }
-        Ok(request) => request,
-        Err(e) => return reply(emit, refusal(format!("malformed request: {e}"))),
+        request => request,
     };
     let viewer = match access {
         Access::Sees(visibility) => visibility.viewer(),
         Access::Refused(refused) => return reply(emit, unsupported(refused.message())),
     };
+    if !skipped.is_empty() {
+        reply(emit, Response::Skipped { parts: skipped });
+    }
     let search = match request {
         Request::Search(search) => search,
         Request::CountIncluded(settings) => {
@@ -626,14 +647,9 @@ fn make_snapshot(
         id,
         offset: rows.offset,
         limit: rows.limit,
-        want_size: rows.want_size,
-        want_mtime: rows.want_mtime,
-        want_created: rows.want_created,
-        want_attributes: rows.want_attributes,
-        want_identity: rows.want_identity,
+        wants: rows.wants.clone(),
     };
-    let sums = rows.want_sums.then(|| snapshot.sums()).flatten();
-    stream_snapshot(&snapshot, volumes, &read, sums, viewer, emit);
+    stream_snapshot(&snapshot, volumes, &read, viewer, emit);
 }
 
 /// Streams the rows of the result snapshot that `read` names, as `viewer`
@@ -652,7 +668,7 @@ fn read_snapshot(
     let Some(held) = live_volumes(&held, volumes) else {
         return reply(emit, snapshot_gone());
     };
-    stream_snapshot(&snapshot, held, read, None, viewer, emit);
+    stream_snapshot(&snapshot, held, read, viewer, emit);
 }
 
 /// Sorts the result snapshot that `sort` names again with no search, as
@@ -691,20 +707,22 @@ fn sort_snapshot(
 
 /// Streams the rows of `snapshot` that `read` asks for, from `volumes`, its
 /// volumes, as `viewer` sees them and as [`stream_rows`] streams a search's;
-/// each page carries `sums`. An index replaced meanwhile ends the reply with
-/// the gone error.
+/// each page carries the search's sums when `read` asks for them. An index
+/// replaced meanwhile ends the reply with the gone error.
 fn stream_snapshot(
     snapshot: &ResultSnapshot,
     volumes: Vec<Arc<VolumeState>>,
     read: &SnapshotRowsRequest,
-    sums: Option<MatchSums>,
     viewer: Viewer<'_>,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
+    let sums = (read.wants.contains(&Want::Sums))
+        .then(|| snapshot.sums())
+        .flatten();
     let mut rows = snapshot.read(volumes, read.offset, read.limit, viewer);
     let mut sent = SentFolders::default();
     loop {
-        match encode_snapshot_page(&mut rows, read, sums, &mut sent) {
+        match encode_snapshot_page(&mut rows, &read.wants, sums, &mut sent) {
             Ok((page, more)) => {
                 if !emit(page) || !more {
                     return;
@@ -760,7 +778,7 @@ fn stream_rows(
 ) {
     let mut sent = SentFolders::default();
     loop {
-        let (page, more) = encode_page(&mut rows, wanted, &mut sent);
+        let (page, more) = encode_page(&mut rows, &wanted.wants, &mut sent);
         if !emit(page) || !more {
             return;
         }
@@ -991,7 +1009,7 @@ mod tests {
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
         CallerSees, DaemonStatus, FileIdentity, FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS,
-        PROTO_VERSION, ProtoError, Request, Response, Returns, Rows, SearchRequest,
+        PROTO_VERSION, ProtoError, Request, Response, Returns, Rows, SearchRequest, Want,
         decode_response_frame, encode_request,
     };
     use gozler_core::query::{ParseOptions, ResultNames, parse_query_with};
@@ -1237,6 +1255,16 @@ mod tests {
         access: &Access,
         request: &Request,
     ) -> Vec<u8> {
+        frame_reply_bytes(volumes, snapshots, access, &request_frame(request))
+    }
+
+    /// The frames the daemon replies to the request payload `frame`.
+    fn frame_reply_bytes(
+        volumes: &VolumeSet,
+        snapshots: &Snapshots,
+        access: &Access,
+        frame: &[u8],
+    ) -> Vec<u8> {
         let mut out = Vec::new();
         serve(
             volumes,
@@ -1244,7 +1272,7 @@ mod tests {
             snapshots,
             b"",
             access,
-            &request_frame(request),
+            frame,
             &AtomicBool::new(false),
             &mut |reply| {
                 out.extend_from_slice(&reply);
@@ -1276,11 +1304,7 @@ mod tests {
             id: gozler_core::proto::ResultSnapshotId(1),
             offset: 0,
             limit: None,
-            want_size: false,
-            want_mtime: false,
-            want_created: false,
-            want_attributes: false,
-            want_identity: false,
+            wants: Vec::new(),
         });
         for request in [
             search(query("System32")),
@@ -1378,7 +1402,7 @@ mod tests {
             else {
                 unreachable!("search asks for rows")
             };
-            rows.want_identity = true;
+            rows.wants.push(Want::Identity);
             let pages = results(&reply_bytes(&vols, &request));
             let [item] = &pages[0].items[..] else {
                 panic!("one match: {:?}", pages[0].items)
@@ -1418,8 +1442,7 @@ mod tests {
         sort: SortSpec,
         offset: u32,
         limit: Option<u32>,
-        want_size: bool,
-        want_mtime: bool,
+        wants: Vec<Want>,
         match_case: bool,
     }
 
@@ -1435,12 +1458,7 @@ mod tests {
                 sort: q.sort,
                 offset: q.offset,
                 limit: q.limit,
-                want_size: q.want_size,
-                want_mtime: q.want_mtime,
-                want_created: false,
-                want_attributes: false,
-                want_identity: false,
-                want_sums: false,
+                wants: q.wants,
             }),
         })
     }
@@ -1464,8 +1482,7 @@ mod tests {
             sort: SortSpec::default_for(SortKey::Name),
             offset: 0,
             limit: None,
-            want_size: true,
-            want_mtime: true,
+            wants: vec![Want::Size, Want::DateModified],
             match_case: false,
         }
     }
@@ -1536,6 +1553,103 @@ mod tests {
             matches!(frames[0], gozler_core::proto::Response::Error { .. }),
             "got {:?}",
             frames[0]
+        );
+    }
+
+    /// What the daemon replies to `request`, a request as JSON that this
+    /// build's client cannot make, from a client that sees every file.
+    fn replies_to_json(volumes: &VolumeSet, request: &serde_json::Value) -> Vec<Response> {
+        let everything = Access::Sees(Visibility::Everything);
+        let frame = request.to_string();
+        let bytes = frame_reply_bytes(
+            volumes,
+            &ResultSnapshots::new(),
+            &everything,
+            frame.as_bytes(),
+        );
+        decode_frames(&bytes)
+    }
+
+    /// A search of `clauses` as a newer client sends it, for its rows with
+    /// `wants`.
+    fn newer_search(clauses: serde_json::Value, wants: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "t": "Search",
+            "query": { "clauses": clauses, "match_case": false },
+            "scope": null,
+            "returns": { "Rows": {
+                "sort": { "key": "Name", "dir": "Asc" },
+                "offset": 0,
+                "limit": null,
+                "wants": wants,
+            } },
+        })
+    }
+
+    /// A newer client's search runs without the term and the want this
+    /// daemon cannot read, and the reply names both before the rows.
+    /// Without the second decode, the daemon refuses the whole search as
+    /// malformed, and the person gets an error instead of the rows it can
+    /// find.
+    #[test]
+    fn a_search_runs_without_the_parts_it_cannot_read_and_names_them() {
+        let vols = set(&[live_volume(r"C:\")]);
+        let clauses = serde_json::json!([{ "terms": [
+            { "negated": false, "test": { "Name": "System32" } },
+            { "negated": false, "test": { "Thumbnail": 64 } },
+        ] }]);
+        let frames = replies_to_json(
+            &vols,
+            &newer_search(clauses, serde_json::json!(["Size", "Preview"])),
+        );
+        assert_eq!(
+            frames[0],
+            Response::Skipped {
+                parts: vec!["Thumbnail".into(), "Preview".into()]
+            }
+        );
+        let Some(Response::Results(page)) = frames.get(1) else {
+            panic!("the rows after the skipped parts: {frames:?}");
+        };
+        let paths: Vec<&str> = page.items.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, [r"C:\Windows\System32"]);
+    }
+
+    /// A skipped term alone in its clause, negated or not, leaves the clause
+    /// empty, which matches nothing, so the search finds no rows. A daemon
+    /// that removed the emptied clause would match every entry the other
+    /// clauses let through, and Commander mode would act on files the
+    /// search never found.
+    #[test]
+    fn a_skipped_term_alone_in_its_clause_finds_nothing() {
+        let vols = set(&[live_volume(r"C:\")]);
+        for negated in [false, true] {
+            let clauses = serde_json::json!([
+                { "terms": [{ "negated": false, "test": { "Name": "Windows" } }] },
+                { "terms": [{ "negated": negated, "test": { "Thumbnail": 64 } }] },
+            ]);
+            let frames = replies_to_json(&vols, &newer_search(clauses, serde_json::json!([])));
+            let Some(Response::Results(page)) = frames.get(1) else {
+                panic!("the rows after the skipped parts: {frames:?}");
+            };
+            assert_eq!((page.total, page.items.len()), (0, 0), "negated: {negated}");
+        }
+    }
+
+    /// A request of a kind this daemon does not know is refused as a
+    /// request only a newer daemon reads, named by its kind. As `BadQuery`,
+    /// gozler would report a wrong query; as `Unsupported`, an access
+    /// refusal.
+    #[test]
+    fn an_unknown_kind_of_request_is_refused_by_its_name() {
+        let vols = set(&[live_volume(r"C:\")]);
+        let frames = replies_to_json(&vols, &serde_json::json!({ "t": "Thumbnails", "size": 64 }));
+        assert_eq!(
+            frames,
+            [Response::Error {
+                code: ProtoError::UnknownRequest,
+                message: "Thumbnails".into(),
+            }]
         );
     }
 
@@ -1611,7 +1725,7 @@ mod tests {
         else {
             unreachable!("search asks for rows")
         };
-        rows.want_sums = true;
+        rows.wants.push(Want::Sums);
         let pages = results(&reply_bytes(&vols, &request));
         let last = pages.last().expect("one page at least");
         assert_eq!(last.items.len(), 1, "the limit cuts the rows");
@@ -1647,12 +1761,7 @@ mod tests {
                     sort: SortSpec::default_for(SortKey::Name),
                     offset: 0,
                     limit: Some(1),
-                    want_size: false,
-                    want_mtime: false,
-                    want_created: false,
-                    want_attributes: false,
-                    want_identity: false,
-                    want_sums: false,
+                    wants: Vec::new(),
                 },
                 replaces: None,
             },
@@ -1682,11 +1791,7 @@ mod tests {
                 id,
                 offset: 1,
                 limit: None,
-                want_size: false,
-                want_mtime: false,
-                want_created: false,
-                want_attributes: false,
-                want_identity: false,
+                wants: Vec::new(),
             })
         };
         let frames = decode_frames(&reply_bytes_in(&vols, &snapshots, &read(id)));
@@ -1701,12 +1806,7 @@ mod tests {
                 },
                 offset: 0,
                 limit: None,
-                want_size: false,
-                want_mtime: false,
-                want_created: false,
-                want_attributes: false,
-                want_identity: false,
-                want_sums: false,
+                wants: Vec::new(),
             },
         });
         let frames = decode_frames(&reply_bytes_in(&vols, &snapshots, &sort));
@@ -1759,12 +1859,7 @@ mod tests {
                         sort: SortSpec::default_for(SortKey::Name),
                         offset: 0,
                         limit: Some(1),
-                        want_size: false,
-                        want_mtime: false,
-                        want_created: false,
-                        want_attributes: false,
-                        want_identity: false,
-                        want_sums: false,
+                        wants: Vec::new(),
                     },
                     replaces,
                 },
@@ -1798,12 +1893,7 @@ mod tests {
                 sort: SortSpec::default_for(SortKey::Size),
                 offset: 0,
                 limit: Some(1),
-                want_size: false,
-                want_mtime: false,
-                want_created: false,
-                want_attributes: false,
-                want_identity: false,
-                want_sums: false,
+                wants: Vec::new(),
             },
         }));
         assert!(serve_with(&sort, true).is_empty());
@@ -1811,11 +1901,7 @@ mod tests {
             id,
             offset: 0,
             limit: None,
-            want_size: false,
-            want_mtime: false,
-            want_created: false,
-            want_attributes: false,
-            want_identity: false,
+            wants: Vec::new(),
         }));
         let frames = serve_with(&read, false);
         assert!(
@@ -1994,21 +2080,20 @@ mod tests {
         );
     }
 
-    /// `want_size: false` must suppress the value even when the index holds one,
+    /// A size not asked for must stay out even when the index holds one,
     /// and the mount prefix must be prepended to every emitted path.
     #[test]
     fn flags_suppress_metadata_and_paths_carry_the_mount_prefix() {
         let vols = set(&[live_volume(r"C:\")]);
         let mut q = query("System32");
-        q.want_size = false;
-        q.want_mtime = false;
+        q.wants.clear();
 
         let pages = results(&encode_query_binary(&vols, q));
         let item = &pages[0].items[0];
-        assert!(item.size.is_none(), "want_size: false must suppress size");
+        assert!(item.size.is_none(), "a size not asked for must stay out");
         assert!(
             item.mtime_ft.is_none(),
-            "want_mtime: false must suppress mtime"
+            "a date modified not asked for must stay out"
         );
         assert!(
             item.path.starts_with(r"C:\"),

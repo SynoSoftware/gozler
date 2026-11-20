@@ -95,7 +95,11 @@ impl ClientError {
         match self {
             ClientError::NotRunning(why) => why.repair(),
             // The setup installs gozlerd and gozler together.
-            ClientError::TooOld => Some(Repair::Download),
+            ClientError::TooOld
+            | ClientError::Refused {
+                code: ProtoError::UnknownRequest,
+                ..
+            } => Some(Repair::Download),
             ClientError::NotReady
             | ClientError::Communication(_)
             | ClientError::Untrusted

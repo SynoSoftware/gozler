@@ -117,7 +117,7 @@ mod win {
     };
     use gozler_core::links::Links;
     use gozler_core::output::{ResultWriter, write_status};
-    use gozler_core::proto::{DaemonStatus, PIPE_NAME};
+    use gozler_core::proto::{DaemonStatus, PIPE_NAME, typed_parts};
     use gozler_core::query::QueryStart;
     use gozler_core::scope::Coverage;
     use gozler_core::winpath::is_drive_relative;
@@ -162,7 +162,8 @@ mod win {
             time_zone: gozler_winfs::local_time_zone(),
         };
         let request = build_search(&plan, &working_dir()?, &start).map_err(Failure::Query)?;
-        let totals = connection.totals(request)?;
+        // The empty search has no part to skip.
+        let (totals, _) = connection.totals(request)?;
         Ok(Index {
             volumes: status.volumes.len(),
             ready: status
@@ -234,9 +235,12 @@ mod win {
         }
 
         let mut answer = Answer::new(&plan, &request.query);
+        // The request goes to the daemon; a skipped part is named as typed.
+        let query = request.query.clone();
         if let Some(count) = plan.count {
-            let totals = connection.totals(request)?;
+            let (totals, skipped) = connection.totals(request)?;
             answer.add_totals(&totals);
+            answer.skipped = typed_parts(&query, &skipped);
             let value = match count {
                 Count::Results => totals.count,
                 Count::TotalSize => totals.size,
@@ -254,10 +258,11 @@ mod win {
             };
             let destination = plan.export.as_deref().unwrap_or("stdout");
             let mut writer = ResultWriter::new(plan.result_format(), time_zone, out);
-            connection.query(request, |page| {
+            let skipped = connection.query(request, |page| {
                 answer.add_page(&page);
                 output(writer.page(page), destination)
             })?;
+            answer.skipped = typed_parts(&query, &skipped);
             output(writer.finish(), destination)?;
         }
         for warning in answer.warnings() {

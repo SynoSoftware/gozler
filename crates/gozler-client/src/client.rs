@@ -201,20 +201,23 @@ impl Client {
 
     /// Runs a query and hands each results page to `page` as it arrives, so
     /// the caller shows the first rows while the daemon still sends the
-    /// rest. Stops at the first error `page` returns.
+    /// rest. Stops at the first error `page` returns. Returns the parts of
+    /// the query that the daemon skipped ([`Response::Skipped`]).
     ///
     /// Fails with [`ClientError::Refused`] when the daemon refuses the query.
     pub fn query<E: From<ClientError>>(
         &mut self,
         request: SearchRequest,
-        page: impl FnMut(QueryResults) -> Result<(), E>,
-    ) -> Result<(), E> {
-        self.rows(Request::Search(request), |_| {}, page)
+        mut page: impl FnMut(QueryResults) -> Result<(), E>,
+    ) -> Result<Vec<String>, E> {
+        self.rows(Request::Search(request), |_| {}, |results, _| page(results))
     }
 
     /// Sends `request`, whose reply is results pages, and hands them to
-    /// `page` as [`Self::query`] does. A search for a result snapshot is
-    /// answered first with its id, which goes to `made`.
+    /// `page` as [`Self::query`] does, each with the parts of the request
+    /// that the daemon skipped, which arrive before the first page. A search
+    /// for a result snapshot is answered first with its id, which goes to
+    /// `made`. Returns the parts of the request that the daemon skipped.
     ///
     /// Fails with [`ClientError::Refused`] when the daemon refuses the
     /// request, with [`ProtoError::ResultSnapshotGone`] for a result snapshot
@@ -225,17 +228,19 @@ impl Client {
         &mut self,
         request: Request,
         mut made: impl FnMut(ResultSnapshotId),
-        mut page: impl FnMut(QueryResults) -> Result<(), E>,
-    ) -> Result<(), E> {
+        mut page: impl FnMut(QueryResults, &[String]) -> Result<(), E>,
+    ) -> Result<Vec<String>, E> {
         self.send(&request)?;
+        let mut skipped = Vec::new();
         loop {
             match self.next_response()? {
+                Response::Skipped { parts } => skipped = parts,
                 Response::ResultSnapshot { id, .. } => made(id),
                 Response::Results(results) => {
                     let more = results.more;
-                    page(results)?;
+                    page(results, &skipped)?;
                     if !more {
-                        return Ok(());
+                        return Ok(skipped);
                     }
                 }
                 Response::Error { code, message } => {
@@ -251,17 +256,29 @@ impl Client {
     }
 
     /// Runs a search that asks for [`Returns::Totals`], with the failures of
-    /// [`Self::query`].
+    /// [`Self::query`], and returns the totals with the parts of the search
+    /// that the daemon skipped.
     ///
     /// [`Returns::Totals`]: gozler_core::proto::Returns::Totals
-    pub fn totals(&mut self, request: SearchRequest) -> Result<QueryTotals, ClientError> {
+    pub fn totals(
+        &mut self,
+        request: SearchRequest,
+    ) -> Result<(QueryTotals, Vec<String>), ClientError> {
         self.send(&Request::Search(request))?;
-        match self.next_response()? {
-            Response::Totals(totals) => Ok(totals),
-            Response::Error { code, message } => Err(ClientError::Refused { code, message }),
-            _ => Err(ClientError::Communication(
-                "unexpected reply from daemon".into(),
-            )),
+        let mut skipped = Vec::new();
+        loop {
+            match self.next_response()? {
+                Response::Skipped { parts } => skipped = parts,
+                Response::Totals(totals) => return Ok((totals, skipped)),
+                Response::Error { code, message } => {
+                    return Err(ClientError::Refused { code, message });
+                }
+                _ => {
+                    return Err(ClientError::Communication(
+                        "unexpected reply from daemon".into(),
+                    ));
+                }
+            }
         }
     }
 

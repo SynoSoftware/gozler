@@ -11,8 +11,11 @@ use crate::types::{EsColumn, SortKey};
 use std::fmt;
 
 /// What the pages of one result set say beyond their rows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Answer {
+    /// The parts of the query that gozlerd could not read, so it searched
+    /// without them ([`Response::Skipped`](crate::proto::Response::Skipped)).
+    pub skipped: Vec<String>,
     /// Every match, shown or not.
     pub total: u64,
     /// The rows the pages carried.
@@ -32,6 +35,7 @@ impl Answer {
     /// The answer to `query`, parsed for `plan`, before any reply arrives.
     pub fn new(plan: &EsPlan, query: &ParsedQuery) -> Self {
         Answer {
+            skipped: Vec::new(),
             total: 0,
             shown: 0,
             volumes_incomplete: false,
@@ -64,6 +68,9 @@ impl Answer {
     /// The warnings to write after the rows, in order.
     pub fn warnings(&self) -> Vec<Warning> {
         let mut warnings = Vec::new();
+        if !self.skipped.is_empty() {
+            warnings.push(Warning::Skipped(self.skipped.join(", ")));
+        }
         if self.volumes_incomplete {
             warnings.push(Warning::Incomplete);
         }
@@ -107,8 +114,11 @@ impl Answer {
 
 /// A warning gozler writes to stderr after the rows, as
 /// `gozler: warning: {warning}`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Warning {
+    /// gozlerd searched without these parts of the query, which only a newer
+    /// gozlerd reads; carries them as typed, joined.
+    Skipped(String),
     /// A volume in scope is not ready: indexing, rescanning, offline or failed.
     Incomplete,
     /// The query tests or totals sizes or dates, and some of them on a volume
@@ -126,7 +136,9 @@ impl Warning {
     /// The code a search with this warning exits with.
     pub fn exit_code(self) -> ExitCode {
         match self {
-            Warning::Incomplete | Warning::SizesOrDatesUnknown => ExitCode::Incomplete,
+            Warning::Skipped(_) | Warning::Incomplete | Warning::SizesOrDatesUnknown => {
+                ExitCode::Incomplete
+            }
             Warning::Truncated { .. } => ExitCode::Truncated,
             Warning::SizesShort => ExitCode::Complete,
         }
@@ -136,6 +148,11 @@ impl Warning {
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Warning::Skipped(parts) => write!(
+                f,
+                "results may be incomplete: the running gozlerd skipped the parts of the \
+                 query that only a newer gozlerd reads: {parts}"
+            ),
             Warning::Incomplete => f.write_str(
                 "results may be incomplete: a volume in scope is not ready; gozler --status \
                  shows why",
@@ -166,6 +183,7 @@ mod tests {
 
     fn answer(total: u64, shown: u64, volumes_incomplete: bool) -> Answer {
         Answer {
+            skipped: Vec::new(),
             total,
             shown,
             volumes_incomplete,
@@ -210,12 +228,18 @@ mod tests {
     }
 
     /// `-no-result-error` exits 9 only when nothing matched: not when `-n 0`
-    /// hid the matches, and not when an incomplete volume may hold some.
+    /// hid the matches, and not when an incomplete volume or a skipped part
+    /// of the query may hold some.
     #[test]
     fn no_matches_exits_9_only_with_the_switch() {
         assert_eq!(answer(0, 0, false).exit_code(true).code(), 9);
         assert_eq!(answer(0, 0, false).exit_code(false).code(), 0);
         assert_eq!(answer(3, 0, false).exit_code(true).code(), 10);
         assert_eq!(answer(0, 0, true).exit_code(true).code(), 2);
+        let skipped = Answer {
+            skipped: vec!["Thumbnail".into()],
+            ..answer(0, 0, false)
+        };
+        assert_eq!(skipped.exit_code(true).code(), 2);
     }
 }

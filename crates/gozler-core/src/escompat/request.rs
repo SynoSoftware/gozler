@@ -2,7 +2,7 @@
 
 use super::{EsPlan, ScopeFolder};
 use crate::output::ResultFormat;
-use crate::proto::{Returns, Rows, SearchRequest};
+use crate::proto::{Returns, Rows, SearchRequest, Want};
 use crate::query::{QueryError, QueryStart, TermMatch};
 use crate::search::{Search, SearchInput, TextMatch};
 use crate::types::EsColumn;
@@ -25,20 +25,25 @@ pub fn build_search(
     query_start: &QueryStart,
 ) -> Result<SearchRequest, QueryError> {
     let json = matches!(plan.result_format(), ResultFormat::Json);
+    // Always fetch the size and date; output decides what to show. JSON
+    // includes creation dates; table metadata follows its columns.
+    let mut wants = vec![Want::Size, Want::DateModified];
+    if plan.columns.contains(&EsColumn::DateCreated) || json {
+        wants.push(Want::DateCreated);
+    }
+    if plan.columns.contains(&EsColumn::Attributes) {
+        wants.push(Want::Attributes);
+    }
+    if plan.file_id && json {
+        wants.push(Want::Identity);
+    }
     let returns = match plan.count {
         Some(_) => Returns::Totals,
         None => Returns::Rows(Rows {
             sort: plan.sort,
             offset: 0,
             limit: plan.row_limit(),
-            // Always fetch the size and date; output decides what to show.
-            // JSON includes creation dates; table metadata follows its columns.
-            want_size: true,
-            want_mtime: true,
-            want_created: plan.columns.contains(&EsColumn::DateCreated) || json,
-            want_attributes: plan.columns.contains(&EsColumn::Attributes),
-            want_identity: plan.file_id && json,
-            want_sums: false,
+            wants,
         }),
     };
     let scope = plan.scope.as_ref().map(|scope| match scope {
@@ -202,7 +207,8 @@ mod tests {
             let request = search_in(&plan(&tokens), r"C:\").expect("parses");
             assert!(matches!(
                 request.returns,
-                Returns::Rows(Rows { want_created: actual, .. }) if actual == want_created
+                Returns::Rows(Rows { wants, .. })
+                    if wants.contains(&Want::DateCreated) == want_created
             ));
         }
     }

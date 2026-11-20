@@ -158,6 +158,21 @@ The order gozler prints matches in: by the sort key, then folded name, volume,
 file ID, parent file ID and raw name, so the same query over the same index
 prints the same list, and a limited list is the start of the full one.
 
+**Skipped part**:
+A search term or a requested value that only a newer gozlerd reads, so the
+running gozlerd answered without it and said so. A skipped term makes the
+answer smaller, never wider.
+_Avoid_: unknown term (`size:unknown` and `dm:unknown` find entries whose
+size or date is unknown)
+
+**Addition**:
+A change to the pipe protocol that a peer one step older reads safely, so the
+protocol version stays.
+
+**Break**:
+Any other change to a request, a reply or a results page; it raises the
+protocol version.
+
 ## App
 
 The app uses TinyTorrent2's words where both mean the same thing, so the

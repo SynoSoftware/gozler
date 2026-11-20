@@ -1315,6 +1315,7 @@ pub(crate) fn failure_text(strings: &Strings, failure: &DaemonFailure) -> String
         DaemonFailure::NotGozler => strings.text("failure.not_gozler").to_owned(),
         DaemonFailure::TooOld { .. } => strings.text("failure.too_old").to_owned(),
         DaemonFailure::Refused { detail } => strings.format("failure.refused", &[detail]),
+        DaemonFailure::Unreadable { part } => strings.format("failure.unreadable", &[part]),
         DaemonFailure::Lost => strings.text("failure.lost").to_owned(),
     }
 }

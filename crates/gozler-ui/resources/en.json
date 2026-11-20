@@ -167,6 +167,7 @@
     "volume_offline": "{0} is offline. Results might be incomplete.",
     "volume_failed": "{0} couldn't be indexed. Results might be incomplete.",
     "metadata": "Some sizes and dates on {0} are unknown.",
+    "skipped": "The service skipped {0}, which only a newer version reads. Results might be incomplete.",
     "update_available": "Gozler {0} is available. Select to update.",
     "service_memory": "Service {0}",
     "ui_memory": "UI {0}",
@@ -328,6 +329,7 @@
     "not_gozler": "Another program answered in place of the Gozler service, so the search didn't connect. Restart Windows so the service starts first, then search again.",
     "too_old": "The service is out of date, so you can't search.",
     "refused": "The service can't run this search. Change it, then try again.\n\n{0}",
+    "unreadable": "This search needs a newer version of the service.\n\n{0}",
     "lost": "The connection to the service was lost. Reconnecting…"
   },
   "fix": {

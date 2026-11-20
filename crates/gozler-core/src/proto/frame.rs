@@ -148,11 +148,6 @@ pub fn encode_request(req: &Request, out: &mut Vec<u8>) {
     encode_frame(&json, out);
 }
 
-/// Decodes one frame payload (as popped from [`FrameDecoder`]) as a [`Request`].
-pub fn decode_request(frame: &[u8]) -> Result<Request, serde_json::Error> {
-    serde_json::from_slice(frame)
-}
-
 /// A tagged response frame that failed to decode.
 #[derive(Debug, thiserror::Error)]
 pub enum RespFrameError {
@@ -340,13 +335,9 @@ mod tests {
         let mut dec = FrameDecoder::new(MAX_CLIENT_FRAME);
         dec.feed(&wire);
         let frame = dec.next_frame().expect("no error").expect("one frame");
-        assert_eq!(decode_request(&frame).expect("valid json"), req);
+        let decoded = crate::proto::decode_request(&frame).expect("valid json");
+        assert_eq!(decoded.request, req);
         assert_eq!(dec.next_frame(), Ok(None));
-    }
-
-    #[test]
-    fn decode_rejects_malformed_json() {
-        assert!(decode_request(b"not json").is_err());
     }
 
     proptest! {

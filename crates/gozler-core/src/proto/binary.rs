@@ -68,9 +68,7 @@
 use smallvec::SmallVec;
 
 use super::frame::{begin_frame, end_frame};
-use super::types::{
-    FileIdentity, MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Rows, SnapshotRowsRequest,
-};
+use super::types::{FileIdentity, MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Want};
 use crate::attributes::Attributes;
 use crate::query::{
     FolderId, IndexedVolume, MatchSums, ResultNames, ResultRows, ResultSnapshotGone, RowView,
@@ -379,12 +377,12 @@ impl ResultsPage {
 }
 
 /// Reads the next page of `rows` and encodes it as one results page frame,
-/// each row with the values that `wanted` asks for. `sent` holds the folders
+/// each row with the values that `wants` asks for. `sent` holds the folders
 /// the reply's earlier pages sent. Returns the frame and whether rows are
 /// left.
 pub fn encode_page<V: IndexedVolume>(
     rows: &mut ResultRows<V>,
-    wanted: &Rows,
+    wants: &[Want],
     sent: &mut SentFolders,
 ) -> (Vec<u8>, bool) {
     let mut page = ResultsPage::new(
@@ -393,16 +391,10 @@ pub fn encode_page<V: IndexedVolume>(
         rows.rows_left(),
     )
     .with_sums(rows.sums())
-    .with_identities(wanted.want_identity);
+    .with_identities(wants.contains(&Want::Identity));
+    let values = Values::of(wants);
     let more = rows.page(PAGE_ROWS as usize, |row, names| {
-        let item = page_item(
-            row,
-            wanted.want_size,
-            wanted.want_mtime,
-            wanted.want_created,
-            wanted.want_attributes,
-        );
-        page.push(item, names, sent)
+        page.push(values.item(row), names, sent)
     });
     let end = PageEnd {
         total: rows.total(),
@@ -413,7 +405,7 @@ pub fn encode_page<V: IndexedVolume>(
 }
 
 /// Reads the next page of a result snapshot's `rows` and encodes it as one
-/// results page frame, each row with the values that `wanted` asks for, and
+/// results page frame, each row with the values that `wants` asks for, and
 /// a gone row as such; the page carries the search's sums when `sums`.
 /// `sent` holds the folders the reply's earlier pages sent. Returns the
 /// frame and whether rows are left.
@@ -424,24 +416,16 @@ pub fn encode_page<V: IndexedVolume>(
 /// search.
 pub fn encode_snapshot_page<V: IndexedVolume>(
     rows: &mut SnapshotRows<'_, V>,
-    wanted: &SnapshotRowsRequest,
+    wants: &[Want],
     sums: Option<MatchSums>,
     sent: &mut SentFolders,
 ) -> Result<(Vec<u8>, bool), ResultSnapshotGone> {
     let mut page = ResultsPage::new(0, rows.metadata_pending(), rows.rows_left())
         .with_sums(sums)
-        .with_identities(wanted.want_identity);
+        .with_identities(wants.contains(&Want::Identity));
+    let values = Values::of(wants);
     let more = rows.page(PAGE_ROWS as usize, |row, names| match row {
-        SnapshotRow::Row(row) => {
-            let item = page_item(
-                row,
-                wanted.want_size,
-                wanted.want_mtime,
-                wanted.want_created,
-                wanted.want_attributes,
-            );
-            page.push(item, names, sent)
-        }
+        SnapshotRow::Row(row) => page.push(values.item(row), names, sent),
         SnapshotRow::Gone => page.push_gone(),
     })?;
     let end = PageEnd {
@@ -452,23 +436,38 @@ pub fn encode_snapshot_page<V: IndexedVolume>(
     Ok((page.finish(end), more))
 }
 
-/// The item of `row` with the values a request asks for.
-fn page_item(
-    row: RowView<'_>,
+/// Which of each row's values a request asks for, read from its wants once
+/// per page instead of once per row.
+#[derive(Clone, Copy)]
+struct Values {
     size: bool,
     mtime: bool,
     created: bool,
     attributes: bool,
-) -> PageItem<'_> {
-    PageItem {
-        folder: row.folder,
-        name: row.name,
-        is_dir: row.is_dir,
-        size: size.then_some(row.size).flatten(),
-        mtime: mtime.then_some(row.mtime).flatten(),
-        created: created.then_some(row.created).flatten(),
-        attributes: attributes.then_some(row.attributes),
-        file_id: row.file_id,
+}
+
+impl Values {
+    fn of(wants: &[Want]) -> Self {
+        Values {
+            size: wants.contains(&Want::Size),
+            mtime: wants.contains(&Want::DateModified),
+            created: wants.contains(&Want::DateCreated),
+            attributes: wants.contains(&Want::Attributes),
+        }
+    }
+
+    /// The item of `row` with these values.
+    fn item(self, row: RowView<'_>) -> PageItem<'_> {
+        PageItem {
+            folder: row.folder,
+            name: row.name,
+            is_dir: row.is_dir,
+            size: self.size.then_some(row.size).flatten(),
+            mtime: self.mtime.then_some(row.mtime).flatten(),
+            created: self.created.then_some(row.created).flatten(),
+            attributes: self.attributes.then_some(row.attributes),
+            file_id: row.file_id,
+        }
     }
 }
 

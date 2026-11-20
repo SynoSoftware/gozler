@@ -1,9 +1,12 @@
 //! Wire protocol payload types.
 //!
 //! Plain serde data: JSON on the wire, no I/O anywhere. Both enums are
-//! internally tagged (`"t"`) so a reader can dispatch on one field, and every
-//! struct tolerates unknown JSON fields. A payload change raises
-//! [`PROTO_VERSION`], because the daemon serves only its own version.
+//! internally tagged (`"t"`) so a reader can dispatch on one field. A reply
+//! tolerates unknown JSON fields, and so do `Hello` and `Status`; every other
+//! request type refuses them, because an ignored field could change the
+//! answer. `docs/DESIGN.md` ("Wire protocol") says which change is an
+//! addition, which keeps [`PROTO_VERSION`], and which is a break, which
+//! raises it.
 
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +23,7 @@ use crate::types::{Frn, IndexProgress, SortSpec, VolumePhase};
 /// refuses any other with [`ProtoError::Unsupported`], rather than agreeing on
 /// a version one side cannot actually speak. The client asks for this version
 /// alone, so a daemon of another build refuses it.
-pub const PROTO_VERSION: u16 = 21;
+pub const PROTO_VERSION: u16 = 22;
 
 /// The oldest protocol version a daemon of this build serves. **Owner
 /// ruling:** gozler serves no older protocol, of gozler or of goz, because
@@ -110,26 +113,22 @@ impl TryFrom<String> for ResultSnapshotId {
 /// Which rows of a result snapshot a [`Request::ResultSnapshotRows`] reads,
 /// and with which values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SnapshotRowsRequest {
     pub id: ResultSnapshotId,
     /// The place of the first row in the result order.
     pub offset: u32,
     /// The most rows to return; `None` = every row from `offset`.
     pub limit: Option<u32>,
-    pub want_size: bool,
-    pub want_mtime: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub want_created: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub want_attributes: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub want_identity: bool,
+    /// [`Want::Sums`] sends the search's sums on each page.
+    pub wants: Vec<Want>,
 }
 
 /// Which result snapshot a [`Request::SortResultSnapshot`] sorts, and the
 /// rows of it to send: `rows`' sort orders the new result snapshot, and its
 /// offset and limit pick the rows sent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SortSnapshotRequest {
     pub id: ResultSnapshotId,
     pub rows: Rows,
@@ -137,6 +136,7 @@ pub struct SortSnapshotRequest {
 
 /// One search.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchRequest {
     pub query: ParsedQuery,
     /// Optional scope folder (es `-path`): an absolute path with `.` and `..`
@@ -148,6 +148,7 @@ pub struct SearchRequest {
 
 /// What a [`SearchRequest`] asks for.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum Returns {
     /// The matches, as [`Response::Results`] pages.
     Rows(Rows),
@@ -169,28 +170,14 @@ pub enum Returns {
 /// Which matches a [`Returns::Rows`] search returns, in what order, and with
 /// which values.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Rows {
     pub sort: SortSpec,
     /// Number of leading matches to skip (pagination).
     pub offset: u32,
     /// Maximum matches to return; `None` = all.
     pub limit: Option<u32>,
-    /// Populate [`ResultItem::size`] (skip the lookup otherwise).
-    pub want_size: bool,
-    /// Populate [`ResultItem::mtime_ft`] (skip the lookup otherwise).
-    pub want_mtime: bool,
-    /// Populate [`ResultItem::created_ft`].
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub want_created: bool,
-    /// Populate [`ResultItem::attributes`].
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub want_attributes: bool,
-    /// Populate [`ResultItem::identity`].
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub want_identity: bool,
-    /// Fill [`QueryResults::sums`].
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub want_sums: bool,
+    pub wants: Vec<Want>,
 }
 
 impl Rows {
@@ -201,9 +188,28 @@ impl Rows {
             sort: self.sort,
             offset: self.offset,
             limit: self.limit,
-            sums: self.want_sums,
+            sums: self.wants.contains(&Want::Sums),
         }
     }
+}
+
+/// A value that a request asks the results pages to carry beyond each row's
+/// path and whether it is a folder. The daemon looks up only what is asked
+/// for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Want {
+    /// [`ResultItem::size`].
+    Size,
+    /// [`ResultItem::mtime_ft`].
+    DateModified,
+    /// [`ResultItem::created_ft`].
+    DateCreated,
+    /// [`ResultItem::attributes`].
+    Attributes,
+    /// [`ResultItem::identity`].
+    Identity,
+    /// [`QueryResults::sums`].
+    Sums,
 }
 
 /// A server→client message.
@@ -235,6 +241,11 @@ pub enum Response {
         /// The rows it holds, a gone row counted.
         total: u64,
     },
+    /// The parts of the request that the daemon could not read, so it
+    /// answers without them; the answer follows. A skipped query term is
+    /// named by its [`Test`](crate::query::Test) variant, and a skipped
+    /// [`Want`] by its own name.
+    Skipped { parts: Vec<String> },
     /// Reply to [`Request::CountIncluded`].
     IncludedCount {
         /// The entries every indexed volume would keep. A volume that the
@@ -270,7 +281,7 @@ pub struct QueryResults {
     /// `--json` prints it and scripts may read it.
     pub generation: u64,
     /// Every match's files and folders and their sizes, when the request
-    /// asked for them with [`Rows::want_sums`] and the daemon knows them.
+    /// asked for them with [`Want::Sums`] and the daemon knows them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sums: Option<MatchSums>,
 }
@@ -569,6 +580,11 @@ pub enum ProtoError {
     /// dropped, or a volume's index was replaced since the search; a new
     /// search answers instead.
     ResultSnapshotGone,
+    /// A part of the request that only a newer daemon reads, such as a new
+    /// kind of request, `Returns` or sort key, or a new field of a request
+    /// type that refuses unknown fields. The message is the part's path in
+    /// the request, such as `Search.returns.Rows.sort`.
+    UnknownRequest,
 }
 
 #[cfg(test)]
@@ -599,11 +615,7 @@ mod tests {
             id,
             offset: 1,
             limit: None,
-            want_size: true,
-            want_mtime: false,
-            want_created: false,
-            want_attributes: false,
-            want_identity: false,
+            wants: vec![Want::Size],
         }));
     }
 
@@ -754,6 +766,7 @@ mod tests {
             ProtoError::BadQuery,
             ProtoError::Unsupported,
             ProtoError::Overflow,
+            ProtoError::UnknownRequest,
         ] {
             rt_response(&Response::Error {
                 code,

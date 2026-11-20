@@ -79,7 +79,8 @@ mod gozlerd {
                         scope: Some(scope(&status, folder)?),
                         returns: Returns::Totals,
                     };
-                    let totals = client.totals(request).ok()?;
+                    // A query with no clauses has no part to skip.
+                    let (totals, _) = client.totals(request).ok()?;
                     let exact = !totals.volumes_incomplete && !totals.metadata_pending;
                     exact.then_some(Total {
                         items: totals.count,

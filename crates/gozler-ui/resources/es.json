@@ -167,6 +167,7 @@
     "volume_offline": "{0} está sin conexión. Puede que los resultados estén incompletos.",
     "volume_failed": "No se pudo indexar {0}. Puede que los resultados estén incompletos.",
     "metadata": "Se desconocen algunos tamaños y fechas de {0}.",
+    "skipped": "El servicio omitió {0}, que solo lee una versión más reciente. Puede que los resultados estén incompletos.",
     "update_available": "Gozler {0} está disponible. Selecciona para actualizar.",
     "service_memory": "Servicio {0}",
     "ui_memory": "Interfaz {0}",
@@ -328,6 +329,7 @@
     "not_gozler": "Otro programa respondió en lugar del servicio Gozler, así que la búsqueda no se conectó. Reinicia Windows para que el servicio se inicie primero y vuelve a buscar.",
     "too_old": "El servicio no está actualizado, así que no puedes buscar.",
     "refused": "El servicio no puede ejecutar esta búsqueda. Cámbiala y vuelve a intentarlo.\n\n{0}",
+    "unreadable": "Esta búsqueda necesita una versión más reciente del servicio.\n\n{0}",
     "lost": "Se perdió la conexión con el servicio. Volviendo a conectar…"
   },
   "fix": {
