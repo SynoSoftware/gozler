@@ -249,7 +249,9 @@ impl DirPaths {
 
     /// Appends entry `idx`'s name to the path in `out`, after a separator
     /// unless the path is empty, and counts it in `ancestry`'s length when
-    /// the paths count lengths.
+    /// the paths count lengths. Inline, because every candidate of a path
+    /// query appends its name, and the compiler otherwise makes it a call.
+    #[inline(always)]
     fn push_name(
         &self,
         index: &VolumeIndex,
