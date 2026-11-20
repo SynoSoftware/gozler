@@ -145,9 +145,12 @@ fn fold_accents_non_ascii(bytes: &[u8], out: &mut Vec<u8>) {
 
 /// Appends decomposed lowercase `c` to `run` without its accent: a
 /// diacritical mark after a letter is dropped, and a letter that carries its
-/// accent inside it is spelled without it.
+/// accent inside it is spelled without it. Only a starter counts as the
+/// letter: composition reorders the marks before the first starter, so a
+/// mark kept there could follow another mark in the folded text, and
+/// folding that text again would drop it.
 fn push_without_accent(run: &mut SmallVec<[char; 256]>, c: char) {
-    if is_diacritic(c) && !run.is_empty() {
+    if is_diacritic(c) && run.iter().any(|&r| canonical_combining_class(r) == 0) {
         return;
     }
     match without_accent(c) {
