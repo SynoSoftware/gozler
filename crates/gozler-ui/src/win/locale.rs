@@ -7,11 +7,12 @@ use crate::core::text::Numbers;
 use crate::core::viewer::CodePage;
 use windows::Win32::Foundation::SYSTEMTIME;
 use windows::Win32::Globalization::{
-    CP_ACP, CP_OEMCP, CP_UTF8, CPINFO, DATE_SHORTDATE, GetACP, GetCPInfo, GetDateFormatEx,
+    CP_ACP, CP_OEMCP, CP_UTF8, CPINFO, ENUM_DATE_FORMATS_FLAGS, GetACP, GetCPInfo, GetDateFormatEx,
     GetLocaleInfoEx, GetNumberFormatEx, GetOEMCP, GetTimeFormatEx, GetUserPreferredUILanguages,
     LOCALE_ILZERO, LOCALE_INEGNUMBER, LOCALE_RETURN_NUMBER, LOCALE_SDECIMAL, LOCALE_SGROUPING,
-    LOCALE_STHOUSAND, MUI_LANGUAGE_NAME, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar,
-    NUMBERFMTW, TIME_FORMAT_FLAGS, TIME_NOSECONDS, WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
+    LOCALE_SSHORTDATE, LOCALE_SSHORTTIME, LOCALE_STHOUSAND, LOCALE_STIMEFORMAT, MUI_LANGUAGE_NAME,
+    MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar, NUMBERFMTW, TIME_FORMAT_FLAGS,
+    WC_NO_BEST_FIT_CHARS, WideCharToMultiByte,
 };
 use windows::core::{BOOL, PCSTR, PCWSTR, PWSTR};
 
@@ -151,8 +152,8 @@ fn decode(code_page: u32, bytes: &[u8]) -> String {
     }
 }
 
-/// The user's regional number format, read when created; a change to the
-/// regional format needs a new one.
+/// The user's regional number, date and time formats, read when created; a
+/// change to the regional format needs a new one.
 #[derive(Clone)]
 pub(crate) struct WindowsNumbers {
     leading_zero: u32,
@@ -161,11 +162,18 @@ pub(crate) struct WindowsNumbers {
     decimal: Vec<u16>,
     decimal_text: String,
     thousand: Vec<u16>,
+    /// The short date, the short time and the time with seconds, each
+    /// [`two_digits`].
+    short_date: Vec<u16>,
+    short_time: Vec<u16>,
+    long_time: Vec<u16>,
 }
 
 impl WindowsNumbers {
     pub(crate) fn new() -> WindowsNumbers {
         let decimal = locale_text(LOCALE_SDECIMAL).unwrap_or_else(|| ".".to_owned());
+        let picture =
+            |kind, fallback: &str| wide(&two_digits(&locale_text(kind).unwrap_or(fallback.into())));
         WindowsNumbers {
             leading_zero: locale_number(LOCALE_ILZERO).unwrap_or(1),
             grouping: grouping(&locale_text(LOCALE_SGROUPING).unwrap_or_else(|| "3;0".to_owned())),
@@ -173,7 +181,27 @@ impl WindowsNumbers {
             decimal: wide(&decimal),
             decimal_text: decimal,
             thousand: wide(&locale_text(LOCALE_STHOUSAND).unwrap_or_else(|| ",".to_owned())),
+            short_date: picture(LOCALE_SSHORTDATE, "yyyy-MM-dd"),
+            short_time: picture(LOCALE_SSHORTTIME, "HH:mm"),
+            long_time: picture(LOCALE_STIMEFORMAT, "HH:mm:ss"),
         }
+    }
+
+    /// A FILETIME in the short date and the time picture `clock`; empty for
+    /// a time that `jiff` cannot hold.
+    fn format_filetime(&self, filetime: i64, clock: &[u16]) -> String {
+        let Ok(at) =
+            jiff::Timestamp::from_millisecond(gozler_core::output::filetime_to_unix_ms(filetime))
+        else {
+            return String::new();
+        };
+        let local = at.to_zoned(gozler_winfs::local_time_zone()).datetime();
+        let time = system_time(local);
+        format!(
+            "{} {}",
+            format_date(&time, &self.short_date),
+            format_time(&time, clock)
+        )
     }
 
     /// `value`, written with `.` and no grouping, in the regional format
@@ -219,22 +247,21 @@ impl Numbers for WindowsNumbers {
     }
 
     fn date_time(&self, filetime: i64) -> String {
-        date_time(filetime, TIME_NOSECONDS)
+        self.format_filetime(filetime, &self.short_time)
     }
 
     fn date_time_seconds(&self, filetime: i64) -> String {
-        date_time(filetime, TIME_FORMAT_FLAGS(0))
+        self.format_filetime(filetime, &self.long_time)
     }
 
     fn date(&self, date: jiff::civil::Date) -> String {
-        short_date(&system_time(
-            date.to_datetime(jiff::civil::Time::midnight()),
-        ))
+        let midnight = system_time(date.to_datetime(jiff::civil::Time::midnight()));
+        format_date(&midnight, &self.short_date)
     }
 
     fn time(&self, time: jiff::civil::Time) -> String {
         let day = jiff::civil::Date::constant(2000, 1, 1).to_datetime(time);
-        short_time(&system_time(day), TIME_NOSECONDS)
+        format_time(&system_time(day), &self.short_time)
     }
 
     fn decimal_separator(&self) -> &str {
@@ -242,34 +269,46 @@ impl Numbers for WindowsNumbers {
     }
 }
 
-/// A FILETIME in the short date and the time format with `time_flags`;
-/// empty for a time that `jiff` cannot hold.
-fn date_time(filetime: i64, time_flags: TIME_FORMAT_FLAGS) -> String {
-    let Ok(at) =
-        jiff::Timestamp::from_millisecond(gozler_core::output::filetime_to_unix_ms(filetime))
-    else {
-        return String::new();
-    };
-    let local = at.to_zoned(gozler_winfs::local_time_zone()).datetime();
-    let time = system_time(local);
-    format!("{} {}", short_date(&time), short_time(&time, time_flags))
+/// A Windows date or time picture with two digits for each day, month and
+/// hour, so that the dates in a column line up and read at a glance:
+/// `M/d/yyyy h:mm tt` becomes `MM/dd/yyyy hh:mm tt`. Text in single quotes
+/// is literal and stays.
+fn two_digits(picture: &str) -> String {
+    let mut padded = String::with_capacity(picture.len() + 4);
+    let mut quoted = false;
+    let mut chars = picture.chars().peekable();
+    while let Some(c) = chars.next() {
+        padded.push(c);
+        if c == '\'' {
+            quoted = !quoted;
+        } else if !quoted && matches!(c, 'd' | 'M' | 'h' | 'H') {
+            if chars.peek() == Some(&c) {
+                while let Some(same) = chars.next_if_eq(&c) {
+                    padded.push(same);
+                }
+            } else {
+                padded.push(c);
+            }
+        }
+    }
+    padded
 }
 
-/// `time`'s time of day in the user's time format with `time_flags`.
-fn short_time(time: &SYSTEMTIME, time_flags: TIME_FORMAT_FLAGS) -> String {
-    let mut clock = [0u16; 64];
-    // SAFETY: `time` is a complete SYSTEMTIME; the call writes at most its
-    // buffer's length.
-    let clock_len = unsafe {
+/// `time`'s time of day in the time picture `clock`.
+fn format_time(time: &SYSTEMTIME, clock: &[u16]) -> String {
+    let mut buffer = [0u16; 64];
+    // SAFETY: `time` is a complete SYSTEMTIME and `clock` ends with a NUL;
+    // the call writes at most the buffer's length.
+    let written = unsafe {
         GetTimeFormatEx(
             PCWSTR::null(),
-            time_flags,
+            TIME_FORMAT_FLAGS(0),
             Some(time),
-            PCWSTR::null(),
-            Some(&mut clock),
+            PCWSTR(clock.as_ptr()),
+            Some(&mut buffer),
         )
     };
-    text(&clock, clock_len)
+    text(&buffer, written)
 }
 
 fn system_time(local: jiff::civil::DateTime) -> SYSTEMTIME {
@@ -285,17 +324,18 @@ fn system_time(local: jiff::civil::DateTime) -> SYSTEMTIME {
     }
 }
 
-/// `time`'s day in the user's short date format.
-fn short_date(time: &SYSTEMTIME) -> String {
-    let mut date = [0u16; 64];
-    // SAFETY: `time` is a complete SYSTEMTIME; the call writes at most the
-    // buffer's length.
+/// `time`'s day in the date picture `picture`.
+fn format_date(time: &SYSTEMTIME, picture: &[u16]) -> String {
+    let mut date = [0u16; 128];
+    // SAFETY: `time` is a complete SYSTEMTIME and `picture` ends with a NUL;
+    // the call writes at most the buffer's length. With a picture, the
+    // flags must be 0.
     let written = unsafe {
         GetDateFormatEx(
             PCWSTR::null(),
-            DATE_SHORTDATE,
+            ENUM_DATE_FORMATS_FLAGS(0),
             Some(time),
-            PCWSTR::null(),
+            PCWSTR(picture.as_ptr()),
             Some(&mut date),
             PCWSTR::null(),
         )
@@ -324,7 +364,8 @@ fn grouping(text: &str) -> u32 {
 }
 
 fn locale_text(kind: u32) -> Option<String> {
-    let mut buffer = [0u16; 16];
+    // 80 is the longest date or time picture Windows stores.
+    let mut buffer = [0u16; 80];
     // SAFETY: the user's default locale; the call writes at most the
     // buffer's length.
     let written = unsafe { GetLocaleInfoEx(PCWSTR::null(), kind, Some(&mut buffer)) };
@@ -375,4 +416,20 @@ pub(crate) fn display_languages() -> Vec<String> {
         .filter(|tag| !tag.is_empty())
         .map(String::from_utf16_lossy)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::two_digits;
+
+    /// Each single day, month and hour gets a second digit; a longer run,
+    /// such as a month name, and quoted text stay.
+    #[test]
+    fn a_picture_gets_two_digits() {
+        assert_eq!(two_digits("M/d/yyyy h:mm tt"), "MM/dd/yyyy hh:mm tt");
+        assert_eq!(
+            two_digits("dddd d 'de' MMMM H'h'mm"),
+            "dddd dd 'de' MMMM HH'h'mm"
+        );
+    }
 }
