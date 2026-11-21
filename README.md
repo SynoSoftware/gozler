@@ -23,6 +23,7 @@ and destination in view.
 
 **[Download Gozler for Windows x64](https://github.com/SynoSoftware/gozler/releases/latest)**
 · [What's new](https://github.com/SynoSoftware/gozler/releases)
+· [Gozler website](https://synapse.sr/gozler)
 
 ![Instant file search with filters and the selected file's details](docs/images/search.png)
 
@@ -209,7 +210,7 @@ File operations run with your own permissions. Read the
 [Build from source](docs/BUILDING.md) · [Design](docs/DESIGN.md) ·
 [Report an issue](https://github.com/SynoSoftware/gozler/issues)
 
-[Synapse N.V.](http://synapse.sr) develops Gozler at
+[Synapse N.V.](https://synapse.sr) develops Gozler at
 [SynoSoftware/gozler](https://github.com/SynoSoftware/gozler).
 It began as a fork of [goz v0.2.0](https://github.com/mustafaahci/goz)
 by Mustafa Ahci, who created the original index, daemon and historical
