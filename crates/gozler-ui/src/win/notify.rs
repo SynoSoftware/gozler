@@ -25,9 +25,10 @@ use windows::Win32::UI::Controls::{
     LVIR_BOUNDS, LVIR_ICON, LVIR_LABEL, LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_OVERLAYMASK,
     LVIS_SELECTED, LVITEMW, LVM_GETITEMRECT, LVM_GETITEMW, LVM_GETSUBITEMRECT, LVN_BEGINDRAG,
     LVN_BEGINRDRAG, LVN_COLUMNCLICK, LVN_GETDISPINFOW, LVN_GETINFOTIPW, LVN_ITEMACTIVATE,
-    LVN_ITEMCHANGED, LVN_ODCACHEHINT, LVN_ODFINDITEMW, LVN_ODSTATECHANGED, NM_CLICK, NM_CUSTOMDRAW,
-    NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMHDR, NMHEADERW, NMLISTVIEW, NMLVCACHEHINT,
-    NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW, NMLVODSTATECHANGE, NMMOUSE,
+    LVN_ITEMCHANGED, LVN_ITEMCHANGING, LVN_ODCACHEHINT, LVN_ODFINDITEMW, LVN_ODSTATECHANGED,
+    NM_CLICK, NM_CUSTOMDRAW, NM_DBLCLK, NM_KILLFOCUS, NM_RCLICK, NM_SETFOCUS, NMHDR, NMHEADERW,
+    NMLISTVIEW, NMLVCACHEHINT, NMLVCUSTOMDRAW, NMLVDISPINFOW, NMLVGETINFOTIPW, NMLVODSTATECHANGE,
+    NMMOUSE,
 };
 use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
 
@@ -114,6 +115,10 @@ pub(crate) enum ListNotify<'a> {
     /// a Shift+click. The handler reads the selection once per user action
     /// (DESIGN.md: The selection).
     SelectionChanged(RowsChange),
+    /// A click or a key of the list's own is about to change the selection
+    /// or the focused row, which an answer of 1 refuses
+    /// ([`ListView::ask_before_selecting`]).
+    SelectionChanging,
     /// The focused row changed, and the selection did not.
     FocusChanged,
     /// A double-click on a row.
@@ -235,6 +240,7 @@ impl ListView {
                         ListNotify::Other
                     }
                 }
+                LVN_ITEMCHANGING => ListNotify::SelectionChanging,
                 LVN_ODSTATECHANGED => {
                     let change = &*pointer.cast::<NMLVODSTATECHANGE>();
                     if selection_changed(change.uNewState.0, change.uOldState.0) {

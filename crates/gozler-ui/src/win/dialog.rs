@@ -34,11 +34,11 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_EDITCHANGE, CBN_SELCHANGE,
     CBN_SELENDOK, CBS_DROPDOWN, CreateDialogParamW, DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS,
-    EN_SETFOCUS, EndDialog, EnumChildWindows, GWL_STYLE, GetDlgCtrlID, GetDlgItem, GetParent,
-    GetWindowLongPtrW, IDCANCEL, IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE,
-    MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX,
-    WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE,
-    WM_TIMER,
+    EN_SETFOCUS, EN_UPDATE, EndDialog, EnumChildWindows, GWL_STYLE, GetDlgCtrlID, GetDlgItem,
+    GetParent, GetWindowLongPtrW, IDCANCEL, IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
+    MESSAGEBOX_STYLE, MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW,
+    WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG,
+    WM_NOTIFY, WM_SIZE, WM_TIMER,
 };
 use windows::core::{BOOL, HRESULT, HSTRING, PCWSTR};
 
@@ -64,6 +64,12 @@ pub(crate) enum DialogMessage {
     /// box's or a hotkey control's text, a list's selection, or a date
     /// picker's date or check box.
     Edited {
+        id: u16,
+    },
+    /// The edit control `id` is about to draw a change of its text
+    /// (`EN_UPDATE`): a handler that refuses the change puts the text back
+    /// here, before it shows, which `Edited` comes too late for.
+    Updating {
         id: u16,
     },
     /// The person chose the selected item of the drop-down list `id`
@@ -309,6 +315,7 @@ unsafe extern "system" fn procedure<D: DialogProc>(
                 CBN_SELCHANGE if is_editable_combo(control) => DialogMessage::Picked { id },
                 // A list box's LBN_SELCHANGE is a combo box's CBN_SELCHANGE.
                 EN_CHANGE | CBN_SELCHANGE => DialogMessage::Edited { id },
+                EN_UPDATE if control.is_class("Edit") => DialogMessage::Updating { id },
                 CBN_SELENDOK => DialogMessage::Chosen { id },
                 // A button's BN_DOUBLECLICKED has CBN_EDITCHANGE's code.
                 CBN_EDITCHANGE if control.is_class("ComboBox") => DialogMessage::Edited { id },
@@ -478,6 +485,7 @@ unsafe extern "system" fn procedure<D: DialogProc>(
         | DialogMessage::Tree { .. }
         | DialogMessage::RowDragged { .. }
         | DialogMessage::Picked { .. }
+        | DialogMessage::Updating { .. }
         | DialogMessage::Other => None,
     };
     if running.state.message(dialog, message) {

@@ -12,6 +12,10 @@ pub(crate) mod watchdog;
 pub(crate) const SESSION_FINALIZATION: Duration = Duration::from_secs(2);
 pub(crate) const INLINE_ITEMS: usize = 1_000;
 pub(crate) const SLOW: Duration = Duration::from_secs(3);
+/// How long work runs before the window shows its busy text or progress
+/// bar, so work that ends sooner shows only its result and nothing
+/// flashes. A control is disabled, and Cancel offered, only at [`SLOW`].
+pub(crate) const BUSY: Duration = Duration::from_millis(300);
 const BACKGROUND_LIMIT: Duration = Duration::from_secs(10);
 
 pub(crate) fn source_completion_wait(elapsed: Duration) -> Duration {

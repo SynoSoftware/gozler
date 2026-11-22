@@ -186,7 +186,6 @@
     "size_with_unknown": "{0}, {1}",
     "sizes_unknown_one": "{0} desconocido",
     "sizes_unknown_other": "{0} desconocidos",
-    "reading": "Leyendo la selección…",
     "exporting_one": "Exportando… {0} fila",
     "exporting_other": "Exportando… {0} filas",
     "exported_one": "Se exportó {0} fila a {1}",

@@ -8,10 +8,18 @@ use std::sync::Arc;
 pub(crate) enum Preview {
     #[default]
     Empty,
-    Comparing(OperationId),
+    /// A comparison runs. `shown` is the one before it, whose rows the list
+    /// keeps until the new rows arrive, so Compare again never empties it.
+    Comparing {
+        id: OperationId,
+        shown: Option<Arc<Comparison>>,
+    },
     Committing {
         id: OperationId,
         comparison: Arc<Comparison>,
+        /// The source and the destination it commits, which the path boxes
+        /// show until it ends.
+        roots: [String; 2],
     },
     Ready {
         id: OperationId,
@@ -24,18 +32,22 @@ impl Preview {
     pub(crate) fn id(&self) -> Option<OperationId> {
         match self {
             Self::Empty => None,
-            Self::Comparing(id)
-            | Self::Failed(id)
+            Self::Failed(id)
+            | Self::Comparing { id, .. }
             | Self::Ready { id, .. }
             | Self::Committing { id, .. } => Some(*id),
         }
     }
 
+    /// The comparison whose rows the list shows.
     pub(crate) fn comparison(&self) -> Option<&Comparison> {
         match self {
-            Self::Ready { comparison, .. } | Self::Committing { comparison, .. } => {
-                Some(comparison)
-            }
+            Self::Ready { comparison, .. }
+            | Self::Committing { comparison, .. }
+            | Self::Comparing {
+                shown: Some(comparison),
+                ..
+            } => Some(comparison),
             _ => None,
         }
     }

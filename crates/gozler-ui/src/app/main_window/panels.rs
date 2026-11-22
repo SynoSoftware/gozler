@@ -52,7 +52,7 @@ const SETTLE_MS: u32 = 500;
 /// the new listing replaces it in one update, so the list never shows empty
 /// in between; a listing that takes longer than this shows the new folder
 /// reading (DESIGN.md: A panel).
-const READING_MS: u32 = 250;
+const READING_MS: u32 = crate::core::work::BUSY.as_millis() as u32;
 
 /// gozlerd applies a change from the volume's journal after the disk has
 /// it, so a panel asks for its sizes once more this long after an
@@ -167,6 +167,7 @@ impl PanelControls {
             column_sizing: std::cell::RefCell::new(ColumnSizing::new(true)),
         };
         controls.list.focus_on_click()?;
+        controls.list.ask_before_selecting()?;
         // The panel's fills give the widths.
         for (index, column) in PanelColumn::FOLDER.into_iter().enumerate() {
             controls.list.insert_column(
@@ -1557,9 +1558,6 @@ impl Panels {
         // is used.
         hwnd.show_focus_cues();
         let c = self.panel(side);
-        if target == c.list.hwnd() && !target.is_enabled() {
-            return true;
-        }
         let action = (key == PanelKey::Back).then_some(QuickAction::Back);
         match self.quick_key(window, side, action) {
             Some(true) => return true,
@@ -1599,6 +1597,9 @@ impl Panels {
                     .leave_on_escape(side, selected);
                 match ask {
                     Some(ask) => self.read(window, side, Some(ask)),
+                    // A command that waits keeps the selection it was given
+                    // on (DESIGN.md: window rule 10).
+                    None if window.selection_command_pending(List::Panel(side)) => {}
                     None => c.list.deselect_all(),
                 }
             }
@@ -1607,7 +1608,10 @@ impl Panels {
             PanelKey::ToList => {
                 c.list.hwnd().focus();
                 let count = window.model.borrow().panels().panel(side).count();
-                if c.list.focused().is_none() && count > 0 {
+                if c.list.focused().is_none()
+                    && count > 0
+                    && !window.selection_command_pending(List::Panel(side))
+                {
                     c.list.set_focused(Some(0));
                 }
             }
@@ -1666,6 +1670,10 @@ impl Panels {
     /// Focuses `row` of `side`, which quick search went to, as a cursor key
     /// would, and keeps the selection.
     pub(super) fn quick_go(&self, window: &MainWindow, side: Side, row: u64) {
+        // A command that waits keeps the focused row it was given on.
+        if window.selection_command_pending(List::Panel(side)) {
+            return;
+        }
         self.panel(side).list.set_focused(Some(row));
         self.read_selection(window, side, false);
     }
@@ -1917,6 +1925,11 @@ impl Panels {
                 window.rows_drawn(List::Panel(side));
                 Some(LRESULT(0))
             }
+            // A command waits for the rows and the focused row it was given
+            // on, which a new order would move, so the click does nothing.
+            ListNotify::ColumnClick(_) if window.selection_command_pending(List::Panel(side)) => {
+                Some(LRESULT(0))
+            }
             ListNotify::ColumnClick(index) => {
                 self.close_quick_search_of(window, side);
                 let column = self.panel(side).columns().get(index);
@@ -1947,6 +1960,10 @@ impl Panels {
                 self.list_changed(hwnd, side, ListChanged::Selection);
                 None
             }
+            // A command waits for the selection it was given on.
+            ListNotify::SelectionChanging => Some(LRESULT(isize::from(
+                window.selection_command_pending(List::Panel(side)),
+            ))),
             ListNotify::FocusChanged => {
                 if window.native_update_active(List::Panel(side)) {
                     return None;
@@ -2490,7 +2507,10 @@ impl Panels {
         let Some((request, outcome)) = ended else {
             return;
         };
-        if outcome.succeeded {
+        // A command that waits there when the operation ends is the
+        // person's since it was submitted, so its entries are not selected
+        // again, and the command keeps the selection it was given on.
+        if outcome.succeeded || window.selection_command_pending(List::Panel(side)) {
             window.model.borrow_mut().panels_mut().forget_reselect(side);
             return;
         }
@@ -2528,7 +2548,9 @@ impl Panels {
             if reselects {
                 window.model.borrow_mut().panels_mut().forget_reselect(side);
             }
-            self.show_place(window, side, &shown, &place, Scroll::Keep, false);
+            // A command given while the rule ran waits for its selection
+            // and runs on it, in the order the person gave them.
+            self.show_place(window, side, &shown, &place, Scroll::Keep, true);
             if let Some((named, found)) = named.filter(|(named, found)| found < named)
                 && !reselects
             {
@@ -2540,7 +2562,9 @@ impl Panels {
                 window.defer(hwnd, restored);
             }
         } else {
-            window.cancel_matching_selection(List::Panel(side));
+            // The rows changed under the rule, so its selection never
+            // exists, nor does the selection of a command that waits for it.
+            window.abandon_matching_selection(List::Panel(side));
             self.reselect_unfinished(window, side);
         }
         window.retire_model();

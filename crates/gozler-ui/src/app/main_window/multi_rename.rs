@@ -21,7 +21,7 @@ use crate::core::multi_rename::{
 use crate::core::panel::{self, CommandPlace, Side};
 use crate::core::settings::{DialogSize, History, Mode, MultiRenameState, SavedRename};
 use crate::core::text::{Numbers, SizeFormat, Strings};
-use crate::core::work::{Replacement, Retirement};
+use crate::core::work::{self, Replacement, Retirement};
 use crate::win::controls::{
     Button, CheckBox, ComboBox, DropDownList, ListColumn, ListView, Tooltip, UpDown,
     set_accessible_name,
@@ -43,6 +43,7 @@ use std::ffi::OsString;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// The batches Undo reverses.
 const UNDO_BATCHES: usize = 20;
@@ -58,6 +59,8 @@ const SAVED_ACTION: usize = 3;
 /// The timer that opens Edit names with a names file once the dialog is
 /// free.
 const LOADED: usize = 4;
+/// The timer that shows names still computed as slow ([`Names::Updating`]).
+const NAMES: usize = 5;
 /// The entries one read of dates taken reads, so the status line counts.
 const DATES_CHUNK: usize = 64;
 
@@ -319,7 +322,7 @@ impl Shown {
             fields: Fields::default(),
             rows: Arc::new(rows),
             outcomes: Vec::new(),
-            names: Names::Updating,
+            names: Names::Updating(Instant::now()),
             edited: false,
             dates: Dates::Unread,
             sorted: None,
@@ -344,6 +347,18 @@ impl Shown {
 
     fn can_rename(&self) -> bool {
         self.batch.is_none() && self.current() && Counts::of(&self.outcomes).renamed > 0
+    }
+
+    /// Whether Start! and Next step show enabled: as [`Self::can_rename`]
+    /// says, and for the earlier names while new ones are computed for less
+    /// than [`work::SLOW`], so a quick computation never dims them; `rename`
+    /// and `next_step` refuse them meanwhile.
+    fn shows_rename(&self) -> bool {
+        let waiting = matches!(self.names, Names::Updating(since) if since.elapsed() < work::SLOW)
+            && self.outcomes.len() == self.rows.len();
+        self.batch.is_none()
+            && (self.current() || waiting)
+            && Counts::of(&self.outcomes).renamed > 0
     }
 
     /// Whether the person can sort, move and remove rows: not while a batch
@@ -389,11 +404,23 @@ impl Shown {
 /// Where the names the list shows stand.
 enum Names {
     Current,
-    /// The work owner computes them, or dates taken are read first; the
-    /// list shows the earlier names.
-    Updating,
+    /// The work owner computes them since this moment, or dates taken are
+    /// read first; the list shows the earlier names. The status line says
+    /// so from [`work::BUSY`], and Start! is disabled from [`work::SLOW`].
+    Updating(Instant),
     /// The fields give no names.
     Failed(RuleError),
+}
+
+impl Names {
+    /// Marks the names as out of date. Names already computed keep the
+    /// moment they started, so a wait that shows stays as it shows while the
+    /// person types on.
+    fn outdate(&mut self) {
+        if !matches!(self, Self::Updating(_)) {
+            *self = Self::Updating(Instant::now());
+        }
+    }
 }
 
 /// The clipboard's text, which a mask with `[X]` waits for; read again
@@ -421,6 +448,7 @@ struct Batch {
     entries: u64,
     /// The index of each row the batch renames, in the request's order.
     submitted: Vec<usize>,
+    started: Instant,
 }
 
 struct Finished {
@@ -757,7 +785,7 @@ impl MultiRename<'_> {
             state.finished = None;
             // `Enter` comes before the timer, so Rename refuses the names
             // shown until they belong to the change.
-            state.names = Names::Updating;
+            state.names.outdate();
             state.clipboard = ClipboardText::Unread;
             state.load_failed = None;
             if state.rows.iter().any(|row| row.failed.is_some()) {
@@ -821,7 +849,7 @@ impl MultiRename<'_> {
         };
         let waits = (reads_dates && !matches!(self.state.borrow().dates, Dates::Read))
             || (reads_clipboard && clipboard.is_none());
-        self.state.borrow_mut().names = Names::Updating;
+        self.state.borrow_mut().names.outdate();
         if !waits {
             let state = self.state.borrow();
             let naming = Naming {
@@ -842,7 +870,36 @@ impl MultiRename<'_> {
             // A short list's names are ready at once.
             self.deliver(dialog);
         }
+        self.wait_for_names(dialog);
         self.show(dialog);
+    }
+
+    /// The names are still computed after [`work::BUSY`] or
+    /// [`work::SLOW`]: the status line and Start! show it.
+    fn names_waited(&self, dialog: Hwnd) {
+        self.show(dialog);
+        self.wait_for_names(dialog);
+    }
+
+    /// Wakes the dialog when the names that are computed reach the next
+    /// step of their wait, [`work::BUSY`] and then [`work::SLOW`], counted
+    /// from when they started. A timer that answers a moment early waits
+    /// again for the step it answered.
+    fn wait_for_names(&self, dialog: Hwnd) {
+        let ran = match self.state.borrow().names {
+            Names::Updating(since) => since.elapsed(),
+            Names::Current | Names::Failed(_) => work::SLOW,
+        };
+        let next = if ran < work::BUSY {
+            work::BUSY
+        } else {
+            work::SLOW
+        };
+        if ran < next {
+            dialog.set_timer(NAMES, (next - ran).as_millis().max(1) as u32);
+        } else {
+            dialog.kill_timer(NAMES);
+        }
     }
 
     /// Reads the dates taken of the next rows.
@@ -885,7 +942,7 @@ impl MultiRename<'_> {
         }
         if let Some((_, outcomes)) = names {
             let mut state = self.state.borrow_mut();
-            if outcomes.len() == state.rows.len() && matches!(state.names, Names::Updating) {
+            if outcomes.len() == state.rows.len() && matches!(state.names, Names::Updating(_)) {
                 state.outcomes = outcomes;
                 state.names = Names::Current;
             }
@@ -943,15 +1000,18 @@ impl MultiRename<'_> {
         }
     }
 
-    /// Shows the list, the status line and which controls work.
+    /// Shows the list, the status line and which controls work. A batch
+    /// that runs keeps the controls as they were, and `message` refuses
+    /// their input, until it has run [`work::SLOW`]; then they are disabled
+    /// and Close takes the focus, so a quick batch never dims them.
     fn show(&self, dialog: Hwnd) {
-        let (count, status, can_rename, running, edited, can_edit, results) = {
+        let (count, status, can_rename, ran, edited, can_edit, results) = {
             let state = self.state.borrow();
             (
                 state.rows.len() as u64,
                 self.status(&state),
-                state.can_rename(),
-                state.batch.is_some(),
+                state.shows_rename(),
+                state.batch.as_ref().map(|batch| batch.started.elapsed()),
                 state.edited,
                 state.can_edit_list(),
                 !state.results.is_empty(),
@@ -965,6 +1025,10 @@ impl MultiRename<'_> {
         {
             control.set_text(&status);
         }
+        let running = match ran {
+            Some(ran) if ran < work::SLOW => return,
+            ran => ran.is_some(),
+        };
         let regex = Self::checked(dialog, C::MultiRenameRegex);
         for id in FIELDS {
             if let Some(control) = dialog::item(dialog, id.id()) {
@@ -987,15 +1051,24 @@ impl MultiRename<'_> {
                 control.set_enabled(enabled);
             }
         }
+        // A disabled control keeps the focus but takes no key.
+        if running
+            && Hwnd::focused().is_some_and(|focused| !focused.is_enabled())
+            && let Some(close) = dialog::item(dialog, DialogItem::Cancel.id())
+        {
+            close.focus();
+        }
     }
 
-    /// The status line: what Rename will do, or what is under way.
+    /// The status line: what Rename will do, or what is under way once it
+    /// has run [`work::BUSY`], so a quick batch shows only its result.
     fn status(&self, state: &Shown) -> String {
         let numbers = &self.numbers;
         let count = |key: &str, count: usize, args: &[&str]| {
             self.strings.count(key, count as u64, numbers, args)
         };
-        if let Some(batch) = &state.batch {
+        let busy = (state.batch.as_ref()).filter(|batch| batch.started.elapsed() >= work::BUSY);
+        if let Some(batch) = busy {
             let (done, total) = match self.operations.operation(batch.id).map(|batch| batch.state) {
                 Some(State::Running(running)) => (
                     running.items,
@@ -1021,8 +1094,12 @@ impl MultiRename<'_> {
                 }
             };
         }
+        // Names that come within `work::BUSY` show only themselves: until
+        // then the line keeps the earlier names' counts, or says nothing.
+        let quiet = matches!(state.names, Names::Updating(since) if since.elapsed() < work::BUSY);
         if let Dates::Reading(read) = &state.dates
-            && matches!(state.names, Names::Updating)
+            && matches!(state.names, Names::Updating(_))
+            && !quiet
         {
             return self.strings.format(
                 "multi_rename.reading_dates",
@@ -1044,8 +1121,13 @@ impl MultiRename<'_> {
             }
             return parts.join(" ");
         }
-        if !state.current() {
-            return self.strings.text("multi_rename.updating").to_owned();
+        let earlier = quiet && state.outcomes.len() == state.rows.len();
+        if !state.current() && !earlier {
+            return if quiet {
+                String::new()
+            } else {
+                self.strings.text("multi_rename.updating").to_owned()
+            };
         }
         let counts = Counts::of(&state.outcomes);
         let renamed = numbers.integer(counts.renamed as u64);
@@ -1136,12 +1218,13 @@ impl MultiRename<'_> {
                 undo: false,
                 entries: submitted.len() as u64,
                 submitted,
+                started: Instant::now(),
             },
         );
     }
 
-    /// The batch runs: the fields, the list and Rename wait for it, and
-    /// Close keeps the focus, because the control that had it is disabled.
+    /// The batch runs: the fields, the list and Rename wait for it
+    /// (`message`, [`Self::show`]).
     fn start(&self, dialog: Hwnd, batch: Batch) {
         {
             let mut state = self.state.borrow_mut();
@@ -1151,9 +1234,6 @@ impl MultiRename<'_> {
         }
         dialog.set_timer(POLL, 200);
         self.show(dialog);
-        if let Some(close) = dialog::item(dialog, DialogItem::Cancel.id()) {
-            close.focus();
-        }
     }
 
     /// Puts the texts of the boxes with a history first in their
@@ -1318,6 +1398,7 @@ impl MultiRename<'_> {
                     undo: true,
                     entries: batch.len() as u64,
                     submitted: Vec::new(),
+                    started: Instant::now(),
                 },
             );
         }
@@ -1601,9 +1682,14 @@ impl MultiRename<'_> {
     }
 
     /// Save… or Delete…, which the person chose in the open list of Saved
-    /// renames, once the list has closed.
+    /// renames, once the list has closed. While a batch runs, which takes
+    /// no pick, the list shows the rename that applies again.
     fn run_saved(&self, dialog: Hwnd) {
         dialog.kill_timer(SAVED_ACTION);
+        if self.state.borrow().batch.is_some() {
+            self.show_saved(dialog);
+            return;
+        }
         let Some(index) = Self::saved_item(dialog) else {
             return;
         };
@@ -1746,7 +1832,7 @@ impl MultiRename<'_> {
             state.sorted = None;
             // The counter follows the list's order, so the names shown no
             // longer fit; a drag computes them again when it ends.
-            state.names = Names::Updating;
+            state.names.outdate();
         }
         if let Some(work) = self.work.borrow_mut().as_mut() {
             work.names.cancel();
@@ -1844,6 +1930,9 @@ impl MultiRename<'_> {
     /// A key pressed in the dialog, before the control has it.
     fn key(&self, dialog: Hwnd, target: Hwnd, keystroke: Keystroke) -> bool {
         let in_list = self.list.get().is_some_and(|list| list.hwnd() == target);
+        // A batch that runs takes no input but Close (`message`), so these
+        // keys, which each open or change something, do nothing meanwhile.
+        let batch = self.state.borrow().batch.is_some();
         match keystroke {
             Keystroke {
                 key: Key::Function(2),
@@ -1851,7 +1940,9 @@ impl MultiRename<'_> {
                 alt: false,
                 shift: false,
             } => {
-                if let Some(saved) = DropDownList::of_dialog(dialog, C::MultiRenameSaved.id()) {
+                if !batch
+                    && let Some(saved) = DropDownList::of_dialog(dialog, C::MultiRenameSaved.id())
+                {
                     saved.hwnd().focus();
                     saved.open();
                 }
@@ -1863,8 +1954,10 @@ impl MultiRename<'_> {
                 alt: false,
                 shift: false,
             } if in_list => {
-                self.remove_rows();
-                self.changed(dialog);
+                if !batch {
+                    self.remove_rows();
+                    self.changed(dialog);
+                }
                 true
             }
             Keystroke {
@@ -1873,6 +1966,9 @@ impl MultiRename<'_> {
                 alt: true,
                 shift: false,
             } if in_list => {
+                if batch {
+                    return true;
+                }
                 let Some(row) = self.list.get().and_then(|list| list.focused()) else {
                     return false;
                 };
@@ -1892,7 +1988,9 @@ impl MultiRename<'_> {
                 alt: false,
                 shift: false,
             } => {
-                self.next_step(dialog);
+                if !batch {
+                    self.next_step(dialog);
+                }
                 true
             }
             Keystroke {
@@ -1901,8 +1999,11 @@ impl MultiRename<'_> {
                 alt: false,
                 shift: false,
             } => {
-                // The key works when the names button does.
-                if dialog::item(dialog, C::MultiRenameNames.id()).is_some_and(Hwnd::is_enabled) {
+                // The key works when the names button does, which a batch
+                // leaves enabled for its first seconds.
+                if !batch
+                    && dialog::item(dialog, C::MultiRenameNames.id()).is_some_and(Hwnd::is_enabled)
+                {
                     self.names_menu(dialog);
                 }
                 true
@@ -1912,7 +2013,7 @@ impl MultiRename<'_> {
                 ctrl: false,
                 alt: false,
                 shift: true,
-            } => self.forget_text(dialog, target),
+            } => !batch && self.forget_text(dialog, target),
             _ => false,
         }
     }
@@ -2081,6 +2182,28 @@ impl DialogProc for MultiRename<'_> {
     }
 
     fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        // A batch that runs takes no input but Close, also before its
+        // controls are disabled (`show`); the names follow the fields when
+        // it ends.
+        let refused = match message {
+            DialogMessage::Command { id } => id != DialogItem::Cancel.id(),
+            DialogMessage::Edited { id } => id != C::MultiRenameList.id(),
+            DialogMessage::Picked { .. }
+            | DialogMessage::Chosen { .. }
+            | DialogMessage::RowDragged { .. }
+            | DialogMessage::ColumnClicked { .. }
+            | DialogMessage::ContextMenu { .. } => true,
+            _ => false,
+        };
+        if refused && self.state.borrow().batch.is_some() {
+            if matches!(message, DialogMessage::Edited { id } | DialogMessage::Chosen { id }
+                if id == C::MultiRenameSaved.id())
+            {
+                // Once the list has closed, it shows the rename that applies.
+                dialog.set_timer(SAVED_ACTION, 1);
+            }
+            return true;
+        }
         match message {
             DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
                 self.rename(dialog);
@@ -2177,6 +2300,10 @@ impl DialogProc for MultiRename<'_> {
             }
             DialogMessage::Timer { id: LOADED } => {
                 self.open_loaded(dialog);
+                true
+            }
+            DialogMessage::Timer { id: NAMES } => {
+                self.names_waited(dialog);
                 true
             }
             DialogMessage::Timer { id: SAVED_ACTION } => {

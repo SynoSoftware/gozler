@@ -29,6 +29,14 @@ pub(crate) struct Caption {
     pub(crate) summary_tip: String,
 }
 
+impl Caption {
+    /// Whether the transfer runs, which its Cancel tells: it waits, is
+    /// prepared, runs or is paused.
+    pub(crate) fn runs(&self) -> bool {
+        self.cancel.is_some()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Input {
     Toggle,

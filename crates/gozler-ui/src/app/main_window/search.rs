@@ -26,7 +26,7 @@ impl Search {
         message_buttons: [Button; 2],
         auto_fit: bool,
     ) -> windows::core::Result<Self> {
-        Ok(Self {
+        let search = Self {
             row,
             message: Label::create_message(parent, ControlId::Message.id())?,
             message_buttons,
@@ -37,7 +37,9 @@ impl Search {
             column_dragged: Cell::new(false),
             column_sizing: RefCell::new(ColumnSizing::new(auto_fit)),
             selection_pending: Cell::new(false),
-        })
+        };
+        search.list.ask_before_selecting()?;
+        Ok(search)
     }
 }
 
@@ -338,6 +340,12 @@ impl Search {
                 window.rows_drawn(List::Search);
                 Some(LRESULT(0))
             }
+            // A command waits for the rows it was given on, which a new
+            // order would clear, so the click does nothing, as a click on a
+            // row does then.
+            ListNotify::ColumnClick(_) if window.selection_command_pending(List::Search) => {
+                Some(LRESULT(0))
+            }
             ListNotify::ColumnClick(index) => {
                 let accepted = {
                     let mut model = window.model.borrow_mut();
@@ -408,6 +416,10 @@ impl Search {
                 }
                 None
             }
+            // A command waits for the selection it was given on.
+            ListNotify::SelectionChanging => Some(LRESULT(isize::from(
+                window.selection_command_pending(List::Search),
+            ))),
             // With no row selected, commands act on the focused row, which
             // the selection then reads (DESIGN.md: Selecting entries).
             ListNotify::FocusChanged => {

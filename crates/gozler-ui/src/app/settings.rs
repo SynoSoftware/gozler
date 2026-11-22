@@ -358,6 +358,9 @@ pub(super) struct SettingsDialog<'a> {
     /// Accepted settings work keeps its captured edits and continuation while
     /// the dialog remains usable; its command buttons wait for acknowledgment.
     saving: RefCell<Option<Awaited>>,
+    /// When the dialog first saw the save that runs, a step that follows
+    /// another included ([`Self::saving_for`]).
+    saving_since: Cell<Option<Instant>>,
     /// The Drives and service page's tooltip, whose fix buttons' tips
     /// follow their fix.
     index_tips: OnceCell<Tooltip>,
@@ -400,6 +403,7 @@ impl<'a> SettingsDialog<'a> {
             capture: Cell::new(None),
             resets: Cell::new(false),
             saving: RefCell::new(None),
+            saving_since: Cell::new(None),
             index_tips: OnceCell::new(),
             highlight: OnceCell::new(),
             status: OnceCell::new(),
@@ -1185,13 +1189,29 @@ impl<'a> SettingsDialog<'a> {
         let index = selected
             .and_then(|command| rows.iter().position(|row| row.command == command))
             .or((!rows.is_empty()).then_some(0));
-        let cells: Vec<[String; 2]> = rows
-            .iter()
-            .map(|row| [row.place.clone(), row.keys.clone()])
-            .collect();
+        let cells_of = |rows: &[CommandRow]| -> Vec<[String; 2]> {
+            rows.iter()
+                .map(|row| [row.place.clone(), row.keys.clone()])
+                .collect()
+        };
+        let cells = cells_of(rows.as_slice());
+        // The same commands, as after a shortcut changed, keep the list's
+        // scroll and selection: only the cells that changed are written.
+        let shown = {
+            let shown = self.commands.borrow();
+            (shown.len() == rows.len()
+                && shown
+                    .iter()
+                    .zip(&rows)
+                    .all(|(old, new)| old.command == new.command))
+            .then(|| cells_of(shown.as_slice()))
+        };
         self.commands.replace(rows);
         if let Some(list) = self.command_list() {
-            self.filling(|| list.set_rows(&cells, index));
+            match shown {
+                Some(shown) => self.filling(|| list.update_rows(&shown, &cells)),
+                None => self.filling(|| list.set_rows(&cells, index)),
+            }
         }
         self.fill_keys(0);
     }
@@ -1371,12 +1391,12 @@ impl<'a> SettingsDialog<'a> {
             let draft = self.draft.borrow();
             (draft.can_apply(), draft.shielded())
         };
-        let saving = self.saving.borrow().is_some();
+        let slow = self.save_slow();
         if let Some(apply) = dialog::item(dialog, ControlId::SettingsApply.id()) {
-            if saving {
+            if slow {
                 focus_off(dialog, apply);
             }
-            apply.set_enabled(changed && !saving);
+            apply.set_enabled(changed && !slow);
         }
         for button in [
             DialogItem::Ok.id(),
@@ -1384,10 +1404,10 @@ impl<'a> SettingsDialog<'a> {
             ControlId::SettingsResetAll.id(),
         ] {
             if let Some(button) = dialog::item(dialog, button) {
-                if saving {
+                if slow {
                     focus_off(dialog, button);
                 }
-                button.set_enabled(!saving);
+                button.set_enabled(!slow);
             }
         }
         if self.apply_shield.replace(Some(service_changed)) != Some(service_changed) {
@@ -1405,14 +1425,30 @@ impl<'a> SettingsDialog<'a> {
     }
 
     fn update_rebuild(&self, dialog: Hwnd) {
-        let saving = self.saving.borrow().is_some();
+        let slow = self.save_slow();
         let answers = self.index.borrow().as_ref().is_some_and(|c| c.has_report);
         if let Some(rebuild) = self.control(SettingsPage::Index, ControlId::IndexRebuild) {
-            if saving || !answers {
+            if slow || !answers {
                 focus_off(dialog, rebuild);
             }
-            rebuild.set_enabled(answers && !saving);
+            rebuild.set_enabled(answers && !slow);
         }
+    }
+
+    /// How long the save that runs has run. Its status shows from
+    /// [`work::BUSY`] and OK, Cancel, Apply, Reset all and Rebuild are
+    /// disabled from [`work::SLOW`], so a quick save flashes nothing;
+    /// `message` and `rebuild` refuse them meanwhile.
+    fn saving_for(&self, now: Instant) -> Option<std::time::Duration> {
+        let since =
+            (self.saving.borrow().is_some()).then(|| self.saving_since.get().unwrap_or(now));
+        self.saving_since.set(since);
+        since.map(|since| now.saturating_duration_since(since))
+    }
+
+    fn save_slow(&self) -> bool {
+        self.saving_for(Instant::now())
+            .is_some_and(|ran| ran >= work::SLOW)
     }
 
     fn show_status(&self, dialog: Hwnd) {
@@ -1422,9 +1458,11 @@ impl<'a> SettingsDialog<'a> {
         let now = Instant::now();
         let request = self.request_waiting(now);
         let fixing = self.main.fix_waiting(now);
+        let saving_for = self.saving_for(now);
         let (job, observed) = {
             let saving = self.saving.borrow();
-            match saving.as_ref() {
+            let shown = saving_for.is_some_and(|ran| ran >= work::BUSY);
+            match saving.as_ref().filter(|_| shown) {
                 Some(awaited) => {
                     let waiting = match awaited {
                         Awaited::Shortcut(applying) => Some(
@@ -1466,6 +1504,7 @@ impl<'a> SettingsDialog<'a> {
                         job,
                         fixing.is_some()
                             || request.is_some()
+                            || saving_for.is_some()
                             || self.main.settings.settings_waiting(self.main, now),
                     )
                 }
@@ -2795,8 +2834,10 @@ impl DialogProc for SettingsDialog<'_> {
                 self.show_status(dialog);
                 return true;
             }
+            // A save that turns slow disables the buttons, which
+            // `update_apply` decides; it shows the status too.
             DialogMessage::Timer { id: WAIT_TIMER } => {
-                self.show_status(dialog);
+                self.update_apply(dialog);
                 return true;
             }
             DialogMessage::Reply => {
@@ -2842,6 +2883,7 @@ impl DialogProc for SettingsDialog<'_> {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => return false,
         };
         if handled {
@@ -3063,6 +3105,7 @@ impl DialogProc for CommandShortcut<'_> {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }

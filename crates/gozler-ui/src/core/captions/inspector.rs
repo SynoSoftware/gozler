@@ -100,11 +100,15 @@ impl InspectorCaptions {
                 fields: Vec::new(),
                 inspected: Inspected::Several,
             },
-            Selection::Reading { .. } | Selection::Filtering { .. } => {
-                let reading = label("status.reading");
+            // The count of selected rows, as the status bar shows it; the
+            // size follows with the files, so no busy text flashes.
+            selection @ (Selection::Reading { .. } | Selection::Filtering { .. }) => {
+                let rows = selection
+                    .unread_rows()
+                    .expect("a selection that is read has rows");
                 InspectorCaptions {
-                    heading: reading.clone(),
-                    fields: vec![(label("inspector.total_size"), reading)],
+                    heading: strings.format("status.selected_only", &[&numbers.integer(rows)]),
+                    fields: vec![(label("inspector.total_size"), String::new())],
                     inspected: Inspected::Reading,
                 }
             }

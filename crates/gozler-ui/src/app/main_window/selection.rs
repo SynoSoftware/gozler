@@ -19,11 +19,13 @@ pub(super) struct NativeSelection {
     applying: bool,
     writing: bool,
     update: Option<NativeUpdate>,
-    action: Option<SelectionAction>,
+    /// A command that waits for the selection it was given on; the list
+    /// refuses the person's selection changes meanwhile
+    /// ([`MainWindow::selection_command_pending`]).
+    action: Option<Deferred>,
     matching: Option<MatchingSelection>,
     /// The last run of `Shift` with a cursor key ([`MainWindow::select_key`]).
     shift_run: Option<ShiftRun>,
-    restore_focus: bool,
     unhighlight: Option<Unhighlight>,
     unhighlighting: bool,
     /// The rows that Clear selection cleared in Search's list, which
@@ -99,6 +101,12 @@ struct NativeUpdate {
     focused: Option<u64>,
     anchor: Option<u64>,
     origin: Origin,
+    /// The focused row when the writes started; the writes never move it,
+    /// so another one at their end is where the person moved it.
+    focus_shown: Option<u64>,
+    /// The person changed the selection between two slices of the writes,
+    /// so the rest is not written and the list shows the person's choice.
+    superseded: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -107,6 +115,13 @@ pub(super) struct CommandContext {
     pub(super) list: List,
     pub(super) focus: Focus,
     key: CaptureKey,
+}
+
+#[derive(Clone, Copy)]
+struct Deferred {
+    action: SelectionAction,
+    /// When the person gave it, from which its wait turns slow.
+    since: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -180,14 +195,19 @@ impl MainWindow {
         self.native_selection(list).borrow().matching.is_some()
     }
 
+    /// Whether a command that reads or writes `list`'s selection is refused
+    /// and shown disabled. Only work that turned slow disables it: before
+    /// then `prepare_selection_command` defers the command until the work
+    /// ends, so fast work never dims the menus and the key bar.
     pub(super) fn selection_command_disabled(
         &self,
         list: List,
         item: MenuItem,
         focus: Focus,
     ) -> bool {
-        (self.selection_command_pending(list) || self.matching_selection_pending(list))
-            && (item.reads_selection(focus) || item.writes_selection(focus))
+        (item.reads_selection(focus) || item.writes_selection(focus))
+            && (self.selection_command_pending(list) || self.matching_selection_pending(list))
+            && self.slow_list_work(list).is_some()
     }
 
     pub(super) fn matching_selection_slow(&self, list: List) -> bool {
@@ -216,7 +236,9 @@ impl MainWindow {
                 kinds,
             },
         });
-        self.set_selection_enabled(list, false);
+        // The list stays enabled, because disabling it repaints it for the
+        // moment a rule takes; a selection the person changes meanwhile
+        // cancels the rule (`selection_changed`).
         self.continue_matching_selection(side);
         self.controls().key_bar.update_key_bar(self);
     }
@@ -264,8 +286,6 @@ impl MainWindow {
                 since,
                 phase: MatchingPhase::Running { id, key },
             });
-        } else {
-            self.set_selection_enabled(list, true);
         }
     }
 
@@ -301,15 +321,7 @@ impl MainWindow {
     }
 
     pub(super) fn cancel_matching_selection(&self, list: List) {
-        let ended = self.end_matching_selection(list);
-        if ended
-            && !self.native_update_active(list)
-            && !self.native_deselection_pending(list)
-            && !self.selection_command_pending(list)
-        {
-            self.set_selection_enabled(list, true);
-        }
-        if ended {
+        if self.end_matching_selection(list) {
             self.controls().key_bar.update_key_bar(self);
         }
     }
@@ -325,30 +337,9 @@ impl MainWindow {
             matches!(matching.phase, MatchingPhase::Running { id: current, .. } if current == id)
         });
         if current {
-            self.cancel_matching_selection(list);
+            self.abandon_matching_selection(list);
         }
         self.retire_selection(answer);
-    }
-
-    /// EnableWindow clears a disabled list's focus; only restore focus that
-    /// this update displaced, while the person has not focused another control.
-    fn set_selection_enabled(&self, list: List, enabled: bool) {
-        let control = self.list_control(list).hwnd();
-        if !enabled && Hwnd::focused() == Some(control) {
-            self.native_selection(list).borrow_mut().restore_focus = true;
-        }
-        control.set_enabled(enabled);
-        if enabled && control.is_enabled() {
-            let restore =
-                std::mem::take(&mut self.native_selection(list).borrow_mut().restore_focus);
-            if restore
-                && Hwnd::focused().is_none()
-                && control.is_visible()
-                && control.parent().is_active()
-            {
-                control.focus();
-            }
-        }
     }
 
     fn schedule_native_selection(&self, hwnd: Hwnd) {
@@ -418,20 +409,63 @@ impl MainWindow {
         }
     }
 
+    /// Keeps `action` until the selection it was given on is ready. The
+    /// list stays enabled, because disabling it repaints it for the moment
+    /// a read takes, and refuses the person's selection changes meanwhile
+    /// ([`Self::selection_command_pending`]), because the selection is
+    /// fixed when the person gives the command (DESIGN.md: window rule 10).
     fn defer_selection_action(&self, action: SelectionAction) {
         let list = action.context().list;
-        let accepted = {
+        let deferred = {
             let mut native = self.native_selection(list).borrow_mut();
-            if native.action.is_some() {
-                false
-            } else {
-                native.action = Some(action);
-                true
+            let deferred = native.action.is_none();
+            if deferred {
+                native.action = Some(Deferred {
+                    action,
+                    since: Instant::now(),
+                });
             }
+            deferred
         };
-        if accepted {
-            self.set_selection_enabled(list, false);
+        if deferred {
+            self.wait_for_slow_selection(self.list_control(list).hwnd().parent());
         }
+    }
+
+    /// Wakes the window when the next waiting command turns slow, which
+    /// then shows it (`slow_list_work`).
+    pub(super) fn wait_for_slow_selection(&self, hwnd: Hwnd) {
+        match self.selection_wait_remaining() {
+            Some(left) => hwnd.set_timer(Timer::SelectionWait.id(), left.as_millis().max(1) as u32),
+            None => hwnd.kill_timer(Timer::SelectionWait.id()),
+        }
+    }
+
+    /// The command that waits for `list`'s selection, once it has waited
+    /// [`crate::core::work::SLOW`]: the commands show disabled and the list
+    /// shows Cancel ([`Self::slow_list_work`]).
+    pub(super) fn selection_action_slow(&self, list: List) -> bool {
+        (self.native_selection(list).borrow().action)
+            .is_some_and(|deferred| deferred.since.elapsed() >= crate::core::work::SLOW)
+    }
+
+    /// When the next waiting command's wait turns slow.
+    pub(super) fn selection_wait_remaining(&self) -> Option<std::time::Duration> {
+        List::ALL
+            .into_iter()
+            .filter_map(|list| self.native_selection(list).borrow().action)
+            .map(|deferred| crate::core::work::SLOW.saturating_sub(deferred.since.elapsed()))
+            .filter(|left| !left.is_zero())
+            .min()
+    }
+
+    /// Esc or Cancel of a rule that runs: the rule ends, and so does a
+    /// command that waits for it, which the person gave on the rule's
+    /// selection that will now never exist.
+    pub(super) fn abandon_matching_selection(&self, list: List) {
+        self.forget_selection_action(list);
+        self.cancel_matching_selection(list);
+        self.show_selection_wait(list);
     }
 
     pub(super) fn prepare_selection_command(
@@ -457,8 +491,8 @@ impl MainWindow {
 
     pub(super) fn resume_selection_actions(&self, hwnd: Hwnd) {
         for list in List::ALL {
-            let action = self.native_selection(list).borrow().action;
-            let Some(action) = action else {
+            let deferred = self.native_selection(list).borrow().action;
+            let Some(Deferred { action, since }) = deferred else {
                 continue;
             };
             let context = action.context();
@@ -474,11 +508,10 @@ impl MainWindow {
                 }
             }
             self.native_selection(list).borrow_mut().action = None;
-            if !self.native_update_active(list)
-                && !self.native_deselection_pending(list)
-                && !self.matching_selection_pending(list)
-            {
-                self.set_selection_enabled(list, true);
+            if since.elapsed() >= crate::core::work::SLOW {
+                // The list's "Waiting…" and Cancel go, and the commands
+                // are enabled again.
+                self.show_selection_wait(list);
             }
             if current {
                 match action {
@@ -505,6 +538,16 @@ impl MainWindow {
 
     pub(super) fn forget_selection_action(&self, list: List) {
         self.native_selection(list).borrow_mut().action = None;
+    }
+
+    /// Shows whether `list`'s work is slow: its message with Cancel, and
+    /// the commands that wait for it disabled.
+    pub(super) fn show_selection_wait(&self, list: List) {
+        match list {
+            List::Search => self.update_message(),
+            List::Panel(side) => self.controls().panels.show_panel_message(self, side),
+        }
+        self.controls().key_bar.update_key_bar(self);
     }
 
     pub(super) fn native_selection_waiting(&self, list: List) -> bool {
@@ -551,7 +594,23 @@ impl MainWindow {
     pub(super) fn selection_changed(&self, list: List, change: RowsChange) -> bool {
         let mut native = self.native_selection(list).borrow_mut();
         if native.applying {
-            return false;
+            // A change between two slices of the writes is the person's: a
+            // click or a key. It wins over the rest of the writes, which
+            // would otherwise mix into it while the capture took the list
+            // for the place the writes show.
+            let between = !native.writing
+                && native
+                    .update
+                    .as_ref()
+                    .is_some_and(|update| update.changes.is_some());
+            if !between {
+                return false;
+            }
+            native.capture.invalidate();
+            if let Some(update) = native.update.as_mut() {
+                update.superseded = true;
+            }
+            return true;
         }
         if !native.unhighlighting
             && let Some(pending) = native.unhighlight.as_mut()
@@ -611,7 +670,6 @@ impl MainWindow {
         } else {
             self.controls().search.selection_pending.set(false);
         }
-        self.set_selection_enabled(list, true);
     }
 
     pub(super) fn selected_rows(&self, list: List) -> Option<RowSelection> {
@@ -739,6 +797,10 @@ impl MainWindow {
         }
     }
 
+    /// Whether a command waits for `list`'s selection, which the list then
+    /// keeps with its focused row: it refuses the person's changes of
+    /// either, so a command that acts on the focused row acts on the row it
+    /// was given on (DESIGN.md: window rule 10).
     pub(super) fn selection_command_pending(&self, list: List) -> bool {
         self.native_selection(list).borrow().action.is_some()
     }
@@ -796,9 +858,6 @@ impl MainWindow {
         // used.
         hwnd.show_focus_cues();
         let control = self.list_control(list);
-        if !control.hwnd().is_enabled() {
-            return;
-        }
         if let List::Panel(side) = list {
             let quick = match key {
                 SelectKey::Move(Movement::Up) => Some(QuickAction::Step { down: false }),
@@ -809,6 +868,11 @@ impl MainWindow {
             if self.controls().panels.quick_key(self, side, quick) == Some(true) {
                 return;
             }
+        }
+        // A command waits for the selection and the focused row it was
+        // given on, which stay as they were, so the key is dropped.
+        if self.selection_command_pending(list) {
+            return;
         }
         let focused = control.focused();
         let count = control.count();
@@ -897,6 +961,9 @@ impl MainWindow {
     /// is not known yet, the run waits for it as a command does.
     fn mark_rows(&self, list: List, rows: Range<u64>, run: ShiftRun) {
         let Some(selected) = self.selected_rows(list) else {
+            // The run is the person's change, which cancels a rule that
+            // runs, whose answer would otherwise drop the run's rows.
+            self.cancel_matching_selection(list);
             let mut context = self.command_context();
             context.list = list;
             context.key = self.native_key(list);
@@ -967,14 +1034,28 @@ impl MainWindow {
     }
 
     /// Unhighlights, in bounded turns, the selected rows among `rows` whose
-    /// entries a delete or a move took.
+    /// entries a delete or a move took. The list stays enabled: a click
+    /// meanwhile starts the walk again (`selection_changed`), and writes that
+    /// start meanwhile keep it for their end ([`Self::show_native_place`]).
     pub(super) fn request_taken_deselection(&self, list: List, rows: Range<u64>) {
         let key = self.native_key(list);
-        self.native_selection(list).borrow_mut().unhighlight = Some(Unhighlight {
-            key,
-            after: rows.start.checked_sub(1),
-            end: rows.end,
-        });
+        let after = rows.start.checked_sub(1);
+        {
+            let mut native = self.native_selection(list).borrow_mut();
+            // A walk that waits takes these rows too, so neither is lost.
+            native.unhighlight = Some(match native.unhighlight {
+                Some(pending) if pending.key.same_list(key) => Unhighlight {
+                    key,
+                    after: pending.after.min(after),
+                    end: pending.end.max(rows.end),
+                },
+                _ => Unhighlight {
+                    key,
+                    after,
+                    end: rows.end,
+                },
+            });
+        }
         if let List::Panel(side) = list {
             self.model
                 .borrow_mut()
@@ -982,7 +1063,6 @@ impl MainWindow {
                 .native_selection_pending(side, true);
         }
         let control = self.list_control(list);
-        self.set_selection_enabled(list, false);
         self.schedule_native_selection(control.hwnd().parent());
     }
 
@@ -1043,9 +1123,6 @@ impl MainWindow {
                 native.unhighlight.is_none()
             };
             if complete && current {
-                if !self.selection_command_pending(list) && !self.matching_selection_pending(list) {
-                    self.set_selection_enabled(list, true);
-                }
                 match list {
                     List::Search => self.controls().search.selection_pending.set(true),
                     List::Panel(side) => {
@@ -1114,19 +1191,30 @@ impl MainWindow {
             let shown =
                 (!native.applying && native.unhighlight.is_none() && !native.unhighlighting)
                     .then(|| Arc::clone(&before.selected));
-            native.unhighlight = None;
+            // A walk over taken rows that waits runs after the writes, over
+            // every selected row, because the writes can select them again.
+            let key = native.capture.key(count);
+            native.unhighlight = native.unhighlight.map(|_| Unhighlight {
+                key,
+                after: None,
+                end: u64::MAX,
+            });
             if let Origin::Remap {
                 keep_action: true, ..
             } = origin
             {
-                let key = native.capture.key(count);
-                native.action = native.action.and_then(|action| action.remapped(key));
+                native.action = native.action.and_then(|deferred| {
+                    Some(Deferred {
+                        action: deferred.action.remapped(key)?,
+                        since: deferred.since,
+                    })
+                });
             } else {
                 native.action = None;
             }
             native.applying = true;
             native.update = Some(NativeUpdate {
-                key: native.capture.key(count),
+                key,
                 selected: RowSelection {
                     positions: Arc::clone(&place.selected),
                     count: selected_count,
@@ -1136,6 +1224,8 @@ impl MainWindow {
                 focused: place.focused,
                 anchor,
                 origin,
+                focus_shown: None,
+                superseded: false,
             });
         }
         if let List::Panel(side) = list {
@@ -1197,9 +1287,10 @@ impl MainWindow {
                 count,
                 selected_count,
             ));
+            update.focus_shown = control.focused();
         }
         let changes = update.changes.as_mut().expect("the update has a cursor");
-        while remaining > 0 && current() {
+        while !update.superseded && remaining > 0 && current() {
             let Some(write) = changes.next(&mut remaining) else {
                 break;
             };
@@ -1213,21 +1304,23 @@ impl MainWindow {
             self.retire_selection(update);
             return;
         }
-        // Only writes left for a later slice disable the list against
-        // clicks between the slices: disabling repaints the whole list, and
-        // its scroll bars flash, also when nothing changed.
-        if !changes.is_done() {
+        // The list stays enabled between the slices, because disabling it
+        // repaints it whole: a click or a key meanwhile supersedes the rest
+        // of the writes (`selection_changed`), or moves the focus, which
+        // then stays where the person left it.
+        if !update.superseded && !changes.is_done() {
             self.native_selection(list).borrow_mut().update = Some(update);
-            self.set_selection_enabled(list, false);
             return;
         }
-        control.focus_in_place(update.focused);
-        control.set_selection_mark(update.anchor);
-        if let (Origin::Remap { scroll, .. }, Some(row)) = (update.origin, update.focused) {
-            match scroll {
-                Scroll::ToFocus => control.ensure_visible(row),
-                Scroll::FocusAt { offset } => control.show_row_at(row, offset),
-                Scroll::Keep => {}
+        if !update.superseded && control.focused() == update.focus_shown {
+            control.focus_in_place(update.focused);
+            control.set_selection_mark(update.anchor);
+            if let (Origin::Remap { scroll, .. }, Some(row)) = (update.origin, update.focused) {
+                match scroll {
+                    Scroll::ToFocus => control.ensure_visible(row),
+                    Scroll::FocusAt { offset } => control.show_row_at(row, offset),
+                    Scroll::Keep => {}
+                }
             }
         }
         if !current() {
@@ -1237,17 +1330,18 @@ impl MainWindow {
         let focused = control.focused();
         let hwnd = control.hwnd().parent();
         match (list, update.origin) {
-            (List::Panel(side), Origin::Remap { .. }) => {
+            (List::Panel(side), Origin::Remap { .. }) if !update.superseded => {
                 self.model
                     .borrow_mut()
                     .panels_mut()
                     .set_focused(side, focused);
                 self.panel(side).changed.set(panels::ListChanged::Nothing);
             }
-            // The model reads a key's place as it reads a click's, on a turn
-            // of its own, because a read during the writes found the list
-            // busy and left no turn waiting.
-            (List::Panel(side), Origin::Key) => {
+            // The model reads a key's place, and the person's choice that
+            // superseded the writes, as it reads a click's, on a turn of its
+            // own, because a read during the writes found the list busy and
+            // left no turn waiting.
+            (List::Panel(side), _) => {
                 self.panel(side).changed.set(panels::ListChanged::Selection);
                 hwnd.post_deferred();
             }
@@ -1260,7 +1354,8 @@ impl MainWindow {
         let input = {
             let mut native = self.native_selection(list).borrow_mut();
             native.applying = false;
-            native.capture.known(count, update.selected.clone())
+            // A superseded capture is invalid, so the list is read again.
+            (!update.superseded).then(|| native.capture.known(count, update.selected.clone()))
         };
         if let List::Panel(side) = list {
             self.model
@@ -1268,14 +1363,10 @@ impl MainWindow {
                 .panels_mut()
                 .native_selection_pending(side, false);
         }
-        self.created().work.borrow_mut().lists.tell(list, input);
-        self.retire_native_selection(list);
-        if !self.selection_command_pending(list)
-            && !self.native_deselection_pending(list)
-            && !self.matching_selection_pending(list)
-        {
-            self.set_selection_enabled(list, true);
+        if let Some(input) = input {
+            self.created().work.borrow_mut().lists.tell(list, input);
         }
+        self.retire_native_selection(list);
         self.retire_selection(update);
         control.redraw_visible();
         if let List::Panel(side) = list {

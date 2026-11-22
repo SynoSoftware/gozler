@@ -45,8 +45,7 @@ use windows::Win32::Graphics::Gdi::{
     RedrawWindow,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetActiveWindow, GetFocus, INPUT, INPUT_0, INPUT_MOUSE, IsWindowEnabled, MOUSEINPUT, SendInput,
-    SetFocus,
+    GetFocus, INPUT, INPUT_0, INPUT_MOUSE, IsWindowEnabled, MOUSEINPUT, SendInput, SetFocus,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, DeferWindowPos, DestroyWindow, EndDeferWindowPos, GWL_EXSTYLE, GWL_STYLE,
@@ -339,11 +338,6 @@ impl Hwnd {
             Some(losing) => present::mark_after(losing, gain),
             None => gain(),
         }
-    }
-
-    pub(crate) fn is_active(self) -> bool {
-        // SAFETY: this thread's active top-level window is a plain handle.
-        unsafe { GetActiveWindow() == self.0 }
     }
 
     /// Shows the focus rectangles in this top-level window, as

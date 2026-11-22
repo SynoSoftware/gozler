@@ -22,6 +22,8 @@ pub(super) enum Timer {
     StatusNotice,
     /// A list's columns fill when it runs out (DESIGN.md: Results list).
     ColumnFill(List),
+    /// A command that waits for its selection turns slow.
+    SelectionWait,
 }
 
 const IDS: &[(Timer, usize)] = &[
@@ -54,6 +56,7 @@ const IDS: &[(Timer, usize)] = &[
     (Timer::ColumnFill(List::Search), 29),
     (Timer::ColumnFill(List::Panel(Side::Left)), 30),
     (Timer::ColumnFill(List::Panel(Side::Right)), 31),
+    (Timer::SelectionWait, 32),
 ];
 
 impl Timer {

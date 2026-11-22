@@ -188,7 +188,7 @@ impl StatusCaptions {
                         JobCaption {
                             text,
                             progress,
-                            cancel: model.can_cancel(job),
+                            cancel: model.job_cancel_shown(job),
                         },
                     ))
                 })
@@ -332,7 +332,6 @@ pub(super) fn status_widest(strings: &Strings, numbers: &dyn Numbers) -> StatusW
         .collect();
     selected.push(strings.format("status.selected_only", &[&limit]));
     selected.push(too_many(strings, numbers, WIDEST_TOTAL));
-    selected.push(strings.text("status.reading").to_owned());
     let results = [
         strings.format("status.filtered", &[&showing]),
         strings.text("status.searching").to_owned(),
@@ -473,16 +472,21 @@ pub(crate) fn results_status(model: &Model, numbers: &dyn Numbers) -> String {
     }
 }
 
-/// How many entries are selected and the size of the selected files, or
-/// that the selection is read.
+/// How many entries are selected and the size of the selected files. While
+/// the files are read, the count of selected rows shows alone, and the
+/// size joins it when they arrive, so no busy text flashes; a read that
+/// turns slow shows the middle group's wait.
 pub(crate) fn selection_status(model: &Model, numbers: &dyn Numbers) -> String {
     let strings = model.strings();
     let list = model.search_list();
     match list.selection() {
         Selection::None => String::new(),
         _ if list.chosen_by_focus() => String::new(),
-        Selection::Reading { .. } | Selection::Filtering { .. } => {
-            strings.text("status.reading").to_owned()
+        selection @ (Selection::Reading { .. } | Selection::Filtering { .. }) => {
+            let rows = selection
+                .unread_rows()
+                .expect("a selection that is read has rows");
+            strings.format("status.selected_only", &[&numbers.integer(rows)])
         }
         Selection::TooMany(count) => too_many(strings, numbers, *count),
         Selection::Files(_) | Selection::Folder { .. } => {

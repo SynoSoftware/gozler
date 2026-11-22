@@ -11,12 +11,14 @@ use crate::core::panel::Side;
 use crate::core::settings::Mode;
 use crate::core::synchronize::{self, Preview};
 use crate::core::text::Strings;
+use crate::core::work;
 use crate::win::controls::{CheckBox, Edit, ListColumn, ListView};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::{self, Hwnd};
 use gozler_fileops::{End, OperationId, Request, State};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 const POLL: usize = 1;
 
@@ -74,6 +76,7 @@ impl MainWindow {
             mirror,
             continuing,
             preview: RefCell::default(),
+            started: Cell::new(None),
             list: OnceCell::new(),
             layout: OnceCell::new(),
             dpi: Cell::new(hwnd.dpi()),
@@ -92,6 +95,8 @@ struct Synchronize<'a> {
     mirror: bool,
     continuing: Option<OperationId>,
     preview: RefCell<Preview>,
+    /// When the comparison or the commit that runs started.
+    started: Cell<Option<Instant>>,
     list: OnceCell<ListView>,
     layout: OnceCell<Layout>,
     dpi: Cell<Dpi>,
@@ -120,11 +125,34 @@ impl Synchronize<'_> {
     fn detach(&self) -> Option<OperationId> {
         let preview = self.preview.take();
         let id = preview.id();
-        if let Preview::Ready { comparison, .. } | Preview::Committing { comparison, .. } = preview
+        self.release(preview);
+        id
+    }
+
+    /// Gives the comparison that `preview` holds back to the queue, which
+    /// drops it off the window's thread.
+    fn release(&self, preview: Preview) {
+        if let Preview::Ready { comparison, .. }
+        | Preview::Committing { comparison, .. }
+        | Preview::Comparing {
+            shown: Some(comparison),
+            ..
+        } = preview
         {
             self.operations.release_comparison(comparison);
         }
-        id
+    }
+
+    /// How long the comparison or the commit that runs has run.
+    fn running_for(&self) -> Option<Duration> {
+        let running = matches!(
+            *self.preview.borrow(),
+            Preview::Comparing { .. } | Preview::Committing { .. }
+        );
+        self.started
+            .get()
+            .filter(|_| running)
+            .map(|started| started.elapsed())
     }
 
     fn clear(&self) {
@@ -144,8 +172,12 @@ impl Synchronize<'_> {
         self.enable(dialog);
     }
 
+    /// Enables the controls. A comparison or a commit that runs keeps them
+    /// as they were, and `message` refuses what they would do, until it has
+    /// run [`work::SLOW`], so a quick one never dims them.
     fn enable(&self, dialog: Hwnd) {
-        let committing = matches!(*self.preview.borrow(), Preview::Committing { .. });
+        let slow = self.running_for().is_some_and(|ran| ran >= work::SLOW);
+        let committing = slow && matches!(*self.preview.borrow(), Preview::Committing { .. });
         for id in [
             C::SyncSource,
             C::SyncDestination,
@@ -162,7 +194,13 @@ impl Synchronize<'_> {
         if let Some(compare) = dialog::item(dialog, C::SyncCompare.id()) {
             compare.set_enabled(filled && !committing);
         }
-        let ready = self.preview.borrow().can_commit();
+        let ready = match &*self.preview.borrow() {
+            Preview::Comparing {
+                shown: Some(shown), ..
+            } if !slow => shown.summary().conflicts == 0,
+            Preview::Committing { .. } => !slow,
+            preview => preview.can_commit(),
+        };
         dialog::set_ok_enabled(dialog, ready);
     }
 
@@ -172,7 +210,23 @@ impl Synchronize<'_> {
         if source.trim().is_empty() || destination.trim().is_empty() {
             return;
         }
-        self.invalidate(dialog);
+        // The rows shown stay, with the summary, until the new rows
+        // arrive, so comparing again never empties the list.
+        // A comparison that replaces one that runs keeps its start, so
+        // "Comparing…" and OK stay as they show (`poll`, `enable`).
+        let (previous, shown, replaces) = match self.preview.take() {
+            Preview::Ready { id, comparison } => (Some(id), Some(comparison), false),
+            Preview::Comparing { id, shown } => (Some(id), shown, true),
+            preview => {
+                let id = preview.id();
+                self.release(preview);
+                (id, None, false)
+            }
+        };
+        if let Some(id) = previous {
+            self.operations.act(id, QueueAction::Cancel);
+        }
+        dialog.kill_timer(POLL);
         let mirror =
             CheckBox::of_dialog(dialog, C::SyncMirror.id()).is_some_and(CheckBox::is_checked);
         if let Some(id) = self.main.start_operation(
@@ -183,9 +237,17 @@ impl Synchronize<'_> {
             },
             None,
         ) {
-            self.preview.replace(Preview::Comparing(id));
+            self.preview.replace(Preview::Comparing { id, shown });
+            if !replaces || self.started.get().is_none() {
+                self.started.set(Some(Instant::now()));
+            }
             dialog.set_timer(POLL, 200);
             self.poll(dialog);
+        } else {
+            if let Some(shown) = shown {
+                self.operations.release_comparison(shown);
+            }
+            self.invalidate(dialog);
         }
     }
 
@@ -201,12 +263,12 @@ impl Synchronize<'_> {
                     dialog::end(dialog, DialogEnd::Ok);
                 }
                 Some(false) => self.invalidate(dialog),
-                None => {}
+                None => self.enable(dialog),
             }
             return;
         }
         let id = match *self.preview.borrow() {
-            Preview::Comparing(id) => id,
+            Preview::Comparing { id, .. } => id,
             _ => return,
         };
         self.operations.request_refresh();
@@ -243,7 +305,8 @@ impl Synchronize<'_> {
                 } else {
                     "sync.ready"
                 };
-                self.preview.replace(Preview::Ready { id, comparison });
+                let shown = self.preview.replace(Preview::Ready { id, comparison });
+                self.release(shown);
                 dialog.kill_timer(POLL);
                 if let Some(list) = self.list.get() {
                     list.set_count(count);
@@ -263,8 +326,12 @@ impl Synchronize<'_> {
                     End::Cancelled => self.strings.text("file_operations.cancelled").to_owned(),
                     _ => self.strings.text("sync.initial").to_owned(),
                 };
-                self.preview.replace(Preview::Failed(id));
+                let shown = self.preview.replace(Preview::Failed(id));
+                self.release(shown);
                 dialog.kill_timer(POLL);
+                if let Some(list) = self.list.get() {
+                    list.set_count(0);
+                }
                 Self::set_text(
                     dialog,
                     C::SyncSummary,
@@ -273,15 +340,21 @@ impl Synchronize<'_> {
                 Self::set_text(dialog, C::SyncHint, &reason);
                 self.enable(dialog);
             }
+            // The summary and the hint keep what they said until the
+            // comparison has run `work::BUSY`, so a quick one shows only its
+            // result.
             state => {
-                let key = match state {
-                    State::Waiting { .. } => "file_operations.waiting",
-                    State::Running(ref running) if running.paused => "file_operations.paused",
-                    State::Cancelling => "file_operations.cancelling",
-                    _ => "sync.comparing",
-                };
-                Self::set_text(dialog, C::SyncSummary, self.strings.text(key));
-                Self::set_text(dialog, C::SyncHint, self.strings.text("sync.initial"));
+                if self.running_for().is_some_and(|ran| ran >= work::BUSY) {
+                    let key = match state {
+                        State::Waiting { .. } => "file_operations.waiting",
+                        State::Running(ref running) if running.paused => "file_operations.paused",
+                        State::Cancelling => "file_operations.cancelling",
+                        _ => "sync.comparing",
+                    };
+                    Self::set_text(dialog, C::SyncSummary, self.strings.text(key));
+                    Self::set_text(dialog, C::SyncHint, self.strings.text("sync.initial"));
+                }
+                self.enable(dialog);
             }
         }
     }
@@ -316,7 +389,8 @@ impl DialogProc for Synchronize<'_> {
         }
         self.enable(dialog);
         if let Some(id) = self.continuing {
-            self.preview.replace(Preview::Comparing(id));
+            self.preview.replace(Preview::Comparing { id, shown: None });
+            self.started.set(Some(Instant::now()));
             self.operations.act(id, QueueAction::Continue);
             dialog.set_timer(POLL, 200);
             self.poll(dialog);
@@ -328,6 +402,53 @@ impl DialogProc for Synchronize<'_> {
     }
 
     fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        // A commit that runs keeps the folders it compared, and the
+        // controls keep showing them: they refuse a change, and are disabled
+        // only once it runs long (`enable`).
+        let committing = match &*self.preview.borrow() {
+            Preview::Committing { roots, .. } => Some(roots.clone()),
+            _ => None,
+        };
+        let controls = [
+            C::SyncSource,
+            C::SyncDestination,
+            C::SyncMirror,
+            C::SyncCompare,
+            C::SyncSourceBrowse,
+            C::SyncDestinationBrowse,
+        ];
+        if let Some(roots) = committing {
+            match message {
+                // A path box puts a typed change back before it draws it;
+                // the text it puts back comes here again, and is the root.
+                DialogMessage::Updating { id } => {
+                    let shown = [C::SyncSource, C::SyncDestination]
+                        .into_iter()
+                        .zip(roots)
+                        .find(|(box_id, _)| box_id.id() == id);
+                    if let Some((box_id, root)) = shown
+                        && let Some(edit) = Edit::of_dialog(dialog, box_id.id())
+                    {
+                        let typed = edit.hwnd().text_units();
+                        let root_units: Vec<u16> = root.encode_utf16().collect();
+                        if typed != root_units {
+                            edit.hwnd().set_text(&root);
+                            let (start, end) = refused_selection(&root_units, &typed);
+                            edit.select(start, end);
+                        }
+                    }
+                    return true;
+                }
+                // Mirror is a plain check box, which changes only when the
+                // click is accepted below.
+                DialogMessage::Edited { id } | DialogMessage::Command { id }
+                    if controls.iter().any(|control| control.id() == id) =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
         match message {
             DialogMessage::Edited { id }
                 if id == C::SyncSource.id() || id == C::SyncDestination.id() =>
@@ -335,7 +456,12 @@ impl DialogProc for Synchronize<'_> {
                 self.invalidate(dialog);
                 true
             }
+            // Mirror decides permanent deletes, so it shows checked only
+            // when a comparison will use it (`BS_CHECKBOX`).
             DialogMessage::Command { id } if id == C::SyncMirror.id() => {
+                if let Some(mirror) = CheckBox::of_dialog(dialog, id) {
+                    mirror.set_checked(!mirror.is_checked());
+                }
                 self.invalidate(dialog);
                 true
             }
@@ -361,7 +487,18 @@ impl DialogProc for Synchronize<'_> {
             DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
                 let ready = self.preview.borrow().can_commit();
                 if ready && let Preview::Ready { id, comparison } = self.preview.take() {
-                    self.preview.replace(Preview::Committing { id, comparison });
+                    // A change of a box ends the comparison it showed
+                    // (`invalidate`), so the boxes show what it compared.
+                    let roots = [
+                        Self::text(dialog, C::SyncSource),
+                        Self::text(dialog, C::SyncDestination),
+                    ];
+                    self.preview.replace(Preview::Committing {
+                        id,
+                        comparison,
+                        roots,
+                    });
+                    self.started.set(Some(Instant::now()));
                     self.operations.synchronize(id);
                     self.enable(dialog);
                     dialog.set_timer(POLL, 200);
@@ -487,5 +624,34 @@ impl DialogProc for Synchronize<'_> {
                 list.set_column_width(1, width);
             }
         }
+    }
+}
+
+/// Where the caret and the selection of `root` were before the refused
+/// change that made `typed` of it, as UTF-16 positions, with the caret at
+/// the second. The edit tells nothing before a change, so this reads it
+/// from the change: typing or pasting over a selection had that selection,
+/// typing or pasting with none had the caret where it inserted, and a
+/// deletion had the caret after what it deleted, as `Backspace` has.
+fn refused_selection(root: &[u16], typed: &[u16]) -> (usize, usize) {
+    let start = root
+        .iter()
+        .zip(typed)
+        .take_while(|(root, typed)| root == typed)
+        .count();
+    let common = root.len().min(typed.len()) - start;
+    let same_end = root
+        .iter()
+        .rev()
+        .zip(typed.iter().rev())
+        .take(common)
+        .take_while(|(root, typed)| root == typed)
+        .count();
+    let removed_end = root.len() - same_end;
+    let inserted = typed.len() - same_end > start;
+    if inserted {
+        (start, removed_end)
+    } else {
+        (removed_end, removed_end)
     }
 }

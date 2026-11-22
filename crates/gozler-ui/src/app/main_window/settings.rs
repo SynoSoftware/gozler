@@ -42,6 +42,9 @@ pub(in crate::app) struct SettingsBridge {
     account_names_dirty: Cell<bool>,
     include_summary_dirty: Cell<bool>,
     include_preview_dirty: Cell<bool>,
+    /// What Settings' status bar showed of the fix, which it keeps while a
+    /// new fix waits, as the main window's entry does.
+    kept_fix: RefCell<crate::core::status_bar::Kept>,
 }
 
 impl SettingsBridge {
@@ -56,6 +59,7 @@ impl SettingsBridge {
             account_names_dirty: Cell::new(false),
             include_summary_dirty: Cell::new(false),
             include_preview_dirty: Cell::new(false),
+            kept_fix: RefCell::default(),
         }
     }
     /// A running service fix follows the modal dialog, where its controls
@@ -64,6 +68,7 @@ impl SettingsBridge {
         let follow_fix = window.model.borrow().fix().running();
         self.include_summary_dirty.set(false);
         self.include_preview_dirty.set(false);
+        self.kept_fix.take();
         self.open.set(Some(OpenSettings { dialog, follow_fix }));
         window.update_status();
     }
@@ -74,12 +79,14 @@ impl SettingsBridge {
         strings: &Strings,
     ) -> JobCaption {
         let follows = self.open.get().is_some_and(|open| open.follow_fix);
-        let mut job = captions::settings_job(
-            &window.model.borrow(),
-            strings,
-            &*window.numbers.borrow(),
-            follows,
-        );
+        let mut job = {
+            let model = window.model.borrow();
+            let own = captions::settings_job(&model, strings, &*window.numbers.borrow(), follows);
+            let waits = follows && model.job_notice_waits(crate::core::model::Job::Fix);
+            (self.kept_fix.borrow_mut())
+                .shown(Some(own), waits)
+                .unwrap_or_default()
+        };
         if follows && window.fix_waiting(Instant::now()) == Some(Waiting::Slow) {
             job.text = crate::core::work::waiting(strings, None);
         }

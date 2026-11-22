@@ -73,6 +73,16 @@ those rules, and a call left on the window's thread is how the window freezes
 on a dead share. Domain engines keep their own workers, scheduling and
 recovery. Messages to a control stay on the window's thread, which owns it.
 
+**Owner ruling: the window never flashes.** A state that shows for a moment
+and is then undone is a defect, because the person sees the window jump for
+no reason. Examples: a list disabled for the milliseconds a fast rule takes,
+buttons dimmed for that time, a busy text or Cancel shown before the work is
+slow, a control hidden and shown again, or a list cleared and refilled. Busy
+text and a progress bar show only once the work has run for
+`core::work::BUSY`, a control is disabled and Cancel offered only once it is
+slow (`core::work::SLOW`), and a control is updated in place. A change or a
+review that finds a flash fixes it.
+
 **Owner ruling: Windows draws the window.** For each part of `gozler-ui`
 that a task needs, first find the Win32 control, or a feature of one, that
 does the job, even if it does not match a prototype or a plan exactly: a list

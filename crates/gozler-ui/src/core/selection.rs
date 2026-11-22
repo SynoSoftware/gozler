@@ -154,6 +154,16 @@ impl Selection {
         }
     }
 
+    /// How many rows are selected while their files are read, which the
+    /// status bar and the inspector show until the files are known.
+    pub(crate) fn unread_rows(&self) -> Option<u64> {
+        match self {
+            Self::Reading { positions, .. } => Some(row_count(positions)),
+            Self::Filtering { source, .. } => Some(source.items() as u64),
+            Self::None | Self::Files(_) | Self::Folder { .. } | Self::TooMany(_) => None,
+        }
+    }
+
     pub(crate) fn items(&self) -> usize {
         match self {
             Self::Files(files) => files.len(),

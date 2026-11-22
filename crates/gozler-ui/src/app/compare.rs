@@ -50,13 +50,14 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::os::windows::ffi::OsStrExt;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
+use std::time::Instant;
 use windows::Win32::Foundation::LRESULT;
 
 const WINDOW_CLASS: &str = "gozler.ui.compare";
 /// Shows the window once its comparison has run this long, so identical
 /// files that compare faster show only their message.
 const SHOW_TIMER: usize = 1;
-const SHOW_DELAY: u32 = 300;
+const SHOW_DELAY: u32 = crate::core::work::BUSY.as_millis() as u32;
 const PROGRESS_TIMER: usize = 2;
 /// Aligns the rows again once the person has stopped typing this long.
 const REALIGN_TIMER: usize = 3;
@@ -115,6 +116,19 @@ enum Stage {
     First,
     /// A comparison or its failure showed in it, so it stays.
     Shown,
+}
+
+/// What shows of the comparison that runs, so a quick one, such as after
+/// a check box, shows only its result.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Running {
+    /// No comparison runs, or it has run less than
+    /// [`crate::core::work::BUSY`].
+    Hidden,
+    /// The progress bar and "Comparing…".
+    Progress,
+    /// Cancel too, once the comparison has run [`crate::core::work::SLOW`].
+    Cancel,
 }
 
 /// Where the windows' question about a held sign-out is.
@@ -652,9 +666,10 @@ struct CompareWindow {
     session: RefCell<Session>,
     stage: Cell<Stage>,
     notice: RefCell<Option<Notice>>,
-    /// The progress bar and Cancel show, as they do while a comparison
-    /// runs.
-    progress_shown: Cell<bool>,
+    running: Cell<Running>,
+    /// When the comparison that runs started, which one that replaces it
+    /// keeps; `None` once none runs (`refresh`).
+    compare_started: Cell<Option<Instant>>,
     /// The notice shows in the sides' place, because no comparison shows.
     message_shown: Cell<bool>,
     /// Where the last question about changes left the window.
@@ -703,7 +718,8 @@ impl CompareWindow {
             session: RefCell::new(session),
             stage: Cell::new(Stage::First),
             notice: RefCell::new(None),
-            progress_shown: Cell::new(false),
+            running: Cell::new(Running::Hidden),
+            compare_started: Cell::new(None),
             message_shown: Cell::new(false),
             settled: Cell::new(None),
             scroll: Cell::new([(0, 0); 2]),
@@ -877,9 +893,18 @@ impl CompareWindow {
             (session.comparing(), session.showing().is_some())
         };
         let message = !shows && self.notice.borrow().is_some();
-        let progress_changed = self.progress_shown.replace(comparing) != comparing;
-        if progress_changed && !comparing {
+        let ran = (self.compare_started.get())
+            .filter(|_| comparing)
+            .map(|started| started.elapsed());
+        let running = match ran {
+            Some(ran) if ran >= crate::core::work::SLOW => Running::Cancel,
+            Some(ran) if ran >= crate::core::work::BUSY => Running::Progress,
+            _ => Running::Hidden,
+        };
+        let progress_changed = self.running.replace(running) != running;
+        if !comparing {
             hwnd.kill_timer(PROGRESS_TIMER);
+            self.compare_started.set(None);
         }
         let message_changed = self.message_shown.replace(message) != message;
         self.show_message();
@@ -1071,6 +1096,12 @@ impl CompareWindow {
             options: self.options(request.rows),
             progress,
         });
+        // A comparison that replaces one that runs keeps its start, so the
+        // progress that shows already stays; `refresh` clears the start
+        // once none runs.
+        if self.compare_started.get().is_none() {
+            self.compare_started.set(Some(Instant::now()));
+        }
         hwnd.set_timer(PROGRESS_TIMER, 100);
     }
 
@@ -1721,7 +1752,7 @@ impl CompareWindow {
         let numbers = self.numbers.borrow();
         let session = self.session.borrow();
         let mut status = String::new();
-        if session.comparing() {
+        if self.running.get() != Running::Hidden {
             status = strings.text("compare.comparing").to_owned();
         } else if let Some(showing) = session.showing() {
             let view = showing.view();
@@ -1887,7 +1918,7 @@ impl CompareWindow {
             state.two_line_list,
             dpi,
         );
-        let running = self.session.borrow().comparing();
+        let running = self.running.get();
         let message = self.message_shown.get();
         let resized = Side::BOTH.map(|side| {
             let path_box = c.paths[side.index()].hwnd();
@@ -1925,8 +1956,8 @@ impl CompareWindow {
                 (c.list.hwnd(), layout.list),
             ],
             &[
-                (c.progress.hwnd(), running),
-                (c.cancel.hwnd(), running),
+                (c.progress.hwnd(), running != Running::Hidden),
+                (c.cancel.hwnd(), running == Running::Cancel),
                 (c.message.hwnd(), message),
                 (c.sides()[0].hwnd(), !message),
                 (c.sides()[1].hwnd(), !message),
@@ -2956,6 +2987,8 @@ impl WindowProc for CompareWindow {
                 Some(LRESULT(0))
             }
             Message::Timer(SHOW_TIMER) => {
+                // The comparison has run as long as its progress waits for.
+                self.refresh(hwnd);
                 self.show_window(hwnd);
                 Some(LRESULT(0))
             }
@@ -2963,6 +2996,9 @@ impl WindowProc for CompareWindow {
                 let (done, total) = self.progress.borrow().read();
                 if let Some(c) = self.controls() {
                     c.progress.set_measured(done, total);
+                }
+                if self.running.get() != Running::Cancel {
+                    self.refresh(hwnd);
                 }
                 Some(LRESULT(0))
             }

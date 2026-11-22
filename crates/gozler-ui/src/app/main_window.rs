@@ -153,7 +153,7 @@ use timer::Timer;
 const SEARCH_DELAY_MS: u32 = 150;
 /// A search that answers within this time keeps the previous counts until
 /// its own arrive, so the status bar changes once (DESIGN.md: Searching).
-const SEARCHING_NAMED_MS: u32 = 300;
+const SEARCHING_NAMED_MS: u32 = crate::core::work::BUSY.as_millis() as u32;
 const STATUS_POLL_MS: u32 = 2_000;
 const SELECTION_DELAY_MS: u32 = 150;
 const AGE_REFRESH_MS: u32 = 60_000;
@@ -448,6 +448,9 @@ pub(crate) struct MainWindow {
     told: [RefCell<selection::NativeSelection>; 3],
     selection_timer: Cell<bool>,
     operation_timer: Cell<bool>,
+    /// What the status bar's entries of Export, Fix and Operation showed,
+    /// which an entry keeps while a new job of its kind waits.
+    kept_jobs: RefCell<[crate::core::status_bar::Kept; 3]>,
     ending: Cell<Ending>,
     /// The end that an Exit waiting for compare windows' saves reaches when
     /// it runs again.
@@ -646,6 +649,7 @@ impl MainWindow {
             told: Default::default(),
             selection_timer: Cell::new(false),
             operation_timer: Cell::new(false),
+            kept_jobs: RefCell::default(),
             ending: Cell::new(Ending::Running),
             ending_after_saves: Cell::new(Ending::Running),
             tool_tips: RefCell::new(Vec::new()),
@@ -1045,13 +1049,37 @@ impl MainWindow {
         }
         let status = StatusCaptions::new(&self.model.borrow(), &*self.numbers.borrow());
         self.show_status(&status);
+        self.show_taskbar();
+    }
+
+    /// The taskbar button's progress, which waits for the status bar's
+    /// (DESIGN.md: Status bar).
+    fn show_taskbar(&self) {
+        if let Some(operations) = self.file_operations.get() {
+            let taskbar = self.model.borrow().taskbar();
+            operations.show_taskbar(taskbar);
+        }
     }
 
     fn show_status(&self, status: &StatusCaptions) {
         let controls = self.controls();
-        let mut jobs = status.jobs.clone();
         let settings_fix = self.settings.open.get().is_some_and(|open| open.follow_fix);
         let now = Instant::now();
+        let mut jobs: Vec<(Job, JobCaption)> = {
+            let model = self.model.borrow();
+            let mut kept = self.kept_jobs.borrow_mut();
+            [Job::Export, Job::Fix, Job::Operation]
+                .into_iter()
+                .zip(kept.iter_mut())
+                .filter_map(|(job, kept)| {
+                    let own = (status.jobs.iter())
+                        .find(|(shown, _)| *shown == job)
+                        .map(|(_, caption)| caption.clone());
+                    let shown = kept.shown(own, model.job_notice_waits(job));
+                    shown.map(|caption| (job, caption))
+                })
+                .collect()
+        };
         {
             let model = self.model.borrow();
             jobs.retain(|(job, _)| *job != Job::Fix || !settings_fix);
@@ -1445,7 +1473,12 @@ impl MainWindow {
         {
             return Some(Awaited::Listing(side));
         }
-        work.slow(list, selection, now)
+        // Last, for the waits that no work task times, such as a row
+        // calculation or the walk over taken rows.
+        work.slow(list, selection, now).or_else(|| {
+            self.selection_action_slow(list)
+                .then_some(Awaited::Command(list))
+        })
     }
 
     pub(super) fn cancel_list_work(&self, hwnd: Hwnd, list: List, awaited: Awaited) {
@@ -1453,8 +1486,14 @@ impl MainWindow {
             return;
         }
         if let Awaited::Matching(side) = awaited {
-            self.cancel_matching_selection(List::Panel(side));
+            self.abandon_matching_selection(List::Panel(side));
             self.controls().panels.show_panel(self, side);
+            self.poll_work(hwnd);
+            return;
+        }
+        if let Awaited::Command(list) = awaited {
+            self.forget_selection_action(list);
+            self.show_selection_wait(list);
             self.poll_work(hwnd);
             return;
         }
@@ -3317,6 +3356,8 @@ impl MainWindow {
             for side in Side::BOTH {
                 self.controls().panels.show_panel_message(self, side);
             }
+            // Work that turns slow disables the selection commands.
+            self.controls().key_bar.update_key_bar(self);
         }
         if polled.active {
             hwnd.set_timer(Timer::Work.id(), 250);
@@ -3453,7 +3494,7 @@ impl MainWindow {
         if keystroke == Keystroke::plain(commands::Key::Escape) {
             let active = self.model.borrow().active_list();
             if self.matching_selection_pending(active) {
-                self.cancel_matching_selection(active);
+                self.abandon_matching_selection(active);
                 if let List::Panel(side) = active {
                     self.controls().panels.show_panel(self, side);
                 }
@@ -4350,9 +4391,8 @@ impl MainWindow {
     fn show_progress(&self, hwnd: Hwnd, progress: OperationProgress) {
         if progress.status_changed {
             self.update_status();
-        }
-        if let Some(operations) = self.file_operations.get() {
-            operations.show_taskbar(progress.taskbar);
+        } else {
+            self.show_taskbar();
         }
         if progress.polls {
             hwnd.set_timer(Timer::OperationsPoll.id(), OPERATIONS_POLL_MS);
@@ -5273,6 +5313,10 @@ impl MainWindow {
                 self.save_settings(true);
             }
             Timer::Work => self.poll_work(hwnd),
+            Timer::SelectionWait => {
+                self.wait_for_slow_selection(hwnd);
+                self.poll_work(hwnd);
+            }
             Timer::NativeSelection => {
                 self.continue_native_selections(hwnd);
                 if self.update_live() {

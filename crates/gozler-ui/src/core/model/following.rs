@@ -26,6 +26,8 @@ pub(super) struct OperationFollow {
     receipt: Option<Receipt>,
     presentation: Option<Arc<Presentation>>,
     presentation_version: u64,
+    /// What the status bar's transfer summary shows of the presentation.
+    transfer: crate::core::status_bar::TransferNotice,
     dirty: bool,
     release_requested: bool,
     release: Option<Release>,
@@ -43,6 +45,7 @@ impl OperationFollow {
             receipt: None,
             presentation: None,
             presentation_version: 0,
+            transfer: Default::default(),
             dirty: false,
             release_requested: false,
             release: None,
@@ -358,7 +361,27 @@ impl Model {
             "file_operations.show_tip"
         };
         caption.summary_tip = self.strings.text(key).to_owned();
-        Some(caption)
+        self.following.transfer.shown(caption)
+    }
+
+    /// Follows the transfer summary as [`Model::refresh_job_notice`] follows
+    /// the jobs; returns when it shows more.
+    pub(super) fn refresh_transfer_notice(&mut self, now: Instant) -> Option<std::time::Duration> {
+        let following = &mut self.following;
+        let caption = (following.presentation.as_ref()).and_then(|shown| shown.caption.as_ref());
+        following.transfer.update(caption, now);
+        following.transfer.remaining(now)
+    }
+
+    /// What the taskbar button shows of the operations: their progress once
+    /// the status bar shows one running, so a fast operation never shows it.
+    pub(crate) fn taskbar(&self) -> file_operations::Taskbar {
+        let shown = self.following.transfer.shows_running()
+            || (self.job_runs(Job::Operation) && self.job_notice_visible(Job::Operation));
+        match &self.following.presentation {
+            Some(presentation) if shown => presentation.progress.taskbar,
+            _ => file_operations::Taskbar::None,
+        }
     }
 
     pub(crate) fn operation_speed(&self) -> Option<file_operations::Speed> {

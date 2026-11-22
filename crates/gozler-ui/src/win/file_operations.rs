@@ -22,11 +22,11 @@ use windows::Win32::UI::Controls::{
     LVM_GETITEMW, LVM_GETNEXTITEM, LVM_GETTILEVIEWINFO, LVM_HITTEST, LVM_INSERTCOLUMNW,
     LVM_INSERTITEMW, LVM_SCROLL, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETINSERTMARK,
     LVM_SETITEMSTATE, LVM_SETITEMW, LVM_SETTILEVIEWINFO, LVM_SETVIEW, LVN_BEGINDRAG,
-    LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_KEYDOWN, LVNI_SELECTED,
-    LVS_EX_DOUBLEBUFFER, LVS_EX_INFOTIP, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
-    LVSIL_NORMAL, LVTILEVIEWINFO, LVTVIF_FIXEDWIDTH, LVTVIM_COLUMNS, LVTVIM_TILESIZE, NM_DBLCLK,
-    NMLISTVIEW, NMLVEMPTYMARKUP, NMLVKEYDOWN, PBM_GETSTATE, PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED,
-    SetWindowTheme, WC_LISTVIEWW,
+    LVN_GETEMPTYMARKUP, LVN_GETINFOTIPW, LVN_ITEMCHANGED, LVN_ITEMCHANGING, LVN_KEYDOWN,
+    LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_INFOTIP, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS,
+    LVS_SINGLESEL, LVSIL_NORMAL, LVTILEVIEWINFO, LVTVIF_FIXEDWIDTH, LVTVIM_COLUMNS,
+    LVTVIM_TILESIZE, NM_DBLCLK, NMLISTVIEW, NMLVEMPTYMARKUP, NMLVKEYDOWN, PBM_GETSTATE,
+    PBM_SETSTATE, PBST_NORMAL, PBST_PAUSED, SetWindowTheme, WC_LISTVIEWW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_DELETE;
 use windows::Win32::UI::Shell::{
@@ -108,6 +108,9 @@ pub(crate) struct Tile<'a> {
 /// What the queue list told its parent.
 pub(crate) enum QueueNotify<'a> {
     Activated,
+    /// The selected row is about to change; the answer `LRESULT(1)` keeps
+    /// it.
+    SelectionChanging,
     /// The selected row changed.
     SelectionChanged,
     /// The person started dragging a row with the left button.
@@ -511,12 +514,14 @@ impl QueueList {
         // notification's lifetime.
         let decoded = unsafe {
             match header.code {
-                LVN_ITEMCHANGED => {
+                LVN_ITEMCHANGING | LVN_ITEMCHANGED => {
                     let change = &*pointer.cast::<NMLISTVIEW>();
-                    if (change.uNewState ^ change.uOldState) & LVIS_SELECTED.0 != 0 {
-                        QueueNotify::SelectionChanged
-                    } else {
+                    if (change.uNewState ^ change.uOldState) & LVIS_SELECTED.0 == 0 {
                         QueueNotify::Other
+                    } else if header.code == LVN_ITEMCHANGING {
+                        QueueNotify::SelectionChanging
+                    } else {
+                        QueueNotify::SelectionChanged
                     }
                 }
                 LVN_BEGINDRAG => QueueNotify::BeginDrag,

@@ -1317,13 +1317,15 @@ impl Pane {
             .is_none_or(|old| !old.rows.same_order(&view.rows));
         drop(previous);
         drop(strings);
+        // The list stays enabled while the tiles take a new order, because
+        // disabling it repaints it whole for the moment that takes;
+        // `tiles_blocked` refuses its input meanwhile.
         if identity_changed {
             self.tiles_blocked.set(true);
             if self.drag.get().is_some() {
                 window::release_mouse();
             }
             self.end_drag();
-            c.list.hwnd().set_enabled(false);
         }
         let old = self.view.replace(Some(view));
         self.retired
@@ -1466,7 +1468,6 @@ impl Pane {
                     }
                     if current() {
                         self.tiles_blocked.set(false);
-                        list.hwnd().set_enabled(true);
                     }
                     if current()
                         && let Some(index) =
@@ -1923,10 +1924,17 @@ impl WindowProc for Pane {
                     return None;
                 }
                 let notification = c.list.notification(notification)?;
-                if self.tiles_blocked.get() || self.applying_tiles.get() {
-                    return Some(LRESULT(0));
-                }
+                let blocked = self.tiles_blocked.get() || self.applying_tiles.get();
                 match notification {
+                    // While the tiles take a new order, a click would select
+                    // a place that is about to show another transfer, so
+                    // the list keeps its selection until `apply_tiles`
+                    // selects the shown transfer's tile.
+                    QueueNotify::SelectionChanging => {
+                        let refused = self.tiles_blocked.get() && !self.applying_tiles.get();
+                        Some(LRESULT(isize::from(refused)))
+                    }
+                    _ if blocked => Some(LRESULT(0)),
                     QueueNotify::SelectionChanged => {
                         let index = c.list.selected();
                         let id = index.and_then(|index| {

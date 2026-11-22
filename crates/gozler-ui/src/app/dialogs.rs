@@ -134,6 +134,7 @@ impl DialogProc for About<'_> {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -230,6 +231,7 @@ impl DialogProc for ServiceReport<'_> {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -350,6 +352,7 @@ impl DialogProc for CustomDate {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -499,6 +502,7 @@ impl DialogProc for CustomSize {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -735,6 +739,7 @@ impl DialogProc for Transfer {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -910,6 +915,7 @@ impl DialogProc for NewFolder<'_> {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -998,6 +1004,7 @@ impl DialogProc for DeleteUnseen {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -1122,6 +1129,7 @@ impl DialogProc for SelectFiles {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -1252,6 +1260,7 @@ impl DialogProc for ViewerFind {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::Picked { .. }
+            | DialogMessage::Updating { .. }
             | DialogMessage::Other => false,
         }
     }

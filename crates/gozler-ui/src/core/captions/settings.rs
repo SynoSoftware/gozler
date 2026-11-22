@@ -378,7 +378,7 @@ pub(crate) fn settings_job(
     JobCaption {
         text,
         progress,
-        cancel: model.fix().can_cancel(),
+        cancel: model.job_cancel_shown(Job::Fix),
     }
 }
 

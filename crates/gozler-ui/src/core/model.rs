@@ -2413,20 +2413,23 @@ impl Model {
     /// File > Cancel targets the newest running job, or the last started
     /// job when none runs; status buttons target their individual jobs.
     pub(crate) fn job(&self) -> Job {
-        let runs = |job: &Job| match job {
+        let mut started = self.started_jobs.iter().rev();
+        (started.clone().find(|(job, _)| self.job_runs(*job)))
+            .or_else(|| started.next())
+            .copied()
+            .map(|(job, _)| job)
+            .unwrap_or(Job::Export)
+    }
+
+    fn job_runs(&self, job: Job) -> bool {
+        match job {
             Job::Export => self.exporting(),
             Job::Fix => self.fix.running(),
             Job::Operation => self
                 .operation
                 .as_ref()
                 .is_some_and(StatusOperation::can_cancel),
-        };
-        let mut started = self.started_jobs.iter().rev();
-        (started.clone().find(|(job, _)| runs(job)))
-            .or_else(|| started.next())
-            .copied()
-            .map(|(job, _)| job)
-            .unwrap_or(Job::Export)
+        }
     }
 
     fn job_started(&mut self, job: Job) {
@@ -2457,16 +2460,31 @@ impl Model {
                     .as_ref()
                     .is_some_and(StatusOperation::succeeded),
             };
-            self.job_notices[job.index()].update(transient, now);
+            let running = self.job_runs(job);
+            self.job_notices[job.index()].update(running, transient, now);
         }
+        let transfer = self.refresh_transfer_notice(now);
         self.job_notices
             .iter()
             .filter_map(|notice| notice.remaining(now))
+            .chain(transfer)
             .min()
     }
 
     pub(crate) fn job_notice_visible(&self, job: Job) -> bool {
         self.job_notices[job.index()].visible()
+    }
+
+    /// Whether `job` started and shows nothing of its own yet, so its entry
+    /// keeps what it showed ([`super::status_bar::Kept`]).
+    pub(crate) fn job_notice_waits(&self, job: Job) -> bool {
+        self.job_notices[job.index()].waits()
+    }
+
+    /// Whether `job`'s entry offers its Cancel, which waits until the job
+    /// is slow; File > Cancel stops it before then ([`Self::can_cancel`]).
+    pub(crate) fn job_cancel_shown(&self, job: Job) -> bool {
+        self.can_cancel(job) && self.job_notices[job.index()].cancel_shown()
     }
 
     /// The file operation the middle group shows ([`StatusOperation`]).
@@ -5183,10 +5201,7 @@ pub(crate) mod tests {
                 ]
             }
         );
-        assert_eq!(
-            captions::selection_status(&model, &English),
-            "Reading the selection…"
-        );
+        assert_eq!(captions::selection_status(&model, &English), "2 selected");
         let fetch = model
             .read_selection(List::Search)
             .expect("the selection is read");
@@ -5436,10 +5451,10 @@ pub(crate) mod tests {
         );
     }
 
-    /// A failed read left unread would say "Reading the selection…", with
-    /// its commands disabled, until the person selected again, and nothing
-    /// would say why (DESIGN.md: T3, T4); showing the failure over a search in
-    /// flight would drop that search's reply.
+    /// A failed read left unread would show the selection's count with no
+    /// size, with its commands disabled, until the person selected again,
+    /// and nothing would say why (DESIGN.md: T3, T4); showing the failure
+    /// over a search in flight would drop that search's reply.
     #[test]
     fn a_selection_read_that_fails_shows_the_failure_and_polls() {
         let mut model = showing(50_000);
@@ -6037,6 +6052,9 @@ pub(crate) mod tests {
         let mut model = showing(10);
         model.start_fix(&Fix::Update);
         export(&mut model);
+        let start = Instant::now();
+        model.refresh_job_notice(start);
+        model.refresh_job_notice(start + crate::core::work::SLOW);
         let status = captions::StatusCaptions::new(&model, &English);
         assert_eq!(
             status.jobs.iter().map(|(job, _)| *job).collect::<Vec<_>>(),

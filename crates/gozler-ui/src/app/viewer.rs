@@ -50,6 +50,9 @@ const WINDOW_CLASS: &str = "gozler.ui.viewer";
 const READ_TIMER: usize = 1;
 /// Scrolls toward the pointer while a drag holds it outside the area.
 const SCROLL_TIMER: usize = 2;
+/// Shows "Reading…" once a file with no page before it has been opening
+/// for [`crate::core::work::BUSY`], so a quick open shows only the page.
+const READING_TIMER: usize = 3;
 
 /// What a Viewer shows.
 pub(super) enum Files {
@@ -129,6 +132,8 @@ impl Viewers {
             reader: RefCell::new(None),
             waker: OnceCell::new(),
             resume: Cell::new(None),
+            opening: Cell::new(None),
+            reading_since: Cell::new(Instant::now()),
             slow: Cell::new(false),
             read_timer: Cell::new(false),
             wrap: Cell::new(state.wrap),
@@ -262,6 +267,12 @@ struct Viewer {
     /// Where the next opening of the file shows it again, after a removal
     /// or a failure. Reload shows the place of the page it keeps instead.
     resume: Cell<Option<Reopening>>,
+    /// While `N` or `P` opens another file, its index. The page, the title
+    /// and every command stay with the file at `index` until it opened, as
+    /// Reload keeps its page (DESIGN.md: The Viewer).
+    opening: Cell<Option<usize>>,
+    /// When the file of [`Shown::Reading`] started to open.
+    reading_since: Cell<Instant>,
     slow: Cell<bool>,
     read_timer: Cell<bool>,
     wrap: Cell<bool>,
@@ -321,6 +332,8 @@ impl Viewer {
                 .expect("start sets the wake endpoint")
                 .clone(),
         )));
+        // The area starts as Shown::Reading, for the file or the selection.
+        self.wait_to_say_reading(hwnd);
         match files {
             Files::One(path) => {
                 self.files.replace(vec![path]);
@@ -341,17 +354,24 @@ impl Viewer {
         self.files.borrow().get(self.index.get()).cloned()
     }
 
-    /// Opens the file at `index` from its start, as `N` and `P` do.
+    /// Opens the file at `index` from its start.
     fn show_file(&self, hwnd: Hwnd) {
+        self.name_file(hwnd);
+        self.read_file(hwnd);
+    }
+
+    /// Names the file at `index` in the title and the status bar.
+    fn name_file(&self, hwnd: Hwnd) {
         let name = self
             .path()
             .map(|path| text::name_of(&String::from_utf16_lossy(&path)).to_owned());
         self.name.replace(name.unwrap_or_default());
         self.apply_title(hwnd);
-        self.read_file(hwnd);
     }
 
-    /// Opens the file again from its start, or from `resume`.
+    /// Opens the file again from its start, or from `resume`. The area
+    /// says "Reading…" only once the open has taken
+    /// [`crate::core::work::BUSY`].
     fn read_file(&self, hwnd: Hwnd) {
         let Some(path) = self.path() else {
             return;
@@ -361,8 +381,20 @@ impl Viewer {
         } else {
             return;
         }
+        // This open replaces one of `N` or `P`.
+        self.opening.set(None);
         self.slow.set(false);
+        // An area that already waits, for the files of a selection, keeps
+        // its wait, so "Reading…" that shows does not go and come back.
+        if !matches!(*self.shown.borrow(), Shown::Reading) {
+            self.wait_to_say_reading(hwnd);
+        }
         self.set_shown(hwnd, Shown::Reading);
+    }
+
+    fn wait_to_say_reading(&self, hwnd: Hwnd) {
+        self.reading_since.set(Instant::now());
+        hwnd.set_timer(READING_TIMER, crate::core::work::BUSY.as_millis() as u32);
     }
 
     /// `F2`: opens the file again and shows it where the page shows it once
@@ -376,19 +408,31 @@ impl Viewer {
                 if let Some(reader) = self.reader.borrow_mut().as_mut() {
                     reader.open(path);
                 }
+                // This open replaces one of `N` or `P`.
+                self.opening.set(None);
             }
             _ => self.read_file(hwnd),
         }
     }
 
-    /// `N` and `P`: shows the next or the previous of the files.
+    /// The file that `N` and `P` step from, which the menus' Next file and
+    /// Previous file enable from: the one that opens, so held keys advance
+    /// on a slow share, else the one that shows.
+    fn stepped_from(&self) -> usize {
+        self.opening.get().unwrap_or(self.index.get())
+    }
+
+    /// `N` and `P`: shows the next or the previous of the files. The page,
+    /// its title and its commands stay with the file that shows until the
+    /// next one opened, as Reload keeps them, so the area never shows
+    /// "Reading…" for the moment an open takes ([`Self::read_events`]).
     fn step_file(&self, hwnd: Hwnd, forward: bool) {
         let count = self.files.borrow().len();
-        let index = self.index.get();
+        let from = self.stepped_from();
         let next = if forward {
-            index + 1
+            from + 1
         } else {
-            let Some(previous) = index.checked_sub(1) else {
+            let Some(previous) = from.checked_sub(1) else {
                 return;
             };
             previous
@@ -396,11 +440,28 @@ impl Viewer {
         if next >= count {
             return;
         }
-        self.index.set(next);
-        self.resume.set(None);
-        self.show_file(hwnd);
+        let shows = self.shown.borrow().document().is_some();
+        // Back to the file that shows: its page stays where it is.
+        if shows && self.opening.get().is_some() && next == self.index.get() {
+            self.cancel_read(hwnd);
+            return;
+        }
+        if !shows {
+            self.index.set(next);
+            self.resume.set(None);
+            self.show_file(hwnd);
+            return;
+        }
+        // Copy and Find that wait would act on the next file once it opened.
+        self.asked.borrow_mut().clear();
+        let path = self.files.borrow().get(next).cloned();
+        if let (Some(path), Some(reader)) = (path, self.reader.borrow_mut().as_mut()) {
+            reader.open(path);
+            self.opening.set(Some(next));
+        }
     }
 
+    /// Keeps the page's place for the next open of its file.
     fn remember_place(&self) {
         if let Some(document) = self.shown.borrow().document() {
             self.resume.set(Some(document.reopening()));
@@ -483,14 +544,20 @@ impl Viewer {
         let Some(c) = self.controls.get() else {
             return;
         };
+        let shown = self.shown.borrow();
+        let quiet = matches!(*shown, Shown::Reading)
+            && self.reading_since.get().elapsed() < crate::core::work::BUSY;
         let message = if self.slow.get() {
-            let path = self.path().map(|path| String::from_utf16_lossy(&path));
+            // The wait is for the file that opens.
+            let opens = self.opening.get().unwrap_or(self.index.get());
+            let path = (self.files.borrow().get(opens)).map(|path| String::from_utf16_lossy(path));
             Some((waiting(&self.strings.borrow(), path.as_deref()), true))
+        } else if quiet {
+            None
         } else {
-            self.shown
-                .borrow()
-                .message(&self.strings.borrow(), &self.name.borrow())
+            shown.message(&self.strings.borrow(), &self.name.borrow())
         };
+        drop(shown);
         let (text, retry) = message.clone().unwrap_or_default();
         let key = self.message_button();
         let caption = self.strings.borrow().text(key).to_owned();
@@ -646,6 +713,8 @@ impl Viewer {
         }
         self.asked.borrow_mut().clear();
         self.slow.set(false);
+        // A cancelled `N` or `P` stays on the file whose page shows.
+        self.opening.set(None);
         {
             let mut shown = self.shown.borrow_mut();
             if let Some(document) = shown.document_mut() {
@@ -759,11 +828,23 @@ impl Viewer {
                     }
                 }
                 ViewerEvent::Opened { len, first } => {
-                    // Only Reload keeps a page while the file opens.
+                    // Reload keeps a page while the file opens, at whose
+                    // place the file shows; `N` and `P` keep the page of
+                    // another file, and show the new one from its start.
                     let resume = self.resume.take();
-                    let at = self.shown.borrow().document().map(Document::reopening);
+                    let at = match self.opening.take() {
+                        Some(next) => {
+                            // The place kept is the page's, of another file.
+                            self.index.set(next);
+                            self.name_file(hwnd);
+                            None
+                        }
+                        None => (self.shown.borrow().document())
+                            .map(Document::reopening)
+                            .or(resume),
+                    };
                     let mut document = Document::new(len, first, self.wrap.get());
-                    if let Some(at) = at.or(resume) {
+                    if let Some(at) = at {
                         document.reopen(at);
                     }
                     self.set_shown(hwnd, Shown::File(Box::new(document)));
@@ -804,7 +885,17 @@ impl Viewer {
                     }
                 }
                 ViewerEvent::Failed { opened, reason } => {
-                    self.remember_place();
+                    // The file that `N` or `P` opens could not open: the
+                    // message names it, and Retry opens it from its start.
+                    // The open replaced every read of the page kept
+                    // meanwhile, so this failure is the open's.
+                    if let Some(next) = self.opening.take() {
+                        self.index.set(next);
+                        self.resume.set(None);
+                        self.name_file(hwnd);
+                    } else {
+                        self.remember_place();
+                    }
                     self.set_shown(hwnd, Shown::Failed { opened, reason });
                 }
             }
@@ -826,8 +917,11 @@ impl Viewer {
         }
         let mut allowed = true;
         match removal {
+            // The release ends an open of `N` or `P` too; the page shown is
+            // the file that opens again.
             Removal::Query => {
                 self.remember_place();
+                self.opening.set(None);
                 if let Some(reader) = self.reader.borrow_mut().as_mut() {
                     allowed = reader.query_remove();
                 }
@@ -847,6 +941,7 @@ impl Viewer {
             // A drive pulled out without asking sends only this.
             Removal::Complete => {
                 self.remember_place();
+                self.opening.set(None);
                 if let Some(reader) = self.reader.borrow_mut().as_mut() {
                     reader.release(false);
                 }
@@ -987,6 +1082,11 @@ impl Viewer {
     /// that wait already; a newer Copy, or a newer Find, replaces one that
     /// waits.
     fn ask(&self, hwnd: Hwnd, asked: Asked) {
+        // While `N` or `P` opens another file, the reader reads that one,
+        // so Copy and Find of the page that shows do nothing.
+        if self.opening.get().is_some() {
+            return;
+        }
         {
             let mut waiting = self.asked.borrow_mut();
             let kind = std::mem::discriminant(&asked);
@@ -1269,6 +1369,20 @@ impl WindowProc for Viewer {
                 self.poll_read(hwnd);
                 Some(LRESULT(0))
             }
+            Message::Timer(READING_TIMER) => {
+                let ran = self.reading_since.get().elapsed();
+                match crate::core::work::BUSY.checked_sub(ran) {
+                    Some(left) if !left.is_zero() => {
+                        hwnd.set_timer(READING_TIMER, left.as_millis().max(1) as u32);
+                    }
+                    _ => {
+                        hwnd.kill_timer(READING_TIMER);
+                        self.show_message();
+                        self.layout(hwnd);
+                    }
+                }
+                Some(LRESULT(0))
+            }
             Message::Timer(SCROLL_TIMER) => {
                 if self.dragging.get() {
                     self.autoscroll(hwnd);
@@ -1350,7 +1464,7 @@ impl WindowProc for Viewer {
                         selected: document.is_some_and(Document::selected),
                         caret: document.is_some_and(Document::has_caret),
                         can_toggle_caret: document.is_some_and(Document::can_toggle_caret),
-                        file: (self.index.get(), self.files.borrow().len()),
+                        file: (self.stepped_from(), self.files.borrow().len()),
                         zoom: self.zoom.get(),
                     }
                 };
@@ -1420,6 +1534,7 @@ impl WindowProc for Viewer {
                 self.hwnd.set(None);
                 hwnd.kill_timer(READ_TIMER);
                 hwnd.kill_timer(SCROLL_TIMER);
+                hwnd.kill_timer(READING_TIMER);
                 if let Some(waker) = self.waker.get() {
                     waker.close();
                 }

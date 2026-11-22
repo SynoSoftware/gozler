@@ -92,6 +92,9 @@ pub(super) enum Awaited {
     Listing(Side),
     /// Save selection to file… or a Load selection command of the panel.
     SelectionList(Side),
+    /// A command that waits for the list's selection, while the window
+    /// still writes, reads or checks it; Cancel forgets the command.
+    Command(List),
 }
 
 impl Awaited {
@@ -262,6 +265,8 @@ impl Work {
                 self.folders.cancel_read(side);
             }
             Awaited::SelectionList(side) => self.panels.cancel_listing(side),
+            // The window forgets the command; the work it waits for goes on.
+            Awaited::Command(_) => {}
         }
         self.retire_groups();
     }

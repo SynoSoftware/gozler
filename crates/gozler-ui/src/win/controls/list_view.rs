@@ -11,24 +11,29 @@ use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT};
 use windows::Win32::UI::Controls::{
     HDF_SORTDOWN, HDF_SORTUP, HDHITTESTINFO, HDI_FORMAT, HDITEMW, HDM_GETITEMRECT, HDM_GETITEMW,
     HDM_HITTEST, HDM_SETITEMW, LIST_VIEW_ITEM_STATE_FLAGS, LVCF_FMT, LVCF_TEXT, LVCF_WIDTH,
-    LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO, LVIR_BOUNDS, LVIR_LABEL, LVIS_DROPHILITED,
-    LVIS_FOCUSED, LVIS_OVERLAYMASK, LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN, LVM_ENSUREVISIBLE,
-    LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNW, LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE,
-    LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE, LVM_GETNEXTITEM,
-    LVM_GETSELECTEDCOUNT, LVM_GETSELECTIONMARK, LVM_GETSTRINGWIDTHW, LVM_GETTOPINDEX, LVM_HITTEST,
-    LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SCROLL, LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY,
-    LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST,
-    LVM_SETITEMCOUNT, LVM_SETITEMSTATE, LVM_SETSELECTIONMARK, LVN_BEGINDRAG, LVN_ITEMACTIVATE,
-    LVNI_FOCUSED, LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP,
+    LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVHITTESTINFO, LVIF_STATE, LVIR_BOUNDS, LVIR_LABEL,
+    LVIS_DROPHILITED, LVIS_FOCUSED, LVIS_OVERLAYMASK, LVIS_SELECTED, LVITEMW, LVM_DELETECOLUMN,
+    LVM_ENSUREVISIBLE, LVM_GETCOLUMNORDERARRAY, LVM_GETCOLUMNW, LVM_GETCOLUMNWIDTH,
+    LVM_GETCOUNTPERPAGE, LVM_GETHEADER, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMSTATE,
+    LVM_GETNEXTITEM, LVM_GETSELECTEDCOUNT, LVM_GETSELECTIONMARK, LVM_GETSTRINGWIDTHW,
+    LVM_GETTOPINDEX, LVM_HITTEST, LVM_INSERTCOLUMNW, LVM_REDRAWITEMS, LVM_SCROLL,
+    LVM_SETCALLBACKMASK, LVM_SETCOLUMNORDERARRAY, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMCOUNT, LVM_SETITEMSTATE,
+    LVM_SETSELECTIONMARK, LVN_BEGINDRAG, LVN_ITEMACTIVATE, LVN_ITEMCHANGING, LVNI_FOCUSED,
+    LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_HEADERDRAGDROP,
     LVS_EX_INFOTIP, LVS_EX_LABELTIP, LVS_OWNERDATA, LVS_REPORT, LVS_SHAREIMAGELISTS,
     LVS_SHOWSELALWAYS, LVSICF_NOSCROLL, LVSIL_SMALL, NM_CLICK, NMHDR, NMITEMACTIVATE, NMLISTVIEW,
     WC_LISTVIEWW,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::DragDetect;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    DragDetect, VIRTUAL_KEY, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RIGHT,
+    VK_SPACE, VK_UP,
+};
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_STYLE, GetDlgCtrlID, GetWindowLongPtrW, IsWindow, SB_LINEDOWN, SB_LINEUP, WINDOW_EX_STYLE,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCDESTROY, WM_NOTIFY, WM_VSCROLL, WS_TABSTOP, WS_VSCROLL,
+    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCDESTROY, WM_NOTIFY, WM_RBUTTONDBLCLK,
+    WM_RBUTTONDOWN, WM_VSCROLL, WS_TABSTOP, WS_VSCROLL,
 };
 use windows::core::PWSTR;
 
@@ -61,6 +66,21 @@ impl ListView {
         // SAFETY: this thread owns the control; the stateless subclass is
         // removed when the control is destroyed.
         if unsafe { SetWindowSubclass(self.0.0, Some(cursor_mouse), 0, 0) }.as_bool() {
+            Ok(())
+        } else {
+            Err(windows::core::Error::from_thread())
+        }
+    }
+
+    /// Asks the parent before a click or a key of the list's own changes
+    /// the selection or the focused row: it sends `LVN_ITEMCHANGING`, which
+    /// an owner-data list never sends itself (Microsoft's LVN_ITEMCHANGING
+    /// page), and a parent that answers 1 keeps both; a refused click only
+    /// makes the list the focused control.
+    pub(crate) fn ask_before_selecting(self) -> windows::core::Result<()> {
+        // SAFETY: this thread owns the control; the stateless subclass is
+        // removed when the control is destroyed.
+        if unsafe { SetWindowSubclass(self.0.0, Some(selection_guard), 0, 0) }.as_bool() {
             Ok(())
         } else {
             Err(windows::core::Error::from_thread())
@@ -851,6 +871,73 @@ unsafe extern "system" fn cursor_mouse(
     if message == WM_NCDESTROY {
         // SAFETY: this control owns the stateless subclass until destruction.
         let _ = unsafe { RemoveWindowSubclass(hwnd, Some(cursor_mouse), 0) };
+    }
+    // SAFETY: the original parameters are forwarded unchanged.
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
+/// [`ListView::ask_before_selecting`]. It runs before
+/// [`ListView::focus_on_click`]'s subclass, which a later subclass does.
+/// The keys it asks about are the list's own that select or move the
+/// focused row: the window takes Space and the cursor keys alone or with
+/// Shift, so only Ctrl's reach it.
+unsafe extern "system" fn selection_guard(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    let list = ListView(Hwnd(hwnd));
+    let asked = match message {
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK | WM_RBUTTONDOWN | WM_RBUTTONDBLCLK => {
+            let mut screen = POINT {
+                x: lparam.0 as i16 as i32,
+                y: (lparam.0 >> 16) as i16 as i32,
+            };
+            // SAFETY: the point is local and the message targets this live control.
+            let _ = unsafe { ClientToScreen(hwnd, &mut screen) };
+            Some(list.row_at((screen.x, screen.y)))
+        }
+        WM_KEYDOWN => {
+            let key = VIRTUAL_KEY(wparam.0 as u16);
+            let moves = matches!(
+                key,
+                VK_UP | VK_DOWN | VK_LEFT | VK_RIGHT | VK_PRIOR | VK_NEXT | VK_HOME | VK_END
+            );
+            (key == VK_SPACE || moves).then(|| list.focused())
+        }
+        _ => None,
+    };
+    if let Some(row) = asked {
+        // SAFETY: the control is live on its owning thread.
+        let id = unsafe { GetDlgCtrlID(hwnd) } as usize;
+        let query = NMLISTVIEW {
+            hdr: NMHDR {
+                hwndFrom: hwnd,
+                idFrom: id,
+                code: LVN_ITEMCHANGING,
+            },
+            iItem: row.map_or(-1, |row| row as i32),
+            uChanged: LVIF_STATE,
+            uNewState: LVIS_SELECTED.0,
+            ..Default::default()
+        };
+        // SAFETY: the notification outlives the synchronous WM_NOTIFY.
+        let refused =
+            unsafe { send_pointer(list.hwnd().parent(), WM_NOTIFY, id, &raw const query) } != 0;
+        // A refused click still makes the list the focused control, and
+        // moves neither its focused row nor its selection mark.
+        if refused {
+            list.hwnd().focus();
+            list.hwnd().parent().show_focus_cues();
+            return LRESULT(0);
+        }
+    }
+    if message == WM_NCDESTROY {
+        // SAFETY: this control owns the stateless subclass until destruction.
+        let _ = unsafe { RemoveWindowSubclass(hwnd, Some(selection_guard), 0) };
     }
     // SAFETY: the original parameters are forwarded unchanged.
     unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
