@@ -19,9 +19,9 @@
 //!   (case-sensitive, dashes required). Anything else is fatal (exit 6).
 //! - A parameter-taking switch consumes the next token; a missing or
 //!   unparseable parameter is fatal (exit 4).
-//! - The help switches and `-version` end parsing where they appear, as in
-//!   es, so a token before them can still fail and a token after them is
-//!   ignored.
+//! - The help switches and `-version` answer only after the whole command
+//!   line parses, wherever they appear, so an unknown option or a bad value
+//!   anywhere fails as it would without them. The first of them wins.
 //! - Non-switch tokens become the query: joined with single spaces, in
 //!   command-line order, each token preserved as received. Flags may
 //!   interleave with query tokens freely.
@@ -435,10 +435,9 @@ pub(super) enum SwitchAction {
     Report(Report),
     /// `--insecure-no-server-check`: skip the pipe server's trust check.
     InsecureNoServerCheck,
-    /// `-h` / `-?` / `--h` / `-help` / `--help`: stop parsing and print that
-    /// help screen.
+    /// `-h` / `-?` / `--h` / `-help` / `--help`: print that help screen.
     Help(HelpScreen),
-    /// `-version`: stop parsing and print the version.
+    /// `-version`: print the version.
     Version,
 }
 
@@ -986,6 +985,9 @@ pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
     // search text: after it, a trailing `|` or an open quote in the text
     // would take it in, so `foo| /ad` would find foo or any folder.
     let mut filters: Vec<String> = Vec::new();
+    // Help or version, answered once the whole line has parsed, so a probe
+    // such as `--files --version` fails on an older gozler in any order.
+    let mut answer = None;
     let mut rest = args.iter();
 
     while let Some(token) = rest.next() {
@@ -1016,11 +1018,18 @@ pub fn parse_argv(args: &[String]) -> Result<Command, EsFatal> {
         };
 
         match action {
-            SwitchAction::Help(screen) => return Ok(Command::Help(screen)),
-            SwitchAction::Version => return Ok(Command::Version),
+            SwitchAction::Help(screen) => {
+                answer.get_or_insert(Command::Help(screen));
+            }
+            SwitchAction::Version => {
+                answer.get_or_insert(Command::Version);
+            }
             SwitchAction::Attributes(switch) => filters.push(switch.query_text()),
             action => apply_switch(action, token, &mut rest, &mut plan)?,
         }
+    }
+    if let Some(answer) = answer {
+        return Ok(answer);
     }
 
     plan.query = filters
@@ -1859,19 +1868,25 @@ mod tests {
         );
     }
 
-    /// As in es, `-help` and `-version` end parsing where they appear: a bad
-    /// token before them still fails, and one after them is never read.
+    /// A script probes gozler with its options and `--version`: an option
+    /// that this gozler lacks must fail wherever `--version` stands, or an
+    /// older gozler passes the probe by printing its version.
     #[test]
-    fn help_and_version_end_parsing_where_they_appear() {
+    fn help_and_version_answer_only_a_command_line_that_parses() {
         let quick = Ok(Command::Help(HelpScreen::Quick));
         let full = Ok(Command::Help(HelpScreen::Full));
-        assert_eq!(parse(&["report", "-help", "-bogus"]), full);
-        assert_eq!(parse(&["--help"]), full);
-        assert_eq!(parse(&["/h", "-n"]), quick);
+        assert_eq!(parse(&["report", "-help", "-n", "5"]), full);
         assert_eq!(parse(&["/?"]), quick);
-        assert_eq!(parse(&["--h"]), quick);
-        assert_eq!(parse(&["-version", "-path"]), Ok(Command::Version));
+        assert_eq!(parse(&["-version", "-h"]), Ok(Command::Version));
+        assert_eq!(
+            fatal(&["-version", "-bogus"]).exit_code,
+            ExitCode::UnknownSwitch
+        );
         assert_eq!(fatal(&["-bogus", "-h"]).exit_code, ExitCode::UnknownSwitch);
+        assert_eq!(
+            fatal(&["-version", "-path"]).exit_code,
+            ExitCode::InvalidInput
+        );
     }
 
     #[test]
