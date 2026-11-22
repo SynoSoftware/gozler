@@ -424,7 +424,7 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
                 Reader::CommandLine,
                 "A search shows the files in folders you can open, and folder sizes only if \
                  you see every file. Users and groups listed by `gozlerd see-every-file` \
-                 see every file.",
+                 see every file, unless the search has `--my-permissions`.",
             ),
             (
                 Reader::CommandLine,

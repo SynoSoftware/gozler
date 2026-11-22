@@ -85,7 +85,8 @@ _Avoid_: allowed entry, permitted file
 The one list, kept for the whole PC, of the accounts and groups whose
 members see every entry, whatever the folder permissions say. Adding
 Everyone turns the filter off for every user. Only an administrator changes
-it.
+it. A search with `--my-permissions` ignores the list: it shows what the
+caller would see as a filtered user.
 _Avoid_: whitelist, exception list, admin list
 
 **Filtered user**:

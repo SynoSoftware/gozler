@@ -117,7 +117,7 @@ mod win {
     };
     use gozler_core::links::Links;
     use gozler_core::output::{ResultWriter, write_status};
-    use gozler_core::proto::{DaemonStatus, PIPE_NAME, typed_parts};
+    use gozler_core::proto::{DaemonStatus, PIPE_NAME, ProtoError, typed_parts};
     use gozler_core::query::QueryStart;
     use gozler_core::scope::Coverage;
     use gozler_core::winpath::is_drive_relative;
@@ -237,8 +237,23 @@ mod win {
         let mut answer = Answer::new(&plan, &request.query);
         // The request goes to the daemon; a skipped part is named as typed.
         let query = request.query.clone();
+        // An older gozlerd names a request field it does not know only as
+        // `Search`, and `my_permissions` is the one such field gozler sends.
+        let my_permissions = request.my_permissions;
+        let typed = |failure: Failure| match failure {
+            Failure::Client(ClientError::Refused {
+                code: ProtoError::UnknownRequest,
+                message,
+            }) if my_permissions && message == "Search" => Failure::Client(ClientError::Refused {
+                code: ProtoError::UnknownRequest,
+                message: "--my-permissions".to_owned(),
+            }),
+            failure => failure,
+        };
         if let Some(count) = plan.count {
-            let (totals, skipped) = connection.totals(request)?;
+            let (totals, skipped) = connection
+                .totals(request)
+                .map_err(|error| typed(error.into()))?;
             answer.add_totals(&totals);
             answer.skipped = typed_parts(&query, &skipped);
             let value = match count {
@@ -258,10 +273,12 @@ mod win {
             };
             let destination = plan.export.as_deref().unwrap_or("stdout");
             let mut writer = ResultWriter::new(plan.result_format(), time_zone, out);
-            let skipped = connection.query(request, |page| {
-                answer.add_page(&page);
-                output(writer.page(page), destination)
-            })?;
+            let skipped = connection
+                .query(request, |page| {
+                    answer.add_page(&page);
+                    output(writer.page(page), destination)
+                })
+                .map_err(typed)?;
             answer.skipped = typed_parts(&query, &skipped);
             output(writer.finish(), destination)?;
         }

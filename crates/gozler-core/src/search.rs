@@ -114,6 +114,7 @@ impl Search {
             query: self.query,
             scope: self.scope,
             returns,
+            my_permissions: false,
         }
     }
 }

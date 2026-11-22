@@ -4518,6 +4518,7 @@ mod tests {
                     query,
                     scope: None,
                     returns: Returns::Totals,
+                    my_permissions: false,
                 });
                 let mut json = serde_json::to_vec(&request).expect("serializes");
                 let len = json.len();

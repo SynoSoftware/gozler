@@ -7,10 +7,10 @@
 //! the stored list must apply at the next search without a restart.
 //!
 //! Only SYSTEM and the stored list make a request see every entry. Being an
-//! administrator does not, and a restricted token never does (DESIGN.md:
-//! Visibility). Any failure to learn who is asking or to read the list errs
-//! towards showing less: the request is refused, or filtered by its own
-//! token.
+//! administrator does not, a restricted token never does, and neither does a
+//! search with `my_permissions` (DESIGN.md: Visibility). Any failure to
+//! learn who is asking or to read the list errs towards showing less: the
+//! request is refused, or filtered by its own token.
 
 use std::os::windows::io::BorrowedHandle;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,7 +99,9 @@ impl Visibility {
 }
 
 /// What the client of `pipe` may see, for the last message read from it.
-pub(crate) fn of_pipe_client(pipe: BorrowedHandle<'_>) -> Access {
+/// A request with `my_permissions` sees what the caller's own token may
+/// list, whatever the stored list says.
+pub(crate) fn of_pipe_client(pipe: BorrowedHandle<'_>, my_permissions: bool) -> Access {
     let token = match pipe_client_token(pipe) {
         Ok(Some(token)) => token,
         Ok(None) => return Access::Refused(Refusal::Anonymous),
@@ -107,9 +109,11 @@ pub(crate) fn of_pipe_client(pipe: BorrowedHandle<'_>) -> Access {
     };
     match token.enabled_sids() {
         Err(error) => Access::Refused(Refusal::Unidentified(error)),
-        Ok(sids) if sees_everything(&sids, &stored_sids()) => Access::Sees(Visibility::Everything),
-        // A caller who is neither SYSTEM nor listed, or a restricted token,
-        // which has no enabled SIDs.
+        Ok(sids) if !my_permissions && sees_everything(&sids, &stored_sids()) => {
+            Access::Sees(Visibility::Everything)
+        }
+        // A search with `my_permissions`, a caller who is neither SYSTEM nor
+        // listed, or a restricted token, which has no enabled SIDs.
         Ok(_) => Access::Sees(Visibility::of_token(token)),
     }
 }

@@ -139,6 +139,9 @@ pub struct EsPlan {
     pub json: bool,
     /// Native `--file-id`: the JSON names each result's volume and file ID.
     pub file_id: bool,
+    /// Native `--my-permissions`: show only the entries of the folders the
+    /// caller may list, also when the caller sees every file.
+    pub my_permissions: bool,
     /// The daemon report to print instead of searching; the last one wins.
     pub report: Option<Report>,
     /// Native `--insecure-no-server-check`: skip the pipe-server owner-SID
@@ -173,6 +176,7 @@ impl Default for EsPlan {
             timeout: None,
             json: false,
             file_id: false,
+            my_permissions: false,
             report: None,
             insecure_no_server_check: false,
         }
@@ -426,6 +430,8 @@ pub(super) enum SwitchAction {
     Json,
     /// `--file-id`: name each result's volume and file ID in the JSON.
     FileId,
+    /// `--my-permissions`: show only what the caller's own token may list.
+    MyPermissions,
     Report(Report),
     /// `--insecure-no-server-check`: skip the pipe server's trust check.
     InsecureNoServerCheck,
@@ -467,6 +473,7 @@ impl SwitchAction {
             | SwitchAction::NoResultError
             | SwitchAction::Json
             | SwitchAction::FileId
+            | SwitchAction::MyPermissions
             | SwitchAction::Report(_)
             | SwitchAction::InsecureNoServerCheck
             | SwitchAction::Help(_)
@@ -517,6 +524,14 @@ pub(super) const SWITCHES: &[Switch] = &[
         },
         group: Group::Search,
         help: "Search DIR, even inside a folder that `--leave-out` leaves out",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "my-permissions",
+            action: SwitchAction::MyPermissions,
+        },
+        group: Group::Search,
+        help: "Find only the files in folders you can open, even if you're allowed to see every file",
     },
     Switch {
         spelling: Spelling::Es {
@@ -1212,6 +1227,7 @@ fn apply_switch(
             .push(take_param(rest, token, action)?.to_owned()),
         SwitchAction::Json => plan.json = true,
         SwitchAction::FileId => plan.file_id = true,
+        SwitchAction::MyPermissions => plan.my_permissions = true,
         SwitchAction::Report(report) => plan.report = Some(report),
         SwitchAction::InsecureNoServerCheck => plan.insecure_no_server_check = true,
         SwitchAction::Help(_) | SwitchAction::Version | SwitchAction::Attributes(_) => {
@@ -1380,6 +1396,7 @@ mod tests {
                 timeout: None,
                 json: false,
                 file_id: false,
+                my_permissions: false,
                 report: None,
                 insecure_no_server_check: false,
             }

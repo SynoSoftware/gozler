@@ -343,15 +343,26 @@ async fn handle_connection(
             // Taken before the reply reads the pipe again, because the pipe
             // gives the token of the last message read, and on the blocking
             // pool, because it reads the registry. Asked for each frame, so
-            // a change to the stored list applies at the next search.
+            // a change to the stored list applies at the next search. Taken
+            // after the decode, because a search with `my_permissions` sees
+            // only what the caller's own token may list.
             let pipe = server
                 .as_handle()
                 .try_clone_to_owned()
                 .context("duplicating the pipe handle")?;
-            let access =
-                tokio::task::spawn_blocking(move || access::of_pipe_client(pipe.as_handle()))
-                    .await
-                    .context("access task panicked")?;
+            let (decoded, access) = tokio::task::spawn_blocking(move || {
+                let decoded = decode_request(&frame);
+                let my_permissions = matches!(
+                    &decoded,
+                    Ok(Decoded { request: Request::Search(search), .. }) if search.my_permissions
+                );
+                (
+                    decoded,
+                    access::of_pipe_client(pipe.as_handle(), my_permissions),
+                )
+            })
+            .await
+            .context("access task panicked")?;
             // Query execution plus result serialization is the heaviest CPU
             // work in the process and holds a read lock, so every request runs
             // on the blocking pool rather than stalling an async worker (and
@@ -375,7 +386,7 @@ async fn handle_connection(
                     &snapshots,
                     &user,
                     &access,
-                    &frame,
+                    decoded,
                     &stopped,
                     &mut |reply| tx.blocking_send(reply).is_ok(),
                 );
@@ -449,11 +460,11 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "client stopped reading"))?
 }
 
-/// Answers one request frame from a client running as `user`, with what
-/// `access` lets it see, handing each framed reply to `emit` as soon as it is
-/// encoded. `emit` returning `false` means the client is gone; encoding
-/// stops. `stop` set means the same, and stops a search before its first
-/// reply.
+/// Answers one request, as [`decode_request`] decoded its frame, from a
+/// client running as `user`, with what `access` lets it see, handing each
+/// framed reply to `emit` as soon as it is encoded. `emit` returning `false`
+/// means the client is gone; encoding stops. `stop` set means the same, and
+/// stops a search before its first reply.
 ///
 /// `Hello`, `Status` and `SettingsSaved` answer every client, because they
 /// show no name; `Status` also tells the client what it sees. A request
@@ -462,10 +473,9 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
 /// its folder and name rules over the whole index would let any other user
 /// count hidden entries until the counts spell their names.
 ///
-/// A request from a newer client may hold parts this daemon cannot read
-/// ([`decode_request`]): the reply names the skipped parts in
-/// [`Response::Skipped`] before the answer, or refuses the request with
-/// [`ProtoError::UnknownRequest`].
+/// A request from a newer client may hold parts this daemon cannot read:
+/// the reply names the skipped parts in [`Response::Skipped`] before the
+/// answer, or refuses the request with [`ProtoError::UnknownRequest`].
 #[allow(clippy::too_many_arguments)]
 fn serve(
     volumes: &VolumeSet,
@@ -473,11 +483,11 @@ fn serve(
     snapshots: &Snapshots,
     user: &[u8],
     access: &Access,
-    frame: &[u8],
+    decoded: Result<Decoded, DecodeError>,
     stop: &AtomicBool,
     emit: &mut dyn FnMut(Vec<u8>) -> bool,
 ) {
-    let Decoded { request, skipped } = match decode_request(frame) {
+    let Decoded { request, skipped } = match decoded {
         Ok(decoded) => decoded,
         Err(DecodeError::Unknown(part)) => {
             return reply(
@@ -1010,7 +1020,7 @@ mod tests {
     use gozler_core::proto::{
         CallerSees, DaemonStatus, FileIdentity, FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS,
         PROTO_VERSION, ProtoError, Request, Response, Returns, Rows, SearchRequest, Want,
-        decode_response_frame, encode_request,
+        decode_request, decode_response_frame, encode_request,
     };
     use gozler_core::query::{ParseOptions, ResultNames, parse_query_with};
     use gozler_core::types::{Frn, SortKey, SortSpec, VolumePhase};
@@ -1272,7 +1282,7 @@ mod tests {
             snapshots,
             b"",
             access,
-            frame,
+            decode_request(frame),
             &AtomicBool::new(false),
             &mut |reply| {
                 out.extend_from_slice(&reply);
@@ -1460,6 +1470,7 @@ mod tests {
                 limit: q.limit,
                 wants: q.wants,
             }),
+            my_permissions: false,
         })
     }
 
@@ -1540,7 +1551,7 @@ mod tests {
             &ResultSnapshots::new(),
             b"",
             &Access::Sees(Visibility::Everything),
-            br#"{"t":"Search","query":"#,
+            decode_request(br#"{"t":"Search","query":"#),
             &AtomicBool::new(false),
             &mut |reply| {
                 replies.extend_from_slice(&reply);
@@ -1659,6 +1670,7 @@ mod tests {
             query: parse_query_with(query, ParseOptions::default()).expect("the query parses"),
             scope: scope.map(str::to_string),
             returns: Returns::Totals,
+            my_permissions: false,
         })
     }
 
@@ -1765,6 +1777,7 @@ mod tests {
                 },
                 replaces: None,
             },
+            my_permissions: false,
         });
         let frames = decode_frames(&reply_bytes_in(&vols, &snapshots, &made));
         let Response::ResultSnapshot { id, total: 2 } = frames[0] else {
@@ -1863,6 +1876,7 @@ mod tests {
                     },
                     replaces,
                 },
+                my_permissions: false,
             }))
         };
         let serve_with = |frame: &[u8], stop: bool| {
@@ -1873,7 +1887,7 @@ mod tests {
                 &snapshots,
                 b"",
                 &Access::Sees(Visibility::Everything),
-                frame,
+                decode_request(frame),
                 &AtomicBool::new(stop),
                 &mut |reply| {
                     out.extend_from_slice(&reply);
@@ -1970,7 +1984,7 @@ mod tests {
             &ResultSnapshots::new(),
             b"",
             &Access::Sees(Visibility::Everything),
-            &request_frame(&search(query("hit"))),
+            decode_request(&request_frame(&search(query("hit")))),
             &AtomicBool::new(false),
             &mut |reply| {
                 if out.is_empty() {
@@ -2067,7 +2081,7 @@ mod tests {
             &ResultSnapshots::new(),
             b"",
             &Access::Sees(Visibility::Everything),
-            &request_frame(&search(query("hit"))),
+            decode_request(&request_frame(&search(query("hit")))),
             &AtomicBool::new(false),
             &mut |_page| {
                 emitted += 1;

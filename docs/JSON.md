@@ -87,7 +87,8 @@ unknown or not requested; absence is different from zero.
 | `path_u16` | Exact UTF-16 code units when `path` had to replace an unpaired surrogate |
 
 Creation dates depend on the **Dates created** indexing setting. Folder
-sizes are omitted for callers whose results are filtered by permissions.
+sizes are omitted for callers whose results are filtered by permissions,
+and for every search with `--my-permissions`.
 FILETIME values exceed JavaScript's safe integer range; use an integer parser
 that preserves their precision when exact timestamps matter.
 

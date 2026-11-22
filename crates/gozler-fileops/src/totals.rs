@@ -78,6 +78,7 @@ mod gozlerd {
                         },
                         scope: Some(scope(&status, folder)?),
                         returns: Returns::Totals,
+                        my_permissions: false,
                     };
                     // A query with no clauses has no part to skip.
                     let (totals, _) = client.totals(request).ok()?;

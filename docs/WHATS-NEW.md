@@ -16,6 +16,10 @@
 
 - **Leave out folders.** On the command line, `--leave-out DIR` leaves a folder and everything in it out of a search, and `--leave-in DIR` searches a folder inside it again. The nearest of these folders above a file decides, so `gozler --leave-out C:\Windows --leave-in C:\Windows\Media ext:wav` finds Windows' sounds and no other file in `C:\Windows`. A link does not change what a folder leaves out, and a folder that does not exist leaves nothing out.
 
+#### Find only the files you can open
+
+- **Search with your own permissions.** `--my-permissions` finds only the files in folders you can open, even if you're allowed to see every file. A program that opens the files it finds uses it, so it never offers a file in a folder the person cannot open.
+
 #### Fixed
 
 - `Num -` left a matching folder selected when Settings > General > Selection left folders out, so the next Delete removed that folder with the rest. It now clears matching folders too.

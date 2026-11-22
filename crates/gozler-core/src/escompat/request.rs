@@ -83,7 +83,10 @@ pub fn build_search(
             .clauses
             .push(Clause::single(Test::Folders(folders)));
     }
-    Ok(search.request(returns))
+    Ok(SearchRequest {
+        my_permissions: plan.my_permissions,
+        ..search.request(returns)
+    })
 }
 
 #[cfg(test)]
@@ -253,5 +256,22 @@ mod tests {
                     if wants.contains(&Want::DateCreated) == want_created
             ));
         }
+    }
+
+    /// Without `--my-permissions` the search must not name the field, or an older
+    /// gozlerd, which refuses a field it does not know, refuses every
+    /// search. With it, the field must arrive, or a user on the list of
+    /// users who see every file gets every file.
+    #[test]
+    fn a_search_names_my_permissions_only_when_asked() {
+        let sent = |tokens: &[&str]| {
+            let search = search_in(&plan(tokens), r"C:\").expect("parses");
+            serde_json::to_value(crate::proto::Request::Search(search)).expect("serializes")
+        };
+        assert_eq!(
+            sent(&["--my-permissions", "report"])["my_permissions"],
+            true
+        );
+        assert_eq!(sent(&["report"]).get("my_permissions"), None);
     }
 }

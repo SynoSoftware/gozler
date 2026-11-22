@@ -474,6 +474,7 @@ mod tests {
             query: gozler_core::query::parse_query("x").expect("a valid query"),
             scope: None,
             returns: gozler_core::proto::Returns::Totals,
+            my_permissions: false,
         };
         let mut pages = 0;
         let result = client.query(request, |_| {

@@ -144,6 +144,14 @@ pub struct SearchRequest {
     /// writes it.
     pub scope: Option<String>,
     pub returns: Returns,
+    /// The search sees only the entries of the folders the caller's own
+    /// token may list, also when the caller sees every file
+    /// (`--my-permissions`).
+    /// Sent only when set: an older daemon refuses a field it does not
+    /// know, so it refuses such a search instead of answering it
+    /// unfiltered, and still answers every other search.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub my_permissions: bool,
 }
 
 /// What a [`SearchRequest`] asks for.
