@@ -113,7 +113,7 @@ mod win {
     use super::overview::{Index, Service, render};
     use gozler_client::{CancelToken, Client, ClientError, folder_is_missing};
     use gozler_core::escompat::{
-        Answer, Count, EsPlan, ExitCode, Report, ScopeFolder, build_search,
+        Answer, CLI_PROGRAM, Count, EsPlan, ExitCode, Report, ScopeFolder, build_search,
     };
     use gozler_core::links::Links;
     use gozler_core::output::{ResultWriter, write_status};
@@ -283,7 +283,7 @@ mod win {
             output(writer.finish(), destination)?;
         }
         for warning in answer.warnings() {
-            eprintln!("gozler: warning: {warning}");
+            eprintln!("{CLI_PROGRAM}: warning: {warning}");
         }
         Ok(answer.exit_code(plan.no_result_error))
     }
@@ -359,7 +359,7 @@ mod win {
         output(written.and_then(|()| out.flush()), "stdout")?;
         let warnings = status_warnings(&status);
         for warning in &warnings {
-            eprintln!("gozler: warning: {warning}");
+            eprintln!("{CLI_PROGRAM}: warning: {warning}");
         }
         Ok(if warnings.is_empty() {
             ExitCode::Complete
@@ -379,7 +379,7 @@ mod win {
             warnings.push("some volumes are not ready; the phase above shows why");
         }
         if every_volume.sizes_or_dates_unknown().is_some() {
-            warnings.push("gozler could not read the sizes and dates on some volumes");
+            warnings.push("some volumes have unknown sizes and dates");
         }
         warnings
     }

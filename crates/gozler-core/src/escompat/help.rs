@@ -7,8 +7,8 @@
 //! table is a line of the full reference. [`search_syntax`] renders what of
 //! it holds for the window's search box.
 
-use super::ExitCode;
 use super::argv::{Group, HelpScreen, SORT_KEYS, SWITCHES, Spelling, match_native, match_switch};
+use super::{CLI_PROGRAM, ExitCode, SERVICE_PROGRAM};
 use crate::attributes::LETTERS;
 use crate::output::style::{ColorToken, paint};
 use crate::query::parse::SEARCH_FUNCTIONS;
@@ -61,7 +61,7 @@ pub fn help(screen: HelpScreen, color: bool, columns: Option<usize>) -> String {
         }
     };
     let mut out = String::new();
-    let title = format!("gozler {}", version());
+    let title = format!("{CLI_PROGRAM} {}", version());
     if screen == HelpScreen::Full {
         wrap_usage(
             &mut out,
@@ -87,7 +87,7 @@ pub fn help(screen: HelpScreen, color: bool, columns: Option<usize>) -> String {
     wrap_usage(
         &mut out,
         7,
-        "gozler [options] [search terms]",
+        &format!("{CLI_PROGRAM} [options] [search terms]"),
         Usage::Command,
         color,
         line_width,
@@ -97,14 +97,19 @@ pub fn help(screen: HelpScreen, color: bool, columns: Option<usize>) -> String {
             out.push('\n');
             let examples: Vec<Entry> = EXAMPLES
                 .iter()
-                .map(|example| command(example.usage.to_string(), example.text))
+                .map(|example| command(example.command_line(), example.text))
                 .collect();
             render(&mut out, &examples, color, line_width);
             out.push('\n');
             wrap(&mut out, 0, QUICK_QUOTING, 0, color, line_width);
             quick_exit_codes(&mut out, color);
             out.push_str("For every option, search function and exit code, run ");
-            syntax(&mut out, "gozler --help", Usage::Command, color);
+            syntax(
+                &mut out,
+                &format!("{CLI_PROGRAM} --help"),
+                Usage::Command,
+                color,
+            );
             out.push_str(".\n");
         }
         HelpScreen::Full => {
@@ -131,7 +136,7 @@ fn quick_exit_codes(out: &mut String, color: bool) {
     let code = |out: &mut String, code: ExitCode| {
         paint(out, code.token(), &code.code().to_string(), color);
     };
-    out.push_str("gozler exits ");
+    out.push_str("A search exits ");
     code(out, ExitCode::Complete);
     out.push_str(" when the results are complete, ");
     code(out, ExitCode::Incomplete);
@@ -141,7 +146,7 @@ fn quick_exit_codes(out: &mut String, color: bool) {
 }
 
 const INTRO: &str = "Find files and folders by name, path, size, date or attribute. \
-     Search terms combine with AND. By default gozler prints one full path per line, \
+     A result matches every search term. By default a search prints one full path per line, \
      at most 20 unless `-n` says otherwise, and writes warnings and errors to stderr.";
 
 /// One example: a complete command line and what it finds.
@@ -162,6 +167,11 @@ const fn example(usage: &'static str, text: &'static str) -> Example {
 }
 
 impl Example {
+    /// The whole command line, as the help prints it.
+    fn command_line(&self) -> String {
+        format!("{CLI_PROGRAM} {}", self.usage)
+    }
+
     /// The example, which the window also lists as `query`.
     const fn typed(self, query: &'static str) -> Example {
         Example {
@@ -171,53 +181,33 @@ impl Example {
     }
 }
 
-/// Complete command lines that work as typed in cmd and in PowerShell.
+/// Command lines that work as typed in cmd and in PowerShell, each without
+/// the program name that [`Example::command_line`] puts first.
 const EXAMPLES: &[Example] = &[
-    example("gozler report", "Find names that contain report").typed("report"),
+    example("report", "Find names that contain report").typed("report"),
+    example("readme*.txt", "Find .txt files that start with readme").typed("readme*.txt"),
+    example("report !draft", "Find names with report but not draft").typed("report !draft"),
+    example(r#""ext:cs;txt""#, "Find .cs and .txt files").typed("ext:cs;txt"),
+    example(r"C:\repo\ *.cs", r"Find .cs files anywhere in C:\repo").typed(r"C:\repo\ *.cs"),
     example(
-        "gozler readme*.txt",
-        "Find .txt files that start with readme",
-    )
-    .typed("readme*.txt"),
-    example(
-        "gozler report !draft",
-        "Find names with report but not draft",
-    )
-    .typed("report !draft"),
-    example(r#"gozler "ext:cs;txt""#, "Find .cs and .txt files").typed("ext:cs;txt"),
-    example(
-        r"gozler C:\repo\ *.cs",
-        r"Find .cs files anywhere in C:\repo",
-    )
-    .typed(r"C:\repo\ *.cs"),
-    example(
-        "gozler *.log dm:7days",
+        "*.log dm:7days",
         "Find .log files changed in the last 7 days",
     )
     .typed("*.log dm:7days"),
+    example(r#""size:>1gb""#, "Find files and folders larger than 1 GB").typed("size:>1gb"),
+    example(r#""*.jpg|*.png""#, "Find .jpg and .png files").typed("*.jpg|*.png"),
+    example("*.iso -sort size -n 10", "Show the 10 largest .iso files"),
+    example("-n all report", "Show every match, not just the first 20"),
+    example("-i README", "Find README but not readme"),
     example(
-        r#"gozler "size:>1gb""#,
-        "Find files and folders larger than 1 GB",
-    )
-    .typed("size:>1gb"),
-    example(r#"gozler "*.jpg|*.png""#, "Find .jpg and .png files").typed("*.jpg|*.png"),
-    example(
-        "gozler *.iso -sort size -n 10",
-        "Show the 10 largest .iso files",
-    ),
-    example(
-        "gozler -n all report",
-        "Show every match, not just the first 20",
-    ),
-    example("gozler -i README", "Find README but not readme"),
-    example(
-        "gozler -export-csv out.csv ext:cs",
+        "-export-csv out.csv ext:cs",
         "Save the .cs files to out.csv",
     ),
-    example("gozler --status", "Check whether the index is ready"),
+    example("--status", "Check whether the index is ready"),
 ];
 
-/// Search terms as gozler receives them, after the shell removes its quotes.
+/// Search terms as the program receives them, after the shell removes its
+/// quotes.
 const SEARCH_TERMS: &[(&str, &str)] = &[
     ("report", "Name contains report"),
     ("*.cs", "Whole name matches a wildcard, `*` or `?`"),
@@ -229,7 +219,7 @@ const SEARCH_TERMS: &[(&str, &str)] = &[
     ),
     (
         "<a b>|<c d>",
-        "Both a and b, or both c and d; `!<a b>` negates a group",
+        "Both a and b, or both c and d; `!<a b>` excludes a group",
     ),
     (r"C:\repo\", "Everything below that folder"),
     (
@@ -256,18 +246,18 @@ const SEARCH_TERMS: &[(&str, &str)] = &[
 ];
 
 /// How to type in cmd and PowerShell the search terms that a shell would
-/// otherwise change.
+/// otherwise change, each command without its program name.
 const QUOTING: &[(&str, &str)] = &[
     (
-        r#"gozler "a|b""#,
-        "Quote a term with |, < or > in cmd and PowerShell",
+        r#""a|b""#,
+        "Quote a term with |, <, > or ; in cmd and PowerShell",
     ),
     (
-        r#"gozler \"two words\""#,
+        r#"\"two words\""#,
         "Search for a phrase in cmd or Windows PowerShell 5.1",
     ),
     (
-        r#"gozler '"two words"'"#,
+        r#"'"two words"'"#,
         "Search for a phrase in PowerShell 7.3 or later",
     ),
 ];
@@ -285,6 +275,7 @@ enum Reader {
 
 /// The notes, each topic under its own title, so a reader finds a rule by
 /// its topic. Results and exit codes come last, beside the exit codes.
+/// `{service}` stands for [`SERVICE_PROGRAM`], which [`render_notes`] writes.
 const NOTES: &[(&str, &[(Reader, &str)])] = &[
     (
         "Notes on the command line:",
@@ -292,15 +283,15 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
             (
                 Reader::CommandLine,
                 "Single-dash options also accept `/`, and dashes inside their names are \
-                 optional. Double-dash options must be written exactly as listed. \
-                 A recognized `/` option is an option, as `/p` is `-p`, so write a relative \
-                 path without a leading `/`: `docs/agents`.",
+                 optional. Write double-dash options exactly as listed. \
+                 A `/` word that names an option is that option, as `/p` is \
+                 `-p`, so write a relative path without a leading `/`, as in `docs/agents`.",
             ),
             (
                 Reader::CommandLine,
-                "gozler joins its arguments with spaces and splits them into terms again, \
-                 so the single argument `\"ext:cs report\"` is two terms. A bare `--` is \
-                 search text; it does not end option parsing.",
+                "A space separates terms even inside one argument, so the single argument \
+                 `\"ext:cs report\"` is two terms. A `--` alone is search text, not the end \
+                 of the options.",
             ),
             (
                 Reader::CommandLine,
@@ -310,12 +301,11 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
             ),
             (
                 Reader::CommandLine,
-                "Of the folders that `--leave-out` and `--leave-in` name, the nearest at or \
-                 above a result decides; of two for one folder, the later wins. They test \
-                 where each result really \
-                 is: a link into a left-out folder does not bring its files back, and a \
-                 link inside one does not leave out what it leads to. A folder that does \
-                 not exist leaves nothing out.",
+                "When `--leave-out` and `--leave-in` name folders above a result, the nearest \
+                 one decides. If one folder is named twice, the last one wins. They test \
+                 where each result really is: a link into a left-out folder does not bring \
+                 its files back, and a link inside one does not leave out what it leads to. \
+                 A folder that does not exist leaves nothing out.",
             ),
         ],
     ),
@@ -330,10 +320,11 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
             ),
             (
                 Reader::Both,
-                "Use `<` and `>` to group expressions, and `!` to negate a group. \
+                "Use `<` and `>` to group expressions, and `!` to exclude a group. \
                  Put a space after an unquoted regular expression before a closing `>`, \
                  or quote the expression, so `>` is not read as part of the pattern. \
-                 Nesting and expanded query terms are bounded.",
+                 A query has a limit on how deeply groups nest and on how many terms it \
+                 expands to.",
             ),
             (
                 Reader::CommandLine,
@@ -345,8 +336,8 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
             ),
             (
                 Reader::CommandLine,
-                "An unknown search function, such as `unknown:`, or an unbalanced or empty \
-                 group is invalid input and exits 4.",
+                "A search exits 4 for an unknown search function, such as `unknown:`, for an \
+                 empty group, and for a `<` or `>` without its pair.",
             ),
         ],
     ),
@@ -360,24 +351,23 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
             ),
             (
                 Reader::Both,
-                "Sizes and dates that gozler does not know never match numeric or date \
-                 comparisons, even negated. Use `size:unknown`, `dm:unknown` or \
-                 `dc:unknown` to find them. A folder with only a lower-bound size also \
-                 matches `size:unknown`.",
+                "Unknown sizes and dates never match numeric or date comparisons, even \
+                 after `!`. Use `size:unknown`, `dm:unknown` or `dc:unknown` to find them. \
+                 A folder whose size is only partly known also matches `size:unknown`.",
             ),
             (
                 Reader::CommandLine,
                 "A folder's size is the total of the known sizes of the files below it, \
-                 each name of a hard-linked file counted; `size:`, `-size` and `-sort size` \
-                 use it. `-get-total-size` and `-get-folder-size` add only files, so no file \
-                 is counted twice.",
+                 and each name of a hard-linked file counts. `size:`, `-size` and `-sort size` \
+                 use it. `-get-total-size` and `-get-folder-size` add only files, not folder \
+                 sizes, so no file is counted twice.",
             ),
             (
                 Reader::CommandLine,
                 "Files whose size or date Windows did not report add nothing to the size \
-                 totals. When reading sizes and dates failed on a volume in scope, a search \
-                 that uses them warns and exits 2. When the read succeeded, the rare file \
-                 it could not read is left out of the totals without a warning.",
+                 totals. When reading the sizes and dates of a volume in scope failed, a search \
+                 that uses them warns and exits 2. A single file without a size or date adds \
+                 nothing to the totals, with no warning.",
             ),
             (
                 Reader::Both,
@@ -385,9 +375,9 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
                  `this`, `last` and `next` before `week`, `month` or `year` select a calendar \
                  period; weeks start on the first day set in Windows. `current` means `this`, \
                  `past` and `prev` mean `last`, and `coming` means `next`. \
-                 `7days` and `last7days` are the 7 times 24 hours before the search starts; \
-                 `1weeks` is the same duration. `10minutes` and `2hours` count back from \
-                 the search start. `dm:<30days` finds files older than 30 days.",
+                 `7days`, `last7days` and `1weeks` count back 7 times 24 hours from the start \
+                 of the search, and `10minutes` and `2hours` count back the same way. \
+                 `dm:<30days` finds files older than 30 days.",
             ),
         ],
     ),
@@ -405,9 +395,9 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
                 Reader::CommandLine,
                 concat!(
                     "JSON search results include readable local `mtime` and `created` dates \
-                     beside `mtime_ft` and `created_ft`. Unknown dates are omitted. `total` \
-                     counts every match, and `more` is true when matching rows were left \
-                     out, so `--json -n 0` counts matches without rows. Check \
+                     beside `mtime_ft` and `created_ft`. JSON leaves out an unknown date. `total` \
+                     counts every match, and `more` is true when the limit left out \
+                     matching rows, so `--json -n 0` counts matches without rows. Check \
                      `volumes_incomplete`, `metadata_pending` and the exit code before \
                      treating an answer as complete. Warnings and errors go to stderr, not \
                      into JSON. See ",
@@ -422,30 +412,30 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
         &[
             (
                 Reader::CommandLine,
-                "A search shows the files in folders you can open, and folder sizes only if \
-                 you see every file. Users and groups listed by `gozlerd see-every-file` \
-                 see every file, unless the search has `--my-permissions`.",
+                "SYSTEM, and the users and groups that `{service} see-every-file` lists, see \
+                 every file, unless the search has `--my-permissions`. Everyone else sees only \
+                 the files in folders they can open, and no folder sizes.",
             ),
             (
                 Reader::CommandLine,
-                "When the result limit leaves matches out, gozler writes the shown and \
+                "When the result limit leaves matches out, a search writes the shown and \
                  total counts to stderr and exits 10. `-export-*` writes every match unless \
-                 `-n` is given, and `-get-result-count` and the size totals count every \
+                 you give `-n`, and `-get-result-count` and the size totals count every \
                  match.",
             ),
             (
                 Reader::CommandLine,
-                "When a volume in scope is not ready (indexing, rescanning, offline or \
-                 failed), gozler prints the results it has, warns on stderr and exits 2. With `-path`, \
-                 scope includes volumes reached through folder mounts and links. `--status` \
-                 exits 2 when any volume is not ready or its sizes and dates could not be read. \
+                "When a volume in scope is indexing, rescanning, offline or failed, a search \
+                 prints the results it has, warns on stderr and exits 2. With `-path`, scope \
+                 includes volumes reached through folder mounts and links. `--status` exits 2 \
+                 when any volume is not ready or some of its sizes and dates are unknown. \
                  With both `--status` and `--server-version`, the last report wins.",
             ),
             (
                 Reader::CommandLine,
                 "When several exit codes apply, the most serious wins: a failure, then 2, \
-                 then 9 or 10, then 0. So no matches while a volume in scope is indexing \
-                 exits 2, because the matches may still appear.",
+                 then 9 or 10, then 0. So a search with no matches exits 2 while a \
+                 volume in scope is indexing, because matches may still appear.",
             ),
         ],
     ),
@@ -518,16 +508,16 @@ pub fn search_syntax() -> String {
 fn full_sections() -> Vec<Section> {
     let examples = EXAMPLES
         .iter()
-        .map(|example| command(example.usage.to_string(), example.text))
+        .map(|example| command(example.command_line(), example.text))
         .collect();
     let mut sections = vec![
         section("Examples:", examples),
-        search_terms("Search syntax (the text gozler receives):"),
+        search_terms("Search syntax (after the shell removes its quotes):"),
         section(
             "Quoting in the shell:",
             QUOTING
                 .iter()
-                .map(|&(usage, text)| command(usage.to_string(), text))
+                .map(|&(usage, text)| command(format!("{CLI_PROGRAM} {usage}"), text))
                 .collect(),
         ),
         search_functions(),
@@ -674,10 +664,10 @@ fn render_section(out: &mut String, section: &Section, color: bool, line_width: 
 /// any after a blank line and its title.
 fn render_notes(out: &mut String, reader: Reader, color: bool, line_width: usize) {
     for &(title, notes) in NOTES {
-        let notes: Vec<&str> = notes
+        let notes: Vec<String> = notes
             .iter()
             .filter(|(note_reader, _)| [reader, Reader::Both].contains(note_reader))
-            .map(|&(_, note)| note)
+            .map(|&(_, note)| note.replace("{service}", SERVICE_PROGRAM))
             .collect();
         if notes.is_empty() {
             continue;
@@ -693,7 +683,7 @@ fn render_notes(out: &mut String, reader: Reader, color: bool, line_width: usize
         );
         for note in notes {
             out.push_str("  - ");
-            wrap(out, 4, note, 4, color, line_width);
+            wrap(out, 4, &note, 4, color, line_width);
         }
     }
 }
@@ -794,7 +784,7 @@ fn syntax(out: &mut String, text: &str, usage: Usage, color: bool) {
                 Some("DIR" | "PATH") => ColorToken::Path,
                 _ => ColorToken::Value,
             })
-        } else if word == "gozler" && matches!(usage, Usage::Command) {
+        } else if word == CLI_PROGRAM && matches!(usage, Usage::Command) {
             Some(ColorToken::Executable)
         } else if option.is_some()
             || matches!(usage, Usage::Options) && bare.starts_with(['-', '/'])
@@ -1069,7 +1059,7 @@ mod tests {
         // gives, so the two cannot drift apart.
         for example in EXAMPLES {
             let usage = example.usage;
-            let args = command_line_args(usage);
+            let args = command_line_args(&example.command_line());
             assert_eq!(args[0], "gozler", "{usage}");
             match parse_argv(&args[1..]) {
                 Ok(Command::Run(plan)) => {

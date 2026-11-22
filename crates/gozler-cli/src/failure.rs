@@ -1,8 +1,8 @@
 //! Every way a gozler run fails, each with its one exit code and its message.
 
 use gozler_client::{ClientError, NotRunning, RELEASES, Repair};
-use gozler_core::escompat::{EsFatal, ExitCode};
-use gozler_core::proto::{ProtoError, SERVICE_NAME};
+use gozler_core::escompat::{CLI_PROGRAM, EsFatal, ExitCode};
+use gozler_core::proto::ProtoError;
 use gozler_core::query::QueryError;
 use std::io;
 
@@ -84,12 +84,12 @@ impl Failure {
 
     /// The lines [`Self::report`] writes.
     fn message(&self) -> String {
-        let line = |text: &str| format!("gozler: {text}\n");
+        let line = |text: &str| format!("{CLI_PROGRAM}: {text}\n");
         match self {
             Failure::Argv(fatal) => {
                 let mut text = line(&fatal.to_string());
                 if fatal.exit_code == ExitCode::UnknownSwitch {
-                    text.push_str(&line("run gozler --help for every option"));
+                    text.push_str(&line(&format!("run {CLI_PROGRAM} --help for every option")));
                 }
                 text
             }
@@ -99,7 +99,9 @@ impl Failure {
             Failure::Query(error) => {
                 let mut text = line(&error.to_string());
                 if matches!(error, QueryError::UnknownFunction(_)) {
-                    text.push_str(&line("run gozler --help for every search function"));
+                    text.push_str(&line(&format!(
+                        "run {CLI_PROGRAM} --help for every search function"
+                    )));
                 }
                 text
             }
@@ -109,31 +111,34 @@ impl Failure {
             }
             Failure::Output { to, error } => line(&format!("could not write to {to}: {error}")),
             Failure::NotWindows => {
-                line("gozler runs only on Windows, because it searches NTFS and ReFS volumes")
+                line("this command runs only on Windows, because it searches NTFS and ReFS volumes")
             }
             Failure::Client(error) => {
                 let mut text = match error {
                     ClientError::NotRunning(why) => line(&problem(why)),
-                    ClientError::NotReady => line(&format!(
-                        "the {SERVICE_NAME} service is not ready; try again shortly"
-                    )),
-                    ClientError::Untrusted => line(
-                        "the pipe server is not the trusted gozlerd daemon (owner is not \
-                         SYSTEM/Administrators), so gozler did not send the query. If this is \
-                         expected, pass --insecure-no-server-check.",
-                    ),
+                    ClientError::NotReady => line("the service is not ready; try again shortly"),
+                    ClientError::Untrusted => {
+                        let mut text = line(
+                            "the pipe server is not the trusted service (its owner is not \
+                             SYSTEM or Administrators), so the search stopped",
+                        );
+                        text.push_str(
+                            "If you expect this, pass --insecure-no-server-check to search anyway.\n",
+                        );
+                        text
+                    }
                     ClientError::TooOld => line(
-                        "the running gozlerd is older than this client; install the matching \
-                         gozlerd",
+                        "the running service is older than this command; install the matching \
+                         service",
                     ),
-                    ClientError::Lost => line("daemon closed the connection"),
+                    ClientError::Lost => line("the service closed the connection"),
                     ClientError::Cancelled => line("the request was cancelled"),
                     ClientError::Refused {
                         code: ProtoError::UnknownRequest,
                         message,
                     } => line(&format!(
-                        "the running gozlerd cannot read {message} in this request; a newer \
-                         gozlerd runs it"
+                        "the running service cannot read {message} in this request; a newer \
+                         service runs it"
                     )),
                     ClientError::Communication(message) | ClientError::Refused { message, .. } => {
                         line(message)
@@ -168,13 +173,11 @@ pub(crate) fn state(why: &NotRunning) -> &'static str {
 /// What is wrong, as the first line of the message says it.
 pub(crate) fn problem(why: &NotRunning) -> String {
     match why {
-        NotRunning::Stopped => format!("the {SERVICE_NAME} service is stopped"),
-        NotRunning::Disabled => format!("the {SERVICE_NAME} service is disabled"),
-        NotRunning::NotInstalled { .. } => {
-            format!("the {SERVICE_NAME} service is not installed")
-        }
+        NotRunning::Stopped => "the service is stopped".to_string(),
+        NotRunning::Disabled => "the service is disabled".to_string(),
+        NotRunning::NotInstalled { .. } => "the service is not installed".to_string(),
         NotRunning::Unknown(error) => {
-            format!("gozlerd is not running, and gozler could not find out why: {error}")
+            format!("the service is not running, and its state is unknown: {error}")
         }
     }
 }
@@ -186,7 +189,7 @@ pub(crate) fn repair_lines(repair: &Repair) -> (&'static str, Vec<String>) {
         Repair::StartService => "To start it, open a terminal as administrator and run:",
         Repair::TurnOnService => "To turn it on, open a terminal as administrator and run:",
         Repair::InstallService { .. } => "To install it, open a terminal as administrator and run:",
-        Repair::Download => "To install it, run the gozler setup from:",
+        Repair::Download => "To install it, run the setup from:",
     };
     let lines = repair
         .commands()
@@ -268,51 +271,50 @@ mod tests {
             (
                 Failure::from(ClientError::NotRunning(NotRunning::Stopped)),
                 8,
-                "gozler: the gozler service is stopped",
+                "gozler: the service is stopped",
             ),
             (
                 ClientError::NotRunning(NotRunning::Disabled).into(),
                 8,
-                "gozler: the gozler service is disabled",
+                "gozler: the service is disabled",
             ),
             (
                 ClientError::NotRunning(not_installed(true)).into(),
                 8,
-                "gozler: the gozler service is not installed",
+                "gozler: the service is not installed",
             ),
             (
                 ClientError::NotRunning(not_installed(false)).into(),
                 8,
-                "gozler: the gozler service is not installed",
+                "gozler: the service is not installed",
             ),
             (
                 ClientError::NotRunning(NotRunning::Unknown("access is denied".into())).into(),
                 8,
-                "gozler: gozlerd is not running, and gozler could not find out why: \
+                "gozler: the service is not running, and its state is unknown: \
                  access is denied",
             ),
             (
                 ClientError::NotReady.into(),
                 7,
-                "gozler: the gozler service is not ready; try again shortly",
+                "gozler: the service is not ready; try again shortly",
             ),
             (
-                ClientError::Communication("daemon did not reply in time".into()).into(),
+                ClientError::Communication("the service did not reply in time".into()).into(),
                 7,
-                "gozler: daemon did not reply in time",
+                "gozler: the service did not reply in time",
             ),
             (
                 ClientError::Untrusted.into(),
                 3,
-                "gozler: the pipe server is not the trusted gozlerd daemon (owner is not \
-                 SYSTEM/Administrators), so gozler did not send the query. If this is \
-                 expected, pass --insecure-no-server-check.",
+                "gozler: the pipe server is not the trusted service (its owner is not \
+                 SYSTEM or Administrators), so the search stopped",
             ),
             (
                 ClientError::TooOld.into(),
                 7,
-                "gozler: the running gozlerd is older than this client; install the \
-                 matching gozlerd",
+                "gozler: the running service is older than this command; install the \
+                 matching service",
             ),
             (
                 refused(ProtoError::BadQuery).into(),
@@ -336,13 +338,13 @@ mod tests {
                 }
                 .into(),
                 7,
-                "gozler: the running gozlerd cannot read Search.returns in this request; a \
-                 newer gozlerd runs it",
+                "gozler: the running service cannot read Search.returns in this request; a \
+                 newer service runs it",
             ),
             (
                 ClientError::Lost.into(),
                 7,
-                "gozler: daemon closed the connection",
+                "gozler: the service closed the connection",
             ),
             (
                 Failure::MissingFolder(r"X:\no-such-folder".into()),

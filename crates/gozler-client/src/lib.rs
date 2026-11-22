@@ -23,6 +23,7 @@ mod client;
 #[cfg(windows)]
 pub use client::Client;
 
+use gozler_core::escompat::SERVICE_PROGRAM;
 use gozler_core::proto::{ProtoError, SERVICE_NAME};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -150,7 +151,7 @@ impl Repair {
             // not always on PATH. pushd also changes the drive in cmd.
             Repair::InstallService { folder } => vec![
                 format!("pushd \"{}\"", folder.display()),
-                r".\gozlerd.exe install".to_string(),
+                format!(r".\{SERVICE_PROGRAM}.exe install"),
             ],
             Repair::Download => return None,
         })

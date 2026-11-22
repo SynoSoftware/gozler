@@ -3,7 +3,7 @@
 //! with. Each row starts with a label in one column, so a reader finds a row
 //! without reading the others.
 
-use gozler_core::escompat::version;
+use gozler_core::escompat::{CLI_PROGRAM, version};
 use gozler_core::output::bytes;
 use gozler_core::output::style::{ColorToken, paint};
 use gozler_core::output::table::grouped;
@@ -42,7 +42,7 @@ pub(crate) fn render(service: &Service, color: bool) -> String {
         text: String::new(),
         color,
     };
-    out.paint(ColorToken::Strong, &format!("gozler {}", version()));
+    out.paint(ColorToken::Strong, &format!("{CLI_PROGRAM} {}", version()));
     out.text.push('\n');
     out.text.push_str(TAGLINE);
     out.text.push_str("\n\n");
@@ -75,7 +75,7 @@ pub(crate) fn render(service: &Service, color: bool) -> String {
             out.paint(ColorToken::Warning, "Not ready");
             out.text.push('\n');
             out.label("Fix");
-            out.text.push_str("Run gozler again in a few seconds.\n");
+            out.text.push_str("Try again in a few seconds.\n");
         }
         Service::NotRunning(why) => {
             out.paint(ColorToken::Danger, state(why));
@@ -103,15 +103,15 @@ pub(crate) fn render(service: &Service, color: bool) -> String {
     out.label("Search");
     out.paint(
         ColorToken::Primary,
-        &format!("{:<21}", "gozler readme*.txt"),
+        &format!("{:<21}", format!("{CLI_PROGRAM} readme*.txt")),
     );
     out.text
         .push_str("Find .txt files that start with readme\n");
     out.label("Help");
-    out.paint(ColorToken::Primary, "gozler -h");
+    out.paint(ColorToken::Primary, &format!("{CLI_PROGRAM} -h"));
     out.text.push('\n');
     out.label("More");
-    out.paint(ColorToken::Primary, "gozler --help");
+    out.paint(ColorToken::Primary, &format!("{CLI_PROGRAM} --help"));
     // A blank line before the shell's next prompt.
     out.text.push_str("\n\n");
     out.text

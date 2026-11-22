@@ -506,10 +506,10 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["size"],
         function: Function::Size,
         example: ">1mb",
-        help: "Size of a file, or of the files below a folder; also `<`, `<=`, `>=`, `=`, \
-               ranges such as `1mb..10mb`, and `empty`, `tiny`, `small`, `medium`, `large`, \
-               `huge` or `gigantic`; `empty` is 0 bytes, and `unknown` finds items whose \
-               size gozler does not know",
+        help: "Size of a file, or of the files below a folder. Also accepts `<`, `<=`, `>=`, \
+               `=`, ranges such as `1mb..10mb`, and `empty`, `tiny`, `small`, `medium`, \
+               `large`, `huge` or `gigantic`; `empty` is 0 bytes. `unknown` finds files and \
+               folders whose size is unknown",
     },
     SearchFunction {
         names: &["dm", "datemodified", "date-modified"],
@@ -517,9 +517,9 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         example: "today",
         help: "Date modified: `today`, `yesterday`, `YYYY-MM-DD`, `YYYY-MM`, `YYYY`, `Nminutes`, \
                `Nhours` or `Nh`, `Ndays` or `Nd`, `lastNdays`, `Nweeks` or `Nw`, \
-               or `thisweek`, `lastmonth`, `thisyear` and other calendar periods; also `<`, `<=`, `>`, \
-               `>=` and ranges such as `2026-01-01..2026-03-31`; `unknown` finds items whose \
-               date gozler does not know",
+               or a calendar period such as `thisweek`, `lastmonth` or `thisyear`. Also accepts \
+               `<`, `<=`, `>`, `>=` and ranges such as `2026-01-01..2026-03-31`. `unknown` \
+               finds files and folders whose date is unknown",
     },
     SearchFunction {
         names: &["dc", "datecreated", "date-created"],
@@ -558,20 +558,20 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["full-path-length", "fullpathlen"],
         function: Function::Length(LengthTarget::FullPath),
         example: ">260",
-        help: "Full path length in UTF-16 characters, including the mount prefix",
+        help: "Full path length in UTF-16 characters, including the drive or mount folder",
     },
     SearchFunction {
         names: &["child"],
         function: Function::Child,
         example: "Cargo.toml",
-        help: "Folders with an immediate visible child whose name contains text; `*` and `?` match the whole child name",
+        help: "Folders that directly hold a file or folder whose name contains the text; `*` and `?` match the whole name",
     },
     SearchFunction {
         names: &["child-count", "childcount"],
         function: Function::ChildCount(None),
         example: ">100",
         help: "Folders with this many files and folders directly in them; accepts comparisons \
-               and ranges; a folder you may not list has no count",
+               and ranges; a folder you cannot open has no count",
     },
     SearchFunction {
         names: &["child-file-count", "childfilecount"],
@@ -589,13 +589,13 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         names: &["empty"],
         function: Function::Empty,
         example: "",
-        help: "Folders with nothing directly in them; a folder you may not list is not empty",
+        help: "Folders with nothing directly in them; a folder you cannot open never counts as empty",
     },
     SearchFunction {
         names: &["depth", "parent-count", "parents"],
         function: Function::Depth,
         example: "2",
-        help: "How many folders hold the item, the drive's root included, so C:\\Windows has 1; \
+        help: "How many folders are above the file or folder, counting the drive's root, so C:\\Windows has 1; \
                accepts comparisons and ranges",
     },
     SearchFunction {
@@ -611,19 +611,19 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         function: Function::WordStart,
         example: "ann",
         help: "A word in the name starts with ann, as in my_annual_report.pdf; \
-               with `\\` or `/` in the value, a word in the full path must",
+               with `\\` or `/` in the value, it tests the full path",
     },
     SearchFunction {
         names: &["startwith"],
         function: Function::NameStart,
         example: "read",
-        help: "Name starts with read; with `\\` or `/` in the value, the full path must",
+        help: "Name starts with read; with `\\` or `/` in the value, it tests the full path",
     },
     SearchFunction {
         names: &["wfn", "wholefilename", "whole-filename", "whole", "entire"],
         function: Function::WholeName,
         example: "readme.txt",
-        help: "Match the whole name, with `*` and `?` as wildcards; \
+        help: "Whole name matches, with `*` and `?` as wildcards; \
                `wfn:regex:pattern` matches the whole name as a regular expression",
     },
     SearchFunction {
@@ -631,32 +631,32 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         function: Function::Regex,
         example: r"^test\d+\.cs$",
         help: "Name matches a regular expression in Rust syntax; with `\\\\` in the \
-               pattern, the full path must",
+               pattern, it tests the full path",
     },
     SearchFunction {
         names: &["attrib", "attributes", "attr"],
         function: Function::Attributes,
         example: "hs",
         help: "Has every attribute in the value, here hidden and system; letters in \
-               either case; `!attrib:h` excludes hidden items",
+               either case; `!attrib:h` leaves out hidden files and folders",
     },
     SearchFunction {
         names: &["file"],
         function: Function::File,
         example: "",
-        help: "Files only; `file:text` also matches text",
+        help: "Files only; `file:report` finds the files that also match report",
     },
     SearchFunction {
         names: &["folder", "dir"],
         function: Function::Folder,
         example: "",
-        help: "Folders only; `folder:text` also matches text",
+        help: "Folders only; `folder:docs` finds the folders that also match docs",
     },
     SearchFunction {
         names: &["case"],
         function: Function::Case,
         example: "",
-        help: "Match case for the whole query; `case:1` also enables it, and \
+        help: "Match case for the whole query; `case:1` also turns it on, and \
                `case:0` turns it off",
     },
 ];

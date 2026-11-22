@@ -1,7 +1,7 @@
 //! What a finished search tells its caller beyond the rows: the warnings
 //! gozler writes to stderr and the code it exits with.
 
-use super::{Count, EsPlan, ExitCode};
+use super::{CLI_PROGRAM, Count, EsPlan, ExitCode};
 use crate::output::ResultFormat;
 use crate::output::table::grouped;
 use crate::proto::{QueryResults, QueryTotals};
@@ -150,22 +150,21 @@ impl fmt::Display for Warning {
         match self {
             Warning::Skipped(parts) => write!(
                 f,
-                "results may be incomplete: the running gozlerd skipped the parts of the \
-                 query that only a newer gozlerd reads: {parts}"
+                "results may be incomplete: the running service skipped the parts of the \
+                 query that only a newer service reads: {parts}"
             ),
-            Warning::Incomplete => f.write_str(
-                "results may be incomplete: a volume in scope is not ready; gozler --status \
-                 shows why",
+            Warning::Incomplete => write!(
+                f,
+                "results may be incomplete: a volume in scope is not ready; {CLI_PROGRAM} \
+                 --status shows why"
             ),
             Warning::SizesOrDatesUnknown => f.write_str(
-                "results may be incomplete: gozler could not read the sizes and dates on a \
-                 volume in scope, so size and date tests and size totals leave those files \
-                 out",
+                "results may be incomplete: some sizes and dates on a volume in scope are \
+                 unknown, so size and date tests and size totals leave those files out",
             ),
             Warning::SizesShort => f.write_str(
-                "some sizes are unknown: gozler could not read the sizes on a volume in \
-                 scope, so those files show no size and a folder's size counts only the \
-                 files it read",
+                "some sizes are unknown: those files on a volume in scope show no size, and \
+                 a folder's size counts only the files whose size is known",
             ),
             Warning::Truncated { shown, total } => write!(
                 f,

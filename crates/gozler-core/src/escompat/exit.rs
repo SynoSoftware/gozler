@@ -84,16 +84,16 @@ impl ExitCode {
             ExitCode::Internal => "Internal error",
             ExitCode::Incomplete => {
                 "Results may be incomplete: a volume is not ready or lacks sizes and dates, \
-                 or gozlerd skipped part of the query"
+                 or the service skipped part of the query"
             }
-            ExitCode::Untrusted => "The pipe server is not the trusted gozlerd",
+            ExitCode::Untrusted => "The pipe server is not the trusted service",
             ExitCode::InvalidInput => "Invalid input: a missing or bad value, or a bad query",
             ExitCode::OutputFailed => "Could not write the output or the export file",
             ExitCode::UnknownSwitch => "Unknown option",
             ExitCode::Communication => {
-                "gozlerd is not ready, did not answer correctly, or is older than gozler"
+                "The service is not ready, did not answer correctly, or is older than this command"
             }
-            ExitCode::DaemonNotRunning => "gozlerd is not running",
+            ExitCode::DaemonNotRunning => "The service is not running",
             ExitCode::NoMatches => "No matches, with `-no-result-error`",
             ExitCode::Truncated => "The result limit left out some matches",
         }

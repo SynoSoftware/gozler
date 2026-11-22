@@ -17,6 +17,13 @@
 //! codes in [`ExitCode`]. A later switch, function or sort key is one row of
 //! its table, and the help lists it.
 
+/// The command people type to search: the one place its name is written for
+/// text, so renaming the product changes this line.
+pub const CLI_PROGRAM: &str = "gozler";
+
+/// The service's program, which people type in `gozlerd see-every-file`.
+pub const SERVICE_PROGRAM: &str = "gozlerd";
+
 mod answer;
 mod argv;
 #[cfg(test)]

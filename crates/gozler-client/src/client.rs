@@ -51,7 +51,9 @@ fn missing_pipe() -> ClientError {
                     .expect("the path of an executable names its folder")
                     .to_path_buf(),
             },
-            Err(error) => NotRunning::Unknown(format!("cannot find gozler.exe: {error}")),
+            Err(error) => {
+                NotRunning::Unknown(format!("cannot find the folder of this program: {error}"))
+            }
         },
         Err(error) => NotRunning::Unknown(error.to_string()),
     };
@@ -247,9 +249,10 @@ impl Client {
                     return Err(ClientError::Refused { code, message }.into());
                 }
                 _ => {
-                    return Err(
-                        ClientError::Communication("unexpected reply from daemon".into()).into(),
-                    );
+                    return Err(ClientError::Communication(
+                        "unexpected reply from the service".into(),
+                    )
+                    .into());
                 }
             }
         }
@@ -275,7 +278,7 @@ impl Client {
                 }
                 _ => {
                     return Err(ClientError::Communication(
-                        "unexpected reply from daemon".into(),
+                        "unexpected reply from the service".into(),
                     ));
                 }
             }
@@ -342,7 +345,7 @@ impl Client {
             if avail == 0 {
                 if Instant::now() > deadline {
                     return Err(ClientError::Communication(
-                        "daemon did not reply in time".into(),
+                        "the service did not reply in time".into(),
                     ));
                 }
                 std::thread::sleep(POLL_INTERVAL);

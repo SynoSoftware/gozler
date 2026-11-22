@@ -870,7 +870,7 @@ pub struct RowsSpec {
 /// drive letter that does not exist. The search is refused, because an empty
 /// answer would read as "no such file".
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("{scope} is not on an indexed volume; gozlerd indexes fixed NTFS and ReFS volumes")]
+#[error("{scope} is not on an indexed volume; the service indexes fixed NTFS and ReFS volumes")]
 pub struct NotIndexed {
     scope: String,
 }

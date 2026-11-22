@@ -15,7 +15,7 @@ pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
     let entries: u64 = s.volumes.iter().map(|v| v.entries).sum();
     writeln!(
         out,
-        "gozlerd: {ready} of {} ready, {}",
+        "Service: {ready} of {} ready, {}",
         plural(s.volumes.len() as u64, "volume", "volumes"),
         plural(entries, "entry", "entries"),
     )?;
@@ -122,7 +122,7 @@ pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
                 out,
                 "Permissions",
                 &format!(
-                    "{} whose permissions are not read yet or could not be read; such a folder's contents stay hidden from users who do not see every file until gozlerd reads its permissions",
+                    "{} whose permissions are not read yet or could not be read; such a folder's contents stay hidden from users who do not see every file until the service reads its permissions",
                     plural(v.unread_folders, "folder", "folders")
                 ),
             )?;

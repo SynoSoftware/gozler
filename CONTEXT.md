@@ -199,9 +199,10 @@ The app's main window, which shows one of two modes: Search or Commander mode.
 _Avoid_: UI, app (for the window)
 
 **Service**:
-`gozlerd` as the app names it, "the Gozler service", and the command line,
-"the gozler service".
-_Avoid_: daemon (in text the person reads)
+`gozlerd` as the app names it, "the Gozler service", and as the command line
+names it, "the service", with no product name.
+_Avoid_: daemon, gozlerd (in text the person reads, except the command
+`gozlerd see-every-file`)
 
 **Settings**:
 The saved choices for how the window behaves, changed in the Settings dialog.

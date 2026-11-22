@@ -531,7 +531,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::MyPermissions,
         },
         group: Group::Search,
-        help: "Find only the files in folders you can open, even if you're allowed to see every file",
+        help: "Find only the files in folders you can open, even if you are allowed to see every file",
     },
     Switch {
         spelling: Spelling::Es {
@@ -707,9 +707,10 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::FullPath),
         },
         group: Group::Output,
-        help: "Add the Filename column, the full path, where this option stands among \
-               the column options, as in `-full-path-and-name -size`; without it, the \
-               full path is the last column, and `-name` or `-path-column` leaves it out",
+        help: "Add the full path as the Filename column, in the position of this option \
+               among the column options, as in `-full-path-and-name -size`. Without this \
+               option, the full path is the last column, unless `-name` or `-path-column` \
+               leaves it out",
     },
     Switch {
         spelling: Spelling::Es {
@@ -725,7 +726,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::Size),
         },
         group: Group::Output,
-        help: "Add a Size column, in bytes; for a folder, the files below it",
+        help: "Add a Size column, in bytes; for a folder, the total size of the files below it",
     },
     Switch {
         spelling: Spelling::Es {
@@ -741,7 +742,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Column(EsColumn::DateCreated),
         },
         group: Group::Output,
-        help: "Add a Date Created column; needs Dates created in the index settings",
+        help: "Add a Date Created column; needs Dates created",
     },
     Switch {
         spelling: Spelling::Es {
@@ -813,7 +814,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::Report(Report::Status),
         },
         group: Group::Other,
-        help: "Show whether gozlerd and each volume are ready, instead of searching",
+        help: "Show whether the service and each volume are ready, instead of searching",
     },
     Switch {
         spelling: Spelling::Native {
@@ -893,7 +894,7 @@ pub(super) const SWITCHES: &[Switch] = &[
             action: SwitchAction::InsecureNoServerCheck,
         },
         group: Group::Other,
-        help: "Skip the check that the pipe server is gozlerd (testing only)",
+        help: "Skip the check of who owns the pipe; use it only to test",
     },
 ];
 
@@ -1081,7 +1082,7 @@ fn parse_order_switch(name: &str) -> Option<SwitchAction> {
 fn parse_attribute_switch(name: &str) -> Option<SwitchAction> {
     const NOT_ATTRIBUTES: SwitchAction = SwitchAction::Refused(
         "is not an attribute option: write /a and attribute letters, with - before a \
-         letter to leave that attribute out, such as /ah or /a-h; gozler --help \
+         letter to leave that attribute out, such as /ah or /a-h; --help \
          lists the letters",
     );
     let mut chars = name.strip_prefix('a')?.chars();

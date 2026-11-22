@@ -462,8 +462,8 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
             argv_error(
                 4,
                 "/ab is not an attribute option: write /a and attribute letters, with - \
-                 before a letter to leave that attribute out, such as /ah or /a-h; gozler \
-                 --help lists the letters",
+                 before a letter to leave that attribute out, such as /ah or /a-h; --help \
+                 lists the letters",
             ),
         ),
         (
@@ -650,7 +650,7 @@ fn rows() -> Vec<(&'static [&'static str], Printed)> {
         (
             &["-path", r"E:\", "report"],
             query_error(
-                r"E:\ is not on an indexed volume; gozlerd indexes fixed NTFS and ReFS volumes",
+                r"E:\ is not on an indexed volume; the service indexes fixed NTFS and ReFS volumes",
             ),
         ),
         (&["-case", "-path", r"C:\Repo", "testing"], prints(&[])),
@@ -1165,9 +1165,8 @@ fn a_size_or_date_query_on_a_volume_with_unknown_sizes_exits_2() {
         ..volume(r"C:\", C_DRIVE)
     };
     let volumes = [unknown_sizes, volume(r"D:\", D_DRIVE)];
-    let warning = "results may be incomplete: gozler could not read the sizes and dates on a \
-                   volume in scope, so size and date tests and size totals leave those files \
-                   out";
+    let warning = "results may be incomplete: some sizes and dates on a volume in scope are \
+                   unknown, so size and date tests and size totals leave those files out";
     let outcome = |args: &[&str]| match print(&volumes, args) {
         Printed::Paths { warnings, exit, .. } => (warnings, exit),
         other => panic!("{args:?}: {other:?}"),
@@ -1184,9 +1183,8 @@ fn a_size_or_date_query_on_a_volume_with_unknown_sizes_exits_2() {
     }
     // Rows that show sizes are all there, so they warn that some sizes are
     // missing and still exit 0, which a script reads as a complete answer.
-    let sizes_short = "some sizes are unknown: gozler could not read the sizes on a volume in \
-                       scope, so those files show no size and a folder's size counts only the \
-                       files it read";
+    let sizes_short = "some sizes are unknown: those files on a volume in scope show no size, \
+                       and a folder's size counts only the files whose size is known";
     assert_eq!(
         outcome(&["report", "-size", "-n", "all"]),
         (vec![sizes_short.to_string()], 0)

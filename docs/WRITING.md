@@ -26,6 +26,11 @@ text says what to do in common words, and nothing more.
   Find, Show or Save, and says what the command does. A second idea gets its
   own sentence, not parentheses, because a reader scans a list by its first
   words.
+- **Owner ruling: the text never repeats the product's name.** The name is not
+  the subject of a sentence, and a message about gozlerd says "the service".
+  Where a person types the name, as in a command, the text takes it from
+  `CLI_PROGRAM` or `SERVICE_PROGRAM` in `gozler_core::escompat`, so a rename
+  changes one line for each program.
 - **Use one word for one thing.** The same option, state or folder has the same
   name on every screen and in every message, as in `CONTEXT.md`. A second name
   makes a reader ask whether it is a second thing.
@@ -41,7 +46,7 @@ A message that reports a problem has three parts, in this order:
    that line, so that a copy takes exactly the command.
 
 ```
-gozler: the gozler service is stopped
+gozler: the service is stopped
 To start it, open a terminal as administrator and run:
   net start gozler
 ```
@@ -54,9 +59,9 @@ To start it, open a terminal as administrator and run:
   folder of the `gozler.exe` that is running, because that folder is not always
   on `PATH` and `pushd` also changes the drive in cmd. A command that fails when
   pasted turns one problem into two.
-- **Say the state the reader can check.** Write "the gozler service is not
+- **Say the state the reader can check.** Write "the service is not
   installed" or "is not ready; try again shortly", the states Windows shows in
-  Services. Leave out how gozler found it out, such as which folder lacks
+  Services. Leave out how the state was found out, such as which folder lacks
   gozlerd.exe: a reader who does not know that gozlerd.exe belongs beside
   gozler.exe reads that as a bug, and the line below it already says what to
   do.
