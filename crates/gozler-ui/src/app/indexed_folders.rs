@@ -601,6 +601,7 @@ impl DialogProc for IndexedFolders<'_> {
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
             | DialogMessage::RowDragged { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }

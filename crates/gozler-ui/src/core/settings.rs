@@ -780,6 +780,14 @@ pub(crate) struct WindowState {
         skip_serializing_if = "Option::is_none"
     )]
     pub(crate) destination_folder: Option<String>,
+    /// The masks typed in Select files… and the other mask boxes, newest
+    /// first, which the box lists again (DESIGN.md: Selecting entries).
+    #[serde(
+        default,
+        deserialize_with = "or_default",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(crate) masks: Vec<String>,
     /// Each panel's folder, sort and recent folders, and which panel is
     /// active (DESIGN.md: A panel).
     #[serde(default, deserialize_with = "or_default")]
@@ -811,6 +819,7 @@ impl Default for WindowState {
             tray_notice_shown: false,
             last_update_check: None,
             destination_folder: None,
+            masks: Vec::new(),
             panels: SavedPanels::default(),
             viewer: ViewerState::default(),
             compare: CompareState::default(),
@@ -1523,6 +1532,7 @@ mod tests {
                 tray_notice_shown: true,
                 last_update_check: Some(1_790_000_000),
                 destination_folder: Some(r"E:\Backup".into()),
+                masks: vec!["*.jpg *.png".into(), "*.*|*.bak".into()],
                 panels: SavedPanels {
                     left: SavedPanel {
                         folder: Some(r"D:\work".into()),

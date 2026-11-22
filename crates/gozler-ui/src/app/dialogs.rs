@@ -7,15 +7,16 @@
 use super::main_window::MainWindow;
 use super::work::{ShellTarget, Transparency};
 use crate::core::captions::DialogItem;
+use crate::core::commands::{Key, Keystroke};
 use crate::core::ids::ControlId;
 use crate::core::query::{DateRange, DateRangeError, Day, SizeRange, SizeRangeError, SizeUnit};
 use crate::core::text::{Numbers, Strings};
 use crate::core::typed::{self, Refusal};
 use crate::core::viewer::find::Query;
-use crate::win::controls::{Balloon, CheckBox, DatePicker, DropDownList, Edit, Tooltip};
+use crate::win::controls::{Balloon, CheckBox, ComboBox, DatePicker, DropDownList, Edit, Tooltip};
 use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
-use crate::win::{self, Hwnd};
+use crate::win::{self, Hwnd, window};
 use gozler_core::query::NameMask;
 use gozler_fileops::{Destination, Policy};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -132,6 +133,7 @@ impl DialogProc for About<'_> {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -227,6 +229,7 @@ impl DialogProc for ServiceReport<'_> {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -346,6 +349,7 @@ impl DialogProc for CustomDate {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -494,6 +498,7 @@ impl DialogProc for CustomSize {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -729,6 +734,7 @@ impl DialogProc for Transfer {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -903,6 +909,7 @@ impl DialogProc for NewFolder<'_> {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }
@@ -990,23 +997,29 @@ impl DialogProc for DeleteUnseen {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }
 }
 
 /// Commander mode's Select files… and Unselect files…: the mask that names
-/// the files (DESIGN.md: Selecting entries).
+/// the files, whose list holds the masks typed before (DESIGN.md: Selecting
+/// entries).
 pub(super) struct SelectFiles {
     /// The mask the box shows first.
     text: String,
+    /// The masks typed before, newest first, without the ones that
+    /// `Shift+Del` removed.
+    masks: RefCell<Vec<String>>,
     chosen: RefCell<Option<(String, NameMask)>>,
 }
 
 impl SelectFiles {
-    pub(super) fn new(text: &str) -> SelectFiles {
+    pub(super) fn new(text: &str, masks: &[String]) -> SelectFiles {
         SelectFiles {
             text: text.to_owned(),
+            masks: RefCell::new(masks.to_vec()),
             chosen: RefCell::new(None),
         }
     }
@@ -1016,25 +1029,48 @@ impl SelectFiles {
         self.chosen.take()
     }
 
-    fn mask(dialog: Hwnd) -> Option<Edit> {
-        Edit::of_dialog(dialog, ControlId::SelectFilesMask.id())
+    /// The masks the list holds.
+    pub(super) fn masks(&self) -> Vec<String> {
+        self.masks.take()
+    }
+
+    fn mask(dialog: Hwnd) -> Option<ComboBox> {
+        ComboBox::of_dialog(dialog, ControlId::SelectFilesMask.id())
     }
 
     /// OK stays disabled while the box holds no wildcard.
-    fn update_ok(dialog: Hwnd) {
-        let valid =
-            SelectFiles::mask(dialog).is_some_and(|mask| NameMask::parse(&mask.text()).is_ok());
+    fn update_ok(dialog: Hwnd, text: Option<String>) {
+        let valid = text.is_some_and(|text| NameMask::parse(&text).is_ok());
         dialog::set_ok_enabled(dialog, valid);
+    }
+
+    /// `Shift+Del` in the open list removes the highlighted mask, as in
+    /// Total Commander and Multi-Rename.
+    fn forget_mask(&self, mask: ComboBox, target: Hwnd) -> bool {
+        if target.parent() != mask.hwnd() || !mask.is_open() {
+            return false;
+        }
+        if let Some(index) = mask.highlighted() {
+            let mut masks = self.masks.borrow_mut();
+            if index < masks.len() {
+                masks.remove(index);
+                mask.remove(index);
+            }
+        }
+        true
     }
 }
 
 impl DialogProc for SelectFiles {
     fn init(&self, dialog: Hwnd) -> Opened {
-        if let Some(mask) = SelectFiles::mask(dialog) {
-            mask.hwnd().set_text(&self.text);
-            mask.select_all();
+        // `Shift+Del` reaches `message` before the box cuts its text.
+        window::own_keys(dialog, true);
+        let mask = SelectFiles::mask(dialog);
+        if let Some(mask) = mask {
+            mask.set_items(&self.masks.borrow());
+            mask.set_text_selected(&self.text);
         }
-        SelectFiles::update_ok(dialog);
+        SelectFiles::update_ok(dialog, mask.map(|mask| mask.hwnd().text()));
         Opened {
             focus: ControlId::SelectFilesMask.id(),
             fonts: Vec::new(),
@@ -1042,13 +1078,28 @@ impl DialogProc for SelectFiles {
     }
 
     fn message(&self, dialog: Hwnd, message: DialogMessage) -> bool {
+        let mask = SelectFiles::mask(dialog);
         match message {
             DialogMessage::Edited { .. } => {
-                SelectFiles::update_ok(dialog);
+                SelectFiles::update_ok(dialog, mask.map(|mask| mask.hwnd().text()));
                 true
             }
+            DialogMessage::Picked { id } if id == ControlId::SelectFilesMask.id() => {
+                SelectFiles::update_ok(dialog, mask.and_then(ComboBox::picked));
+                true
+            }
+            DialogMessage::Key {
+                target,
+                keystroke:
+                    Keystroke {
+                        key: Key::Delete,
+                        ctrl: false,
+                        alt: false,
+                        shift: true,
+                    },
+            } => mask.is_some_and(|mask| self.forget_mask(mask, target)),
             DialogMessage::Command { id } if id == DialogItem::Ok.id() => {
-                let text = SelectFiles::mask(dialog).map(|mask| mask.text());
+                let text = mask.map(|mask| mask.hwnd().text());
                 if let Some(text) = text
                     && let Ok(mask) = NameMask::parse(&text)
                 {
@@ -1070,8 +1121,13 @@ impl DialogProc for SelectFiles {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
+    }
+
+    fn closed(&self, dialog: Hwnd) {
+        window::own_keys(dialog, false);
     }
 }
 
@@ -1195,6 +1251,7 @@ impl DialogProc for ViewerFind {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }

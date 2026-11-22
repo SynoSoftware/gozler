@@ -15,7 +15,10 @@
     "edit": "&Edit",
     "view": "&View",
     "help": "&Help",
-    "language": "Lan&guage"
+    "language": "Lan&guage",
+    "files_or_folders": "Files &or folders only",
+    "focused_entry": "By focused en&try",
+    "selection_list": "&Selection list"
   },
   "language": {
     "english": "&English",
@@ -68,7 +71,38 @@
     "edit": "&Edit",
     "new_folder": "&New folder…",
     "select_files": "Se&lect files…",
-    "unselect_files": "&Unselect files…"
+    "unselect_files": "&Unselect files…",
+    "invert_selection": "&Invert selection",
+    "select_same_extension": "Select same e&xtension",
+    "unselect_same_extension": "U&nselect same extension",
+    "restore_selection": "&Restore selection",
+    "save_selection": "Sa&ve selection",
+    "select_only_files": "Select only &files…",
+    "select_only_folders": "Select only f&olders…",
+    "select_files_and_folders": "Select files &and folders…",
+    "unselect_only_files": "&Unselect only files…",
+    "unselect_only_folders": "Unselect only fol&ders…",
+    "select_all_files": "Select all fi&les",
+    "select_all_folders": "Select all folder&s",
+    "unselect_all_files": "Unselect all f&iles",
+    "unselect_all_folders": "Unselect all fold&ers",
+    "invert_only_files": "I&nvert only files",
+    "invert_only_folders": "Invert only folde&rs",
+    "invert_files_and_folders": "In&vert files and folders",
+    "select_by_extension": "Select by e&xtension…",
+    "unselect_by_extension": "Unselect by extensi&on…",
+    "select_same_name": "Select same &name",
+    "unselect_same_name": "Unselect same na&me",
+    "select_same_name_and_extension": "Select same name and &extension",
+    "unselect_same_name_and_extension": "Unselect same name and ex&tension",
+    "select_same_folder": "Select same &folder",
+    "unselect_same_folder": "Unselect same fol&der",
+    "select_and_move_down": "&Select and move down",
+    "unselect_and_move_down": "&Unselect and move down",
+    "toggle_and_move_down": "To&ggle and move down",
+    "save_selection_to_file": "&Save selection to file…",
+    "load_selection_from_file": "&Load selection from file…",
+    "load_selection_from_clipboard": "Load selection from &clipboard"
   },
   "column": {
     "name": "&Name",
@@ -1107,7 +1141,13 @@
     "no_longer_exists": "{0} no longer exists. Press F5 to search again.",
     "open_failed": "Couldn't start {0}. {1} Check the command in File > Settings > Context menu.",
     "shortcut_taken": "Another program uses {0}, so that shortcut no longer shows Gozler. Choose another shortcut in File > Settings > Keyboard.",
-    "registry_failed": "Couldn't save \"{0}\" in the registry. {1}"
+    "registry_failed": "Couldn't save \"{0}\" in the registry. {1}",
+    "restored_one": "Selected {1} of {2}. {0} entry isn't in this folder.",
+    "restored_other": "Selected {1} of {2}. {0} entries aren't in this folder.",
+    "selection_not_saved": "Couldn't save {0}. {1}",
+    "selection_not_read": "Couldn't read {0}. {1}",
+    "file_no_names": "{0} has no names in it.",
+    "clipboard_no_names": "The clipboard has no names or files on it."
   },
   "sync": {
     "title": "Synchronize folders",
@@ -1166,7 +1206,9 @@
   "select_files": {
     "select_title": "Select files",
     "unselect_title": "Unselect files",
-    "mask": "&Files, such as *.txt or *.jpg;*.png:"
+    "mask": "&Files, such as *.txt or *.jpg *.png:",
+    "text_files": "Text files (*.txt)",
+    "file_name": "selection"
   },
   "name": {
     "characters": "A file name can't contain any of the following characters: \\ / : * ? \" < > |",

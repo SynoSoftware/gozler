@@ -52,14 +52,14 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_ICON, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_DELETESTRING, CB_GETCOUNT, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN,
-    CB_RESETCONTENT, CB_SETCURSEL, CB_SHOWDROPDOWN, CBN_CLOSEUP, CBN_SELCHANGE, CBN_SELENDCANCEL,
-    CBN_SELENDOK, CBS_DROPDOWNLIST, CreateWindowExW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS,
-    ES_AUTOHSCROLL, ES_NUMBER, ES_READONLY, GWL_STYLE, GetWindowLongPtrW, HICON, HMENU, IMAGE_ICON,
-    LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_RESETCONTENT,
-    LB_SETCURSEL, SM_CXVSCROLL, STM_GETIMAGE, STM_SETIMAGE, SendMessageW, SetWindowLongPtrW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_GETTEXTLENGTH, WM_KILLFOCUS, WM_NCDESTROY, WM_SETTEXT,
-    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP, WS_VISIBLE,
-    WS_VSCROLL,
+    CB_RESETCONTENT, CB_SETCURSEL, CB_SETEDITSEL, CB_SHOWDROPDOWN, CBN_CLOSEUP, CBN_SELCHANGE,
+    CBN_SELENDCANCEL, CBN_SELENDOK, CBS_DROPDOWNLIST, CreateWindowExW, EN_CHANGE, EN_KILLFOCUS,
+    EN_SETFOCUS, ES_AUTOHSCROLL, ES_NUMBER, ES_READONLY, GWL_STYLE, GetWindowLongPtrW, HICON,
+    HMENU, IMAGE_ICON, LB_ADDSTRING, LB_GETCOUNT, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN,
+    LB_RESETCONTENT, LB_SETCURSEL, SM_CXVSCROLL, STM_GETIMAGE, STM_SETIMAGE, SendMessageW,
+    SetWindowLongPtrW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_GETTEXTLENGTH, WM_KILLFOCUS, WM_NCDESTROY,
+    WM_SETTEXT, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_EX_TOPMOST, WS_POPUP, WS_TABSTOP,
+    WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{PCWSTR, PWSTR, w};
 
@@ -949,6 +949,21 @@ impl ComboBox {
             unsafe { send_pointer(self.0, CB_ADDSTRING, 0, item.as_ptr()) };
         }
         self.0.set_text(&text);
+    }
+
+    /// Shows `text` in the box, selected, so that typing replaces it.
+    pub(crate) fn set_text_selected(self, text: &str) {
+        self.0.set_text(text);
+        // From the first character to the last: -1 in the high word.
+        send(self.0, CB_SETEDITSEL, 0, 0xFFFF_0000);
+    }
+
+    /// The text of the item that the person picked from the list, which
+    /// the box shows only after it tells the dialog
+    /// ([`super::dialog::DialogMessage::Picked`]).
+    pub(crate) fn picked(self) -> Option<String> {
+        let index = self.highlighted()?;
+        Some(item_text(self.0, CB_GETLBTEXTLEN, CB_GETLBTEXT, index))
     }
 
     /// Whether the list is open.

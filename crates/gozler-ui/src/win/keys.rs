@@ -4,9 +4,9 @@
 
 use crate::core::commands::Key;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VK_ADD, VK_BACK, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_INSERT,
-    VK_LEFT, VK_NEXT, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_PRIOR, VK_RETURN,
-    VK_RIGHT, VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
+    VK_ADD, VK_BACK, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME,
+    VK_INSERT, VK_LEFT, VK_MULTIPLY, VK_NEXT, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD,
+    VK_OEM_PLUS, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_SUBTRACT, VK_TAB, VK_UP,
 };
 
 pub(crate) fn virtual_key(key: Key) -> u16 {
@@ -34,6 +34,8 @@ pub(crate) fn virtual_key(key: Key) -> u16 {
         Key::Period => VK_OEM_PERIOD.0,
         Key::NumPlus => VK_ADD.0,
         Key::NumMinus => VK_SUBTRACT.0,
+        Key::NumSlash => VK_DIVIDE.0,
+        Key::NumStar => VK_MULTIPLY.0,
         Key::Plus => VK_OEM_PLUS.0,
         Key::Minus => VK_OEM_MINUS.0,
     }
@@ -57,6 +59,7 @@ pub(crate) fn is_extended(key: Key) -> bool {
     matches!(
         key,
         Key::Insert
+            | Key::NumSlash
             | Key::Delete
             | Key::Home
             | Key::End

@@ -38,6 +38,7 @@ pub(super) mod viewers;
 
 pub(super) use clipboard::{CopyFailure, CopyNotice};
 pub(super) use operations::{Chosen, PathAction, PathPurpose, PreparedPaths};
+pub(super) use panels::{Load, LoadFailure, Loaded, Save, Source};
 pub(super) use queue::{
     Accepted as QueueAccepted, CheckPurpose, Client as QueueClient, Ready as QueueReady,
 };
@@ -89,6 +90,8 @@ pub(super) enum Awaited {
     Settings,
     Recovery,
     Listing(Side),
+    /// Save selection to file… or a Load selection command of the panel.
+    SelectionList(Side),
 }
 
 impl Awaited {
@@ -234,6 +237,11 @@ impl Work {
         if let Some(purpose) = self.operations.slow_paths(list, now) {
             return Some(Awaited::Paths(purpose));
         }
+        if let List::Panel(side) = list
+            && self.panels.listing_slow(side, now)
+        {
+            return Some(Awaited::SelectionList(side));
+        }
         (list == List::Search && self.clipboard.waiting(now) == Some(Waiting::Slow))
             .then_some(Awaited::Clipboard)
     }
@@ -253,6 +261,7 @@ impl Work {
                 self.panels.cancel(side);
                 self.folders.cancel_read(side);
             }
+            Awaited::SelectionList(side) => self.panels.cancel_listing(side),
         }
         self.retire_groups();
     }

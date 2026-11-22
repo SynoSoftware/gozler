@@ -21,7 +21,7 @@ pub(crate) mod wildcard;
 
 pub use dates::{DateField, DateRange, QueryStart};
 pub use engine::{CompiledQuery, MatchSums, MatchedParts, SizeOverflow, Totals, extension};
-pub use mask::{EmptyMask, MaskScratch, NameMask};
+pub use mask::{MaskError, MaskScratch, NameMask};
 pub use parse::{
     Clause, FolderChoice, Kind, LengthTarget, Malformed, Metadata, ParseOptions, ParsedQuery,
     QueryError, SIZE_WORDS, SizeRange, SizeWord, Term, TermMatch, Test, parse_query,

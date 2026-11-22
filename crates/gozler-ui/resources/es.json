@@ -15,7 +15,10 @@
     "edit": "&Edición",
     "view": "&Ver",
     "help": "Ay&uda",
-    "language": "&Idioma"
+    "language": "&Idioma",
+    "files_or_folders": "Solo archivos &o carpetas",
+    "focused_entry": "Según el elemento a&ctual",
+    "selection_list": "Lista de &selección"
   },
   "language": {
     "english": "&Inglés",
@@ -68,7 +71,38 @@
     "edit": "&Editar",
     "new_folder": "&Nueva carpeta…",
     "select_files": "Seleccionar arc&hivos…",
-    "unselect_files": "&Deseleccionar archivos…"
+    "unselect_files": "&Deseleccionar archivos…",
+    "invert_selection": "&Invertir selección",
+    "select_same_extension": "Seleccionar misma e&xtensión",
+    "unselect_same_extension": "Deseleccionar misma exte&nsión",
+    "restore_selection": "&Restaurar selección",
+    "save_selection": "&Guardar selección",
+    "select_only_files": "Seleccionar solo &archivos…",
+    "select_only_folders": "Seleccionar solo &carpetas…",
+    "select_files_and_folders": "Seleccionar archivos &y carpetas…",
+    "unselect_only_files": "&Deseleccionar solo archivos…",
+    "unselect_only_folders": "Deseleccionar solo car&petas…",
+    "select_all_files": "Seleccionar &todos los archivos",
+    "select_all_folders": "Seleccionar todas las carpeta&s",
+    "unselect_all_files": "Deseleccionar todos los arc&hivos",
+    "unselect_all_folders": "Deseleccionar todas las carp&etas",
+    "invert_only_files": "&Invertir solo archivos",
+    "invert_only_folders": "Invertir solo ca&rpetas",
+    "invert_files_and_folders": "In&vertir archivos y carpetas",
+    "select_by_extension": "Seleccionar por e&xtensión…",
+    "unselect_by_extension": "Deseleccionar p&or extensión…",
+    "select_same_name": "Seleccionar mismo &nombre",
+    "unselect_same_name": "Deseleccionar mismo no&mbre",
+    "select_same_name_and_extension": "Seleccionar mismo nombre y &extensión",
+    "unselect_same_name_and_extension": "Deseleccionar mismo nombre y ex&tensión",
+    "select_same_folder": "Seleccionar misma &carpeta",
+    "unselect_same_folder": "Deseleccionar misma car&peta",
+    "select_and_move_down": "&Seleccionar y bajar",
+    "unselect_and_move_down": "&Deseleccionar y bajar",
+    "toggle_and_move_down": "&Alternar y bajar",
+    "save_selection_to_file": "&Guardar selección en un archivo…",
+    "load_selection_from_file": "&Cargar selección desde un archivo…",
+    "load_selection_from_clipboard": "Cargar selección desde el &Portapapeles"
   },
   "column": {
     "name": "&Nombre",
@@ -1107,7 +1141,13 @@
     "no_longer_exists": "{0} ya no existe. Presiona F5 para volver a buscar.",
     "open_failed": "No se pudo iniciar {0}. {1} Revisa el comando en Archivo > Configuración > Menú contextual.",
     "shortcut_taken": "Otro programa usa {0}, así que ese método abreviado ya no muestra Gozler. Elige otro método abreviado en Archivo > Configuración > Teclado.",
-    "registry_failed": "No se pudo guardar \"{0}\" en el Registro. {1}"
+    "registry_failed": "No se pudo guardar \"{0}\" en el Registro. {1}",
+    "restored_one": "Se seleccionaron {1} de {2}. {0} elemento no está en esta carpeta.",
+    "restored_other": "Se seleccionaron {1} de {2}. {0} elementos no están en esta carpeta.",
+    "selection_not_saved": "No se pudo guardar {0}. {1}",
+    "selection_not_read": "No se pudo leer {0}. {1}",
+    "file_no_names": "{0} no contiene nombres.",
+    "clipboard_no_names": "El Portapapeles no contiene nombres ni archivos."
   },
   "sync": {
     "title": "Sincronizar carpetas",
@@ -1166,7 +1206,9 @@
   "select_files": {
     "select_title": "Seleccionar archivos",
     "unselect_title": "Deseleccionar archivos",
-    "mask": "&Archivos, como *.txt o *.jpg;*.png:"
+    "mask": "&Archivos, como *.txt o *.jpg *.png:",
+    "text_files": "Archivos de texto (*.txt)",
+    "file_name": "selección"
   },
   "name": {
     "characters": "Un nombre de archivo no puede contener ninguno de los caracteres siguientes: \\ / : * ? \" < > |",

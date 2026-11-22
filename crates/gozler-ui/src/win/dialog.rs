@@ -33,11 +33,12 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BN_CLICKED, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_TYPEMASK, CBN_EDITCHANGE, CBN_SELCHANGE,
-    CBN_SELENDOK, CreateDialogParamW, DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS, EN_SETFOCUS,
-    EndDialog, EnumChildWindows, GWL_STYLE, GetDlgCtrlID, GetDlgItem, GetParent, GetWindowLongPtrW,
-    IDCANCEL, IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE, MINMAXINFO,
-    MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX, WM_COMMAND,
-    WM_CONTEXTMENU, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE, WM_TIMER,
+    CBN_SELENDOK, CBS_DROPDOWN, CreateDialogParamW, DialogBoxParamW, EN_CHANGE, EN_KILLFOCUS,
+    EN_SETFOCUS, EndDialog, EnumChildWindows, GWL_STYLE, GetDlgCtrlID, GetDlgItem, GetParent,
+    GetWindowLongPtrW, IDCANCEL, IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MESSAGEBOX_STYLE,
+    MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW, WINDOW_LONG_PTR_INDEX,
+    WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG, WM_NOTIFY, WM_SIZE,
+    WM_TIMER,
 };
 use windows::core::{BOOL, HRESULT, HSTRING, PCWSTR};
 
@@ -87,6 +88,12 @@ pub(crate) enum DialogMessage {
     ContextMenu {
         target: Hwnd,
         at: Option<(i32, i32)>,
+    },
+    /// The person picked an item from the list of the combo box `id` that
+    /// they also type in, whose text the box shows only after this message;
+    /// [`super::controls::ComboBox::picked`] reads it.
+    Picked {
+        id: u16,
     },
     /// The edit control `id` got the focus, or lost it.
     Focus {
@@ -296,15 +303,15 @@ unsafe extern "system" fn procedure<D: DialogProc>(
         }
         WM_COMMAND => {
             let id = (wparam.0 & 0xffff) as u16;
+            let control = Hwnd(HWND(lparam.0 as *mut _));
             match ((wparam.0 >> 16) & 0xffff) as u32 {
                 BN_CLICKED => DialogMessage::Command { id },
+                CBN_SELCHANGE if is_editable_combo(control) => DialogMessage::Picked { id },
                 // A list box's LBN_SELCHANGE is a combo box's CBN_SELCHANGE.
                 EN_CHANGE | CBN_SELCHANGE => DialogMessage::Edited { id },
                 CBN_SELENDOK => DialogMessage::Chosen { id },
                 // A button's BN_DOUBLECLICKED has CBN_EDITCHANGE's code.
-                CBN_EDITCHANGE if Hwnd(HWND(lparam.0 as *mut _)).is_class("ComboBox") => {
-                    DialogMessage::Edited { id }
-                }
+                CBN_EDITCHANGE if control.is_class("ComboBox") => DialogMessage::Edited { id },
                 EN_SETFOCUS => DialogMessage::Focus { id, focused: true },
                 EN_KILLFOCUS => DialogMessage::Focus { id, focused: false },
                 _ => DialogMessage::Other,
@@ -470,6 +477,7 @@ unsafe extern "system" fn procedure<D: DialogProc>(
         | DialogMessage::Reply
         | DialogMessage::Tree { .. }
         | DialogMessage::RowDragged { .. }
+        | DialogMessage::Picked { .. }
         | DialogMessage::Other => None,
     };
     if running.state.message(dialog, message) {
@@ -576,6 +584,13 @@ unsafe extern "system" fn page_procedure(
         }
         _ => 0,
     }
+}
+
+/// Whether `control` is a combo box that the person also types in.
+fn is_editable_combo(control: Hwnd) -> bool {
+    // SAFETY: plain values.
+    let style = unsafe { GetWindowLongPtrW(control.0, GWL_STYLE) };
+    control.is_class("ComboBox") && style as u32 & 3 == CBS_DROPDOWN as u32
 }
 
 /// Tells `dialog` that the main window holds a reply for it, such as Use

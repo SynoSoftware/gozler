@@ -5,7 +5,7 @@ use crate::core::fetch::List;
 use crate::core::multi_rename::{self, Known, Row};
 use crate::core::open::Entries;
 use crate::core::operations::{Followed, Following, PreparedFailure, Reporting};
-use crate::core::panel::CommandPlace;
+use crate::core::panel::{CommandPlace, Side};
 use crate::core::work::{Id, Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::Task;
@@ -33,12 +33,17 @@ pub(in crate::app) enum PathPurpose {
     Move(List),
     Delete(List),
     Rename(List),
+    Remember(List),
 }
 
 impl PathPurpose {
     fn list(self) -> List {
         match self {
-            Self::Copy(list) | Self::Move(list) | Self::Delete(list) | Self::Rename(list) => list,
+            Self::Copy(list)
+            | Self::Move(list)
+            | Self::Delete(list)
+            | Self::Rename(list)
+            | Self::Remember(list) => list,
         }
     }
 }
@@ -63,11 +68,15 @@ pub(in crate::app) enum PathAction {
     MultiRename {
         place: Option<CommandPlace>,
     },
+    /// Save selection: Restore selection selects these entries again in
+    /// the panel (DESIGN.md: Selecting entries).
+    Remember(Side),
 }
 
 impl PathAction {
     fn purpose(&self, list: List) -> PathPurpose {
         match self {
+            Self::Remember(_) => PathPurpose::Remember(list),
             Self::Transfer { moves: false } | Self::PanelTransfer { moves: false, .. } => {
                 PathPurpose::Copy(list)
             }
@@ -151,6 +160,7 @@ impl Work {
                         PathPurpose::Move(list),
                         PathPurpose::Delete(list),
                         PathPurpose::Rename(list),
+                        PathPurpose::Remember(list),
                     ]
                 })
                 .map(|purpose| {
@@ -321,24 +331,32 @@ fn prepare_paths(input: PreparingPaths, cancel: &CancelToken) -> PreparedPaths {
             known,
         }
     } else {
-        Chosen::Paths(match input.entries {
-            Entries::Results(files) => files
-                .iter()
-                .take_while(|_| !cancel.is_cancelled())
-                .map(os_path)
-                .collect(),
-            entries => entries
-                .resolve()
-                .into_iter()
-                .take_while(|_| !cancel.is_cancelled())
-                .map(|entry| PathBuf::from(OsString::from_wide(&entry.path)))
-                .collect(),
-        })
+        Chosen::Paths(paths_of(input.entries, cancel))
     };
     PreparedPaths {
         action: input.action,
         chosen,
         single_folder,
+    }
+}
+
+/// The full paths of `entries`, until `cancel` is set.
+pub(super) fn paths_of(entries: Entries, cancel: &CancelToken) -> Vec<PathBuf> {
+    if cancel.is_cancelled() {
+        return Vec::new();
+    }
+    match entries {
+        Entries::Results(files) => files
+            .iter()
+            .take_while(|_| !cancel.is_cancelled())
+            .map(os_path)
+            .collect(),
+        entries => entries
+            .resolve()
+            .into_iter()
+            .take_while(|_| !cancel.is_cancelled())
+            .map(|entry| PathBuf::from(OsString::from_wide(&entry.path)))
+            .collect(),
     }
 }
 

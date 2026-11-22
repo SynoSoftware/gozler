@@ -27,7 +27,6 @@ when stage 2 has not run.
 | 2 | The work owner holds each task's lifecycle state | Separate infrastructure work; prioritize when task additions would repeat forwarding |
 | 3 | One owner for the Show commands' shortcuts | Before changing global shortcut behavior, or before moving the Keyboard page in stage 4 |
 | 4 | One module per Settings page | When page work justifies the split and the file is free of other edits |
-| 5 | One row for each command | First preparation for the next batch of Commander commands |
 
 Stage 3 comes before stage 4, so that the Keyboard page code is already
 fixed when it moves.
@@ -272,27 +271,6 @@ Schedule this stage when no other session edits `app/settings.rs`.
 draft, validation and save behavior has one owner. A page-only change does
 not edit unrelated page handlers; a new shared setting may still need its
 type, persistence, defaults, template and catalogue changes.
-
-## Stage 5: one row for each command
-
-A new command needs a variant, its place in `ALL`, `row()`, `glyph()`,
-`belongs_to()` and its menu position. These are exhaustive matches, so they
-are safe, but they are four edits where one would do.
-
-**Change.**
-- `row()` also returns the glyph and the modes the command belongs to, so a
-  command's attributes live in one match arm.
-- `ALL` stays: menu IDs are built from its order (`0x100 + position`).
-- The menu bar's layout stays in `menu_bar`, because it orders menus, not
-  commands.
-- `BUTTON_GLYPHS` and `SETTINGS_GROUPS` become slices, so adding a row does
-  not change a count. `SettingsPage::ALL` stays an array, because
-  `SettingsDialog` sizes `pages` by its length.
-
-**Done when** each command's metadata has one row, with its enum variant,
-stable `ALL` entry, menu placement, dispatch and catalogues remaining
-explicit. Existing saved shortcut names, menu IDs, enablement and mode
-availability keep their meanings.
 
 ## Not in this plan
 

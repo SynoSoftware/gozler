@@ -320,6 +320,29 @@ selection.
 The entries the person selected in a panel with the arrow keys, `Insert`,
 `Space`, `Shift` or `Ctrl`; commands act on them, or on the focused row when there are none.
 
+**Selection mask**:
+The text that Select files… and Unselect files… take to match names, written
+as in Total Commander, such as `*.jpg *.png|*.bak`. Not a rename mask, which
+builds names.
+_Avoid_: name mask, filter, pattern
+
+**Saved selection**:
+The entries that Restore selection (`Num /`) selects again in a panel, by full
+path: what the panel's last copy, move or delete acted on, or what Save
+selection stored after it.
+_Avoid_: remembered selection, last selection
+
+**Unfinished entries**:
+The entries that a copy, move or delete did not finish. They are selected
+again when it ends, so the same key tries them again.
+_Avoid_: failed entries (a cancel leaves entries unfinished that did not fail)
+
+**Selection list**:
+A text file with one name, or one full path, on each line, which Edit >
+Selection list saves the selected entries to and selects them from again, as
+Total Commander's does.
+_Avoid_: selection file
+
 **Quick search**:
 Going to a name in a panel by typing its start, with or without `Alt`.
 
@@ -368,7 +391,7 @@ _Avoid_: bulk rename, batch rename tool
 
 **Rename mask**:
 Multi-Rename's name mask or extension mask: text with placeholders that
-builds each new name, such as `[N]-[C]`. Not Select files' mask, which
+builds each new name, such as `[N]-[C]`. Not a selection mask, which
 matches names.
 _Avoid_: template, pattern
 

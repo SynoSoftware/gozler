@@ -442,6 +442,84 @@ impl ToldRows {
     }
 }
 
+/// What a selection command of a panel does: the entries it matches, what
+/// it does to them, and which of them it changes (DESIGN.md: Selecting
+/// entries). It runs through the work owner, as a mask does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Rule {
+    pub(crate) matches: Matches,
+    pub(crate) change: Change,
+    pub(crate) kinds: KindsChoice,
+}
+
+/// The entries a selection command matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Matches {
+    /// The names a typed mask matches.
+    Mask,
+    /// As `Mask`, with the focused entry's extension typed in the box.
+    MaskOfExtension,
+    Every,
+    /// The entries with the focused entry's extension.
+    Extension,
+    /// The entries with the focused entry's name without its extension.
+    Stem,
+    /// The entries with the focused entry's name.
+    Name,
+    /// The entries in the focused entry's folder.
+    Folder,
+    /// What Restore selection selects again: the panel's last copy, move
+    /// or delete, or what Save selection saved.
+    Remembered,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Change {
+    Select,
+    Clear,
+    /// Selects what was not selected and clears what was.
+    Invert,
+    /// Selects the matched entries and clears every other.
+    Replace,
+}
+
+/// The entries a selection command changes, of those it matches; the others
+/// keep their state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kinds {
+    Files,
+    Folders,
+    Both,
+}
+
+impl Kinds {
+    pub(crate) fn takes(self, folder: bool) -> bool {
+        match self {
+            Kinds::Files => !folder,
+            Kinds::Folders => folder,
+            Kinds::Both => true,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KindsChoice {
+    /// Settings > General > Selection's choice: files and folders, or files
+    /// only.
+    Setting,
+    Fixed(Kinds),
+}
+
+impl KindsChoice {
+    pub(crate) fn kinds(self, select_folders: bool) -> Kinds {
+        match self {
+            KindsChoice::Setting if select_folders => Kinds::Both,
+            KindsChoice::Setting => Kinds::Files,
+            KindsChoice::Fixed(kinds) => kinds,
+        }
+    }
+}
+
 /// A key that moves a list's focus and keeps the selection, in Search's
 /// list and a panel's, as Total Commander's cursor does (DESIGN.md:
 /// Selecting entries).

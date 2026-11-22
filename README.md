@@ -110,8 +110,11 @@ automatically. Folder changes appear live, and slow network folders load
 without freezing the window.
 
 Press **F5** to copy, **F6** to move, **F7** to create a folder, or **F8**
-to delete. Use **Insert**, **Space** or **Shift** to select entries, or
-Num + and Num − to select and clear by a mask such as `*.jpg;*.png`.
+to delete. Use **Insert**, **Space** or **Shift** to select entries,
+Num + and Num − to select and clear by a mask such as `*.jpg *.png`,
+Num * to invert the selection, and Num / to select again what the last
+copy, move or delete acted on. Entries a copy, move or delete could not
+finish stay selected, so you can try them again.
 Press **Alt+F7** for Search, **Alt+F12** for Commander, and **Alt+Left**
 to return to your search with its results and selection intact.
 
@@ -126,8 +129,11 @@ Press **F4** to switch between text and hex, and copy text with Ctrl+C.
 The current development version adds ordered word matching in the window:
 with Start of words, `para 50 mg` finds `paracetamol extra 500 tablets.mg`.
 It also shows concurrent jobs separately in the status bar, and lets you
-choose whether Commander selection masks include folders. These changes are
-not yet in the latest release.
+choose whether Commander selection masks include folders. Commander gains
+Total Commander's selection commands, such as Invert selection, Restore
+selection and Select same extension, its mask syntax and mask history, and
+saving a selection to a file and loading it from a file or the clipboard.
+These changes are not yet in the latest release.
 
 ## Recent releases
 

@@ -24,11 +24,11 @@ use super::fetch::{Ask, ChunkAsk, FromSnapshot, Generation, Outcome};
 use super::model::Column;
 use super::query::{self, Filters, Matching};
 use super::search_list::{Deselect, SearchList};
-use super::selection::{DragEntry, RowSelection, wide_path};
+use super::selection::{Change, DragEntry, Kinds, Matches, RowSelection, wide_path};
 use super::work::{self, Pass, Retirement};
 use gozler_core::fold::fold;
 use gozler_core::proto::ResultItem;
-use gozler_core::query::{NameMask, QueryStart};
+use gozler_core::query::QueryStart;
 use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::winpath::{absolute, is_root, parent_of};
 use gozler_fileops::{OperationId, Rename, Request, Taken};
@@ -50,7 +50,7 @@ use quick::Quick;
 pub(crate) use quick::{Finding, Found, QuickAction};
 use rows::{FolderRows, Name, name_hash, name_key, same_name};
 pub(crate) use rows::{give_sizes, sort_listing};
-pub(crate) use selecting::{Selected, Selecting};
+pub(crate) use selecting::{Matcher, Paths, Selected, Selecting, decoded, listed_paths, listing};
 
 const PENDING_ROWS: usize = 32;
 
@@ -745,6 +745,12 @@ pub(crate) struct Panel {
     /// the shown folder, which the focus goes to when a row shows it.
     awaited: Option<Awaited>,
     awaited_place: Option<(Place, RowSelection)>,
+    /// What Restore selection selects again (DESIGN.md: Selecting entries).
+    remembered: Option<Paths>,
+    /// The copy, move or delete whose unfinished entries are selected
+    /// again when it ends, while nothing was selected since and the panel
+    /// still shows the folder of the `navigation` it started in.
+    reselect: Option<(OperationId, u64)>,
     interaction_revision: u64,
     /// The latest Go's generation; completing or refreshing its rows keeps it.
     navigation: u64,
@@ -849,6 +855,8 @@ impl Panel {
             anchor: None,
             awaited: None,
             awaited_place: None,
+            remembered: None,
+            reselect: None,
             interaction_revision: 0,
             navigation: 0,
             epoch: 0,
@@ -2277,20 +2285,101 @@ impl Panels {
         searched
     }
 
-    /// Captures the folder and selection that the mask acts on; a later
-    /// interaction invalidates its answer.
+    /// Captures the folder and selection that a selection rule acts on; a
+    /// later interaction invalidates its answer.
     pub(crate) fn select_matching(
         &self,
         side: Side,
-        mask: NameMask,
-        select: bool,
-        folders: bool,
+        matcher: Matcher,
+        change: Change,
+        kinds: Kinds,
     ) -> Option<Selecting> {
         let panel = self.panel(side);
         if !matches!(panel.view, View::Folder) || panel.rows_pending() {
             return None;
         }
-        Some(Selecting::new(panel, mask, select, folders))
+        Some(Selecting::new(panel, matcher, change, kinds))
+    }
+
+    /// What `matches` names in `side`'s folder: the focused entry's
+    /// extension, name or folder, or what Restore selection selects again.
+    /// `None` without them, and for a typed mask, which the dialog gives.
+    pub(crate) fn matcher(&self, side: Side, matches: Matches) -> Option<Matcher> {
+        let panel = self.panel(side);
+        let focused = || {
+            let entry = panel.entry(panel.focused?)?;
+            let mut name = Vec::new();
+            gozler_core::wtf8::from_utf16(&entry.name, &mut name);
+            Some((name, entry.is_folder()))
+        };
+        Some(match matches {
+            Matches::Mask | Matches::MaskOfExtension => return None,
+            // A folder panel's entries are all in its folder.
+            Matches::Every | Matches::Folder => Matcher::Every,
+            Matches::Extension => {
+                let (name, folder) = focused()?;
+                Matcher::Extension(gozler_core::query::extension(&name, folder).map(fold))
+            }
+            Matches::Stem => {
+                let (name, folder) = focused()?;
+                Matcher::Stem(fold(selecting::stem_of(&name, folder)))
+            }
+            Matches::Name => Matcher::Name(fold(&focused()?.0)),
+            Matches::Remembered => Matcher::Paths(panel.remembered.clone()?),
+        })
+    }
+
+    /// The focused entry's extension, which Select by extension… types in
+    /// its box; `None` for a name without one.
+    pub(crate) fn focused_extension(&self, side: Side) -> Option<String> {
+        let panel = self.panel(side);
+        let entry = panel.entry(panel.focused?)?;
+        let name = String::from_utf16_lossy(&entry.name);
+        gozler_core::query::extension(name.as_bytes(), entry.is_folder())
+            .map(|extension| String::from_utf8_lossy(extension).into_owned())
+    }
+
+    /// The focused row's entry in a panel that lists a folder; `None` on
+    /// `..` and in a search panel.
+    pub(crate) fn focused_entry(&self, side: Side) -> Option<&Entry> {
+        let panel = self.panel(side);
+        panel.entry(panel.focused?)
+    }
+
+    /// Restore selection selects `paths` again in `side` from now on.
+    pub(crate) fn remember(&mut self, side: Side, paths: Paths) {
+        let panel = self.panel_mut(side);
+        let old = panel.remembered.replace(paths);
+        panel.retired.push(old, work::INLINE_ITEMS + 1);
+    }
+
+    pub(crate) fn remembers(&self, side: Side) -> bool {
+        self.panel(side).remembered.is_some()
+    }
+
+    /// `operation`, a copy, move or delete of `side`'s entries, was just
+    /// submitted, and the selection cleared: its unfinished entries are
+    /// selected again when it ends ([`Panels::reselect`]).
+    pub(crate) fn reselect_after(&mut self, side: Side, operation: OperationId) {
+        let panel = self.panel_mut(side);
+        panel.reselect = Some((operation, panel.navigation));
+    }
+
+    /// The operation whose unfinished entries `side` selects again when it
+    /// ends, while the panel still shows the folder it started in and
+    /// nothing was selected there since (DESIGN.md: Selecting entries).
+    pub(crate) fn reselect(&self, side: Side) -> Option<OperationId> {
+        let panel = self.panel(side);
+        let (operation, navigation) = panel.reselect?;
+        (navigation == panel.navigation
+            && matches!(panel.view, View::Folder)
+            && panel.selected.is_empty())
+        .then_some(operation)
+    }
+
+    /// `side` selects no ended operation's entries again.
+    pub(crate) fn forget_reselect(&mut self, side: Side) {
+        self.panel_mut(side).reselect = None;
     }
 
     pub(crate) fn accept_matching(&mut self, side: Side, answer: Selected) -> Option<Place> {
@@ -2302,6 +2391,10 @@ impl Panels {
     /// The list's selected rows, as it tells them; whether they changed.
     pub(crate) fn set_selected(&mut self, side: Side, selected: RowSelection) -> bool {
         let panel = self.panel_mut(side);
+        if selected.count > 0 {
+            // The person selected something since the operation started.
+            panel.reselect = None;
+        }
         let changed = panel.selected_count != selected.count
             || selected.positions.len() > work::INLINE_ITEMS
             || panel.selected.as_ref() != selected.positions.as_ref();
@@ -2803,6 +2896,8 @@ pub(crate) struct SavedPanels {
 )]
 pub(crate) mod tests {
     use super::*;
+    use crate::core::selection::KindsChoice;
+    use gozler_core::query::NameMask;
     use std::collections::HashSet;
     use std::path::PathBuf;
 
@@ -2830,38 +2925,115 @@ pub(crate) mod tests {
             ],
         );
         let folders = crate::core::settings::Choices::default().select_folders;
-        let mask = || NameMask::parse("*.txt").unwrap();
-        let input = panels
-            .select_matching(Side::Left, mask(), true, folders)
-            .unwrap();
-        let place = panels.accept_matching(Side::Left, input.run()).unwrap();
+        let setting = KindsChoice::Setting.kinds(folders);
+        let mask = || Matcher::Mask(NameMask::parse("*.txt").unwrap());
+        let mut run = |matcher, change, kinds| {
+            let input = panels
+                .select_matching(Side::Left, matcher, change, kinds)
+                .unwrap();
+            panels.accept_matching(Side::Left, input.run()).unwrap()
+        };
+        let place = run(mask(), Change::Select, setting);
         assert_eq!(place.selected.as_ref(), &[1..2, 3..4]);
 
-        let input = panels
-            .select_matching(Side::Left, mask(), false, false)
-            .unwrap();
-        let place = panels.accept_matching(Side::Left, input.run()).unwrap();
+        let place = run(mask(), Change::Clear, Kinds::Files);
         assert_eq!(place.selected.as_ref(), &[1..2]);
 
-        let input = panels
-            .select_matching(Side::Left, mask(), false, folders)
-            .unwrap();
-        let place = panels.accept_matching(Side::Left, input.run()).unwrap();
+        let place = run(mask(), Change::Clear, Kinds::Both);
         assert!(place.selected.is_empty());
 
-        let input = panels
-            .select_matching(Side::Left, NameMask::parse("*.*").unwrap(), true, folders)
-            .unwrap();
-        let place = panels.accept_matching(Side::Left, input.run()).unwrap();
+        let all = Matcher::Mask(NameMask::parse("*.*").unwrap());
+        let place = run(all, Change::Select, setting);
         assert_eq!(place.selected.as_ref(), &[1..5]);
+    }
+
+    /// Restore selection selects by full path: an entry with a remembered
+    /// name in another folder stays as it is, and is counted as missing
+    /// (DESIGN.md: Selecting entries).
+    #[test]
+    fn restore_selection_selects_only_the_remembered_folder_s_entries() {
+        let mut panels = showing(r"C:\d", vec![file("a.txt", 1, 0), file("b.txt", 1, 0)]);
+        let saved: Arc<[std::path::PathBuf]> = [r"C:\d\A.TXT", r"C:\d\gone.txt", r"C:\e\b.txt"]
+            .map(std::path::PathBuf::from)
+            .into();
+        panels.remember(Side::Left, Paths::Saved(saved));
+        let matcher = panels.matcher(Side::Left, Matches::Remembered).unwrap();
+        let answer = panels
+            .select_matching(Side::Left, matcher, Change::Replace, Kinds::Both)
+            .unwrap()
+            .run();
+        assert_eq!(answer.named(), Some((3, 1)));
+        let place = panels.accept_matching(Side::Left, answer).unwrap();
+        assert_eq!(place.selected.as_ref(), &[1..2]);
+    }
+
+    /// The entries a copy did not finish are the sources at or above a
+    /// listed failure, and all of them after a cancel, because a cancelled
+    /// copy does not say which ones it finished.
+    #[test]
+    fn unfinished_entries_are_the_sources_with_a_failure_below_them() {
+        use gozler_fileops::{Destination, End, Listed, Outcome, Policy, Reason, RingCounts};
+        let entries = vec![folder("Photos"), file("a.txt", 1, 0), file("b.txt", 1, 0)];
+        let mut panels = showing(r"C:\d", entries);
+        let sources = [r"C:\d\Photos", r"C:\d\a.txt", r"C:\d\b.txt"].map(std::path::PathBuf::from);
+        let request = Arc::new(Request::Copy {
+            sources: sources.to_vec(),
+            destination: Destination::Folder(r"D:\x".into()),
+            policy: Policy::Skip,
+        });
+        let failed = |path: &str| Listed {
+            path: path.into(),
+            reason: Reason::Failed(5),
+        };
+        let mut unfinished = |end| {
+            let listed = vec![failed(r"C:\d\Photos\2024\x.jpg"), failed(r"C:\d\b.txt")];
+            let outcome = Arc::new(Outcome::new(end, 3, 0, listed, RingCounts::default()));
+            let matcher = Matcher::Paths(Paths::Unfinished(Arc::clone(&request), outcome));
+            let answer = panels
+                .select_matching(Side::Left, matcher, Change::Select, Kinds::Both)
+                .unwrap()
+                .run();
+            let place = panels.accept_matching(Side::Left, answer).unwrap();
+            panels.set_selected(Side::Left, RowSelection::from(Vec::new()));
+            place.selected
+        };
+        assert_eq!(unfinished(End::Complete).as_ref(), &[1..2, 3..4]);
+        assert_eq!(unfinished(End::Cancelled).as_ref(), &[1..4]);
+    }
+
+    /// A saved selection is the file that Total Commander reads, and loads
+    /// back; a list that Total Commander's Unicode save or Copy as path
+    /// wrote loads too.
+    #[test]
+    fn a_saved_selection_loads_back_and_other_programs_lists_load() {
+        let saved = listing(
+            &[PathBuf::from(r"C:\d\a.jpg"), PathBuf::from(r"C:\d\b c.jpg")],
+            true,
+        );
+        assert_eq!(saved, b"\xEF\xBB\xBFa.jpg\r\nb c.jpg\r\n");
+        assert_eq!(
+            listed_paths(&decoded(&saved), r"C:\d"),
+            [PathBuf::from(r"C:\d\a.jpg"), PathBuf::from(r"C:\d\b c.jpg")]
+        );
+        let unicode: Vec<u8> = (b"\xFF\xFE".iter().copied())
+            .chain(
+                "\"D:\\x.txt\"  \r\n\r\nd.txt"
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes),
+            )
+            .collect();
+        assert_eq!(
+            listed_paths(&decoded(&unicode), r"C:\d"),
+            [PathBuf::from(r"D:\x.txt"), PathBuf::from(r"C:\d\d.txt")]
+        );
     }
 
     #[test]
     fn a_mask_answer_cannot_replace_a_newer_selection_or_folder() {
         let mut panels = showing(r"C:\d", vec![file("a", 5, 0), file("b", 9, 0)]);
-        let input = || NameMask::parse("*.*").unwrap();
+        let input = || Matcher::Mask(NameMask::parse("*.*").unwrap());
         let answer = panels
-            .select_matching(Side::Left, input(), true, true)
+            .select_matching(Side::Left, input(), Change::Select, Kinds::Both)
             .unwrap()
             .run();
         panels.set_selected(Side::Left, vec![2..3].into());
@@ -2869,7 +3041,7 @@ pub(crate) mod tests {
         assert_eq!(panels.place(Side::Left).selected.as_ref(), &[2..3]);
 
         let answer = panels
-            .select_matching(Side::Left, input(), true, true)
+            .select_matching(Side::Left, input(), Change::Select, Kinds::Both)
             .unwrap()
             .run();
         list(&mut panels, r"C:\other", vec![file("c", 1, 0)]);

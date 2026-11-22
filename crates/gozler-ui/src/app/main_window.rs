@@ -23,9 +23,9 @@ use super::settings::SettingsDialog;
 use super::status_bar::{Entry as StatusEntry, Slot as StatusSlot, StatusBar, WorkId};
 use super::viewer::{Files as ViewerFiles, Viewers};
 use super::work::{
-    AdministratorStart, Awaited, Chosen, CopyFailure, CopyNotice, DeleteAgain, OpenTarget, Opened,
-    PathAction, PathPurpose, PreparedPaths, QueueReady, RegistryAnswer, RegistryRead,
-    ReleaseAnswer, ReleasePurpose, ShellPurpose, ShellTarget, Surface,
+    AdministratorStart, Awaited, Chosen, CopyFailure, CopyNotice, DeleteAgain, LoadFailure,
+    OpenTarget, Opened, PathAction, PathPurpose, PreparedPaths, QueueReady, RegistryAnswer,
+    RegistryRead, ReleaseAnswer, ReleasePurpose, ShellPurpose, ShellTarget, Surface,
 };
 use crate::core::captions::{
     self, ButtonIcon, DialogCaptions, DialogItem, FilterCaptions, IndexCaptions, Inspected,
@@ -35,8 +35,8 @@ use crate::core::captions::{
 use crate::core::clipboard::ClipboardFormat;
 use crate::core::commands::{
     self, CommandButton, CommandId, Focus, HIDE_DETAILS, INSPECTOR_BUTTONS, INSPECTOR_COPY_FOLDER,
-    INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, KeyAction, Keystroke, MenuItem, SHOW_DETAILS, State,
-    TabStop, ViewKey,
+    INSPECTOR_COPY_NAME, INSPECTOR_COPY_PATH, KeyAction, Keystroke, MenuItem, SHOW_DETAILS,
+    SelectKey, State, TabStop, ViewKey,
 };
 use crate::core::dates::{DateFormat, Dates};
 use crate::core::drop_target::{Dragged, DropEffect, DropKeys, DropMenu, SourceEffects};
@@ -65,7 +65,7 @@ use crate::core::operations::{
     OperationDialog, OperationProgress, OperationSteps, PreparedFailure, QueueStep, Reporting,
     SourceStep,
 };
-use crate::core::panel::{self, Side};
+use crate::core::panel::{self, Paths, Side};
 use crate::core::query::{
     AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
     date_items, size_items,
@@ -283,7 +283,7 @@ impl Controls {
         }
         self.filters.kind.set_icons(&Kind::ALL.map(Kind::glyph));
         for (button, control) in inspector.text_buttons() {
-            control.set_icon(button.command.glyph().map(ButtonIcon::Glyph));
+            control.set_icon(button.command.row().glyph.map(ButtonIcon::Glyph));
         }
         self.key_bar.apply_glyphs();
         for (control, key) in [
@@ -577,6 +577,20 @@ enum ModalStep {
     Synchronize(OperationId),
     /// The delete that a failure report's Retry asked for has ended.
     ReturnWithoutAdministrator,
+    /// Restore selection, or `command` that loaded a selection, found
+    /// `found` of the `named` entries it selects.
+    Restored {
+        command: CommandId,
+        named: u64,
+        found: u64,
+    },
+    /// Save selection to file… could not write `file`.
+    SelectionNotSaved {
+        file: PathBuf,
+        error: std::io::Error,
+    },
+    /// The named Load selection command found no names to select.
+    SelectionNotLoaded(CommandId, LoadFailure),
 }
 
 /// The folder row that dragged files would be dropped into. The drop goes
@@ -1934,10 +1948,8 @@ impl MainWindow {
             && (self.native_update_active(context.list)
                 || self.native_deselection_pending(context.list)
                 || self.selection_command_pending(context.list)
-                || matches!(
-                    item,
-                    MenuItem::Run(CommandId::SelectFiles | CommandId::UnselectFiles)
-                ));
+                // A rule starts from the selection as it is.
+                || matches!(item, MenuItem::Run(command) if command.selection_rule().is_some()));
         if (item.reads_selection(context.focus) || writing)
             && !self.prepare_selection_command(hwnd, item, context)
         {
@@ -2071,17 +2083,61 @@ impl MainWindow {
                     }
                 },
                 CommandId::ClearSelection => return self.clear_selection(list),
-                CommandId::SelectFiles => {
+                // The commands that have a selection rule.
+                CommandId::SelectFiles
+                | CommandId::UnselectFiles
+                | CommandId::SelectOnlyFiles
+                | CommandId::SelectOnlyFolders
+                | CommandId::SelectFilesAndFolders
+                | CommandId::UnselectOnlyFiles
+                | CommandId::UnselectOnlyFolders
+                | CommandId::SelectByExtension
+                | CommandId::UnselectByExtension
+                | CommandId::InvertSelection
+                | CommandId::InvertOnlyFiles
+                | CommandId::InvertOnlyFolders
+                | CommandId::InvertFilesAndFolders
+                | CommandId::SelectAllFiles
+                | CommandId::SelectAllFolders
+                | CommandId::UnselectAllFiles
+                | CommandId::UnselectAllFolders
+                | CommandId::SelectSameExtension
+                | CommandId::UnselectSameExtension
+                | CommandId::SelectSameName
+                | CommandId::UnselectSameName
+                | CommandId::SelectSameNameAndExtension
+                | CommandId::UnselectSameNameAndExtension
+                | CommandId::SelectSameFolder
+                | CommandId::UnselectSameFolder
+                | CommandId::RestoreSelection => {
                     return self
                         .controls()
                         .panels
-                        .select_matching(self, hwnd, active, true);
+                        .select_by_rule(self, hwnd, active, command);
                 }
-                CommandId::UnselectFiles => {
+                CommandId::SelectAndMoveDown => {
+                    return self.select_key(hwnd, list, SelectKey::Set { select: true });
+                }
+                CommandId::UnselectAndMoveDown => {
+                    return self.select_key(hwnd, list, SelectKey::Set { select: false });
+                }
+                CommandId::ToggleAndMoveDown => {
+                    return self.select_key(hwnd, list, SelectKey::Toggle { down: true });
+                }
+                CommandId::SaveSelection => {
+                    return self.prepare_selected(list, PathAction::Remember(active));
+                }
+                CommandId::SaveSelectionToFile => {
                     return self
                         .controls()
                         .panels
-                        .select_matching(self, hwnd, active, false);
+                        .save_selection_to_file(self, hwnd, active);
+                }
+                CommandId::LoadSelectionFromFile | CommandId::LoadSelectionFromClipboard => {
+                    return self
+                        .controls()
+                        .panels
+                        .load_selection(self, hwnd, active, command);
                 }
                 CommandId::Find => {
                     if mode == Mode::Commander {
@@ -2562,6 +2618,10 @@ impl MainWindow {
                         (PathAction::MultiRename { place }, Chosen::Rows { rows, known }) => {
                             self.multi_rename(hwnd, place, rows, known)
                         }
+                        (PathAction::Remember(side), Chosen::Paths(paths)) => {
+                            let paths = Paths::Saved(paths.into());
+                            self.model.borrow_mut().panels_mut().remember(side, paths);
+                        }
                         // The worker pairs each action with what it acts on.
                         (_, chosen) => self.retire_chosen(chosen),
                     }
@@ -2692,6 +2752,61 @@ impl MainWindow {
                 ModalStep::PreparedFailure(prepared) => self.show_prepared_failure(hwnd, prepared),
                 ModalStep::Synchronize(id) => self.synchronize_folders(hwnd, Some(id)),
                 ModalStep::ReturnWithoutAdministrator => self.return_without_administrator(hwnd),
+                ModalStep::Restored {
+                    command,
+                    named,
+                    found,
+                } => {
+                    let (text, title) = {
+                        let model = self.model.borrow();
+                        let strings = model.strings();
+                        let numbers = self.numbers.borrow();
+                        let text = strings.count(
+                            "message.restored",
+                            named - found,
+                            &*numbers,
+                            &[&numbers.integer(found), &numbers.integer(named)],
+                        );
+                        (text, command_title(strings, command))
+                    };
+                    win::dialog::info_box(hwnd, &text, &title);
+                }
+                ModalStep::SelectionNotSaved { file, error } => {
+                    let (text, title) = {
+                        let model = self.model.borrow();
+                        let strings = model.strings();
+                        let file = file.display().to_string();
+                        let text = strings.format(
+                            "message.selection_not_saved",
+                            &[&file, &win::error_text(&error)],
+                        );
+                        (text, command_title(strings, CommandId::SaveSelectionToFile))
+                    };
+                    win::dialog::error_box(Some(hwnd), &text, &title);
+                }
+                ModalStep::SelectionNotLoaded(command, failure) => {
+                    let (text, title) = {
+                        let model = self.model.borrow();
+                        let strings = model.strings();
+                        let title = command_title(strings, command);
+                        let text = match failure {
+                            LoadFailure::Unreadable(file, error) => strings.format(
+                                "message.selection_not_read",
+                                &[&file.display().to_string(), &win::error_text(&error)],
+                            ),
+                            LoadFailure::NoNamesInFile(file) => strings
+                                .format("message.file_no_names", &[&file.display().to_string()]),
+                            LoadFailure::NoNamesOnClipboard => {
+                                strings.text("message.clipboard_no_names").to_owned()
+                            }
+                            LoadFailure::ClipboardBusy => {
+                                strings.text("message.clipboard_busy").to_owned()
+                            }
+                        };
+                        (text, title)
+                    };
+                    win::dialog::error_box(Some(hwnd), &text, &title);
+                }
             }
         }
         self.modal_running.set(false);
@@ -2900,7 +3015,22 @@ impl MainWindow {
         }
         let selected = self.created().work.borrow_mut().panels.take_selected();
         for (side, id, answer) in selected {
-            self.controls().panels.show_matching(self, side, id, answer);
+            self.controls()
+                .panels
+                .show_matching(self, hwnd, side, id, answer);
+        }
+        let loaded = self.created().work.borrow_mut().panels.take_loaded();
+        for (side, answer) in loaded {
+            self.controls()
+                .panels
+                .select_loaded(self, hwnd, side, answer);
+        }
+        let saved = self.created().work.borrow_mut().panels.take_saved();
+        for saved in saved {
+            if let Err(error) = saved.result {
+                let file = saved.file;
+                self.defer(hwnd, ModalStep::SelectionNotSaved { file, error });
+            }
         }
         let counted = self.created().work.borrow_mut().panels.take_counts();
         for (side, answer) in counted {
@@ -3398,6 +3528,16 @@ impl MainWindow {
         let controls = self.controls();
         match action {
             KeyAction::Run(command) => self.run(hwnd, MenuItem::Run(command)),
+            KeyAction::Choice {
+                with_folders,
+                files_only,
+            } => {
+                let command = match self.model.borrow().choices().select_folders {
+                    true => with_folders,
+                    false => files_only,
+                };
+                self.run(hwnd, MenuItem::Run(command));
+            }
             KeyAction::FocusList => {
                 let count = self.model.borrow().search_list().results().count();
                 controls.search.list.focus_left_row(count);
@@ -3864,6 +4004,26 @@ impl MainWindow {
         Some(id)
     }
 
+    /// Restore selection selects the sources of `id`, a copy, move or
+    /// delete of `side`'s entries, again from now on. When `reselect`, the
+    /// panel cleared its selection on submit, and selects again the
+    /// entries the operation does not finish (DESIGN.md: Selecting
+    /// entries).
+    fn remember_operation(&self, side: Side, id: Option<OperationId>, reselect: bool) {
+        let operation = (self.file_operations.get())
+            .zip(id)
+            .and_then(|(operations, id)| operations.operation(id));
+        let Some(operation) = operation else {
+            return;
+        };
+        let mut model = self.model.borrow_mut();
+        let panels = model.panels_mut();
+        panels.remember(side, Paths::Sources(operation.request));
+        if reselect {
+            panels.reselect_after(side, operation.id);
+        }
+    }
+
     fn schedule_operations(&self, hwnd: Hwnd) {
         if self.shutdown.borrow().is_none() && !self.operation_timer.replace(true) {
             hwnd.set_timer(Timer::OperationDelivery.id(), 1);
@@ -3920,6 +4080,9 @@ impl MainWindow {
             );
             if !self.model.borrow().shows_taken(&taken) {
                 self.show_taken(hwnd, taken);
+            }
+            for side in Side::BOTH {
+                self.controls().panels.reselect_unfinished(self, side);
             }
         }
         self.created()
@@ -4427,11 +4590,14 @@ impl MainWindow {
             let model = self.model.borrow();
             model.mode() == Mode::Commander && model.panels().place_is_current(place)
         };
+        self.remember_operation(side, id, follows && renamed.is_none());
         if !follows {
             return;
         }
-        // Submitting clears the selection (DESIGN.md: Copy and Move); Gozler's
-        // own rename selects the renamed entry again.
+        // Submitting clears the selection, and the entries the operation
+        // does not finish are selected again when it ends (DESIGN.md:
+        // Selecting entries); Gozler's own rename selects the renamed entry
+        // again.
         self.panel(side).list.deselect_all();
         if let (Some((name, from)), Some(id)) = (renamed, id) {
             self.model
@@ -4602,13 +4768,16 @@ impl MainWindow {
             win::dialog::ask(hwnd, &question)
         };
         if confirmed {
-            self.start_operation(Request::Delete { sources }, None);
+            let id = self.start_operation(Request::Delete { sources }, None);
             let follows = place.is_some_and(|place| {
                 let model = self.model.borrow();
                 model.mode() == Mode::Commander
                     && model.panels().active() == place.side
                     && model.panels().place_is_current(place)
             });
+            if let Some(place) = place {
+                self.remember_operation(place.side, id, follows);
+            }
             if follows {
                 self.controls().panels.focus_after_chosen(self);
             }
@@ -5202,6 +5371,13 @@ fn windows_reason(failure: WriteFailure) -> String {
         None => std::io::Error::from(failure.kind),
     };
     win::error_text(&error)
+}
+
+/// `command`'s label as the title of its dialog or message, such as
+/// "Select files" for Select files….
+fn command_title(strings: &Strings, command: CommandId) -> String {
+    let label = without_access_key(strings.text(command.row().label));
+    label.trim_end_matches('…').to_owned()
 }
 
 impl WindowProc for MainWindow {

@@ -15,7 +15,10 @@
     "edit": "Be&werken",
     "view": "Beel&d",
     "help": "&Help",
-    "language": "&Taal"
+    "language": "&Taal",
+    "files_or_folders": "Alleen bestanden of &mappen",
+    "focused_entry": "Zoals het hu&idige item",
+    "selection_list": "S&electielijst"
   },
   "language": {
     "english": "&Engels",
@@ -68,7 +71,38 @@
     "edit": "&Bewerken",
     "new_folder": "&Nieuwe map…",
     "select_files": "Bestanden se&lecteren…",
-    "unselect_files": "Bestanden &deselecteren…"
+    "unselect_files": "Bestanden &deselecteren…",
+    "invert_selection": "Selectie &omkeren",
+    "select_same_extension": "Zelfde e&xtensie selecteren",
+    "unselect_same_extension": "Zelfde extensie de&selecteren",
+    "restore_selection": "Selectie &herstellen",
+    "save_selection": "Selectie o&pslaan",
+    "select_only_files": "Alleen &bestanden selecteren…",
+    "select_only_folders": "Alleen &mappen selecteren…",
+    "select_files_and_folders": "Bestanden &en mappen selecteren…",
+    "unselect_only_files": "Alleen bestanden &deselecteren…",
+    "unselect_only_folders": "Alleen mappen dese&lecteren…",
+    "select_all_files": "&Alle bestanden selecteren",
+    "select_all_folders": "Alle ma&ppen selecteren",
+    "unselect_all_files": "Alle bes&tanden deselecteren",
+    "unselect_all_folders": "Alle mappen deselecte&ren",
+    "invert_only_files": "Alleen bestanden &omkeren",
+    "invert_only_folders": "Alleen mappen om&keren",
+    "invert_files_and_folders": "Bestanden e&n mappen omkeren",
+    "select_by_extension": "Selecteren op e&xtensie…",
+    "unselect_by_extension": "Deselecteren op exte&nsie…",
+    "select_same_name": "Zelfde naa&m selecteren",
+    "unselect_same_name": "Zelfde naam &deselecteren",
+    "select_same_name_and_extension": "Zelfde naam en &extensie selecteren",
+    "unselect_same_name_and_extension": "Zelfde naam en extensie deselec&teren",
+    "select_same_folder": "Zelfde ma&p selecteren",
+    "unselect_same_folder": "Zelfde map deselecte&ren",
+    "select_and_move_down": "&Selecteren en omlaag",
+    "unselect_and_move_down": "Deselecteren en om&laag",
+    "toggle_and_move_down": "&Wisselen en omlaag",
+    "save_selection_to_file": "Selectie &opslaan in bestand…",
+    "load_selection_from_file": "Selectie &laden uit bestand…",
+    "load_selection_from_clipboard": "Selectie laden van &Klembord"
   },
   "column": {
     "name": "&Naam",
@@ -1107,7 +1141,13 @@
     "no_longer_exists": "{0} bestaat niet meer. Druk op F5 om opnieuw te zoeken.",
     "open_failed": "Kan {0} niet starten. {1} Controleer de opdracht in Bestand > Instellingen > Snelmenu.",
     "shortcut_taken": "Een ander programma gebruikt {0}, dus deze sneltoets geeft Gozler niet meer weer. Kies een andere sneltoets in Bestand > Instellingen > Toetsenbord.",
-    "registry_failed": "Kan \"{0}\" niet opslaan in het register. {1}"
+    "registry_failed": "Kan \"{0}\" niet opslaan in het register. {1}",
+    "restored_one": "{1} van {2} geselecteerd. {0} item staat niet in deze map.",
+    "restored_other": "{1} van {2} geselecteerd. {0} items staan niet in deze map.",
+    "selection_not_saved": "Kan {0} niet opslaan. {1}",
+    "selection_not_read": "Kan {0} niet lezen. {1}",
+    "file_no_names": "{0} bevat geen namen.",
+    "clipboard_no_names": "Het Klembord bevat geen namen of bestanden."
   },
   "sync": {
     "title": "Mappen synchroniseren",
@@ -1166,7 +1206,9 @@
   "select_files": {
     "select_title": "Bestanden selecteren",
     "unselect_title": "Bestanden deselecteren",
-    "mask": "&Bestanden, zoals *.txt of *.jpg;*.png:"
+    "mask": "&Bestanden, zoals *.txt of *.jpg *.png:",
+    "text_files": "Tekstbestanden (*.txt)",
+    "file_name": "selectie"
   },
   "name": {
     "characters": "Een bestandsnaam mag geen van de volgende tekens bevatten: \\ / : * ? \" < > |",

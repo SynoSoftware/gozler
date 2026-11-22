@@ -14,30 +14,39 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
-/// Every command that takes a shortcut, each with the catalogue key of the
-/// menu that holds it: each command of either mode's menu bar, and the
-/// context menu's commands that no menu of a bar holds (DESIGN.md: The
-/// Keyboard page). A submenu of choices, the match controls, Clear filters
-/// and the tray's show commands take none.
-pub(crate) fn listed_commands() -> Vec<(CommandId, &'static str)> {
-    let mut listed: Vec<(CommandId, &'static str)> = Vec::new();
+/// Every command that takes a shortcut, each with the catalogue keys of the
+/// menu and the submenu that hold it: each command of either mode's menu
+/// bar, and the context menu's commands that no menu of a bar holds
+/// (DESIGN.md: The Keyboard page). A submenu of choices, the match
+/// controls, Clear filters and the tray's show commands take none.
+pub(crate) fn listed_commands() -> Vec<(CommandId, Vec<&'static str>)> {
+    let mut listed: Vec<(CommandId, Vec<&'static str>)> = Vec::new();
+    let mut list = |command: CommandId, menus: Vec<&'static str>| {
+        if !listed.iter().any(|(c, _)| *c == command) {
+            listed.push((command, menus));
+        }
+    };
     for menu in Mode::ALL.into_iter().flat_map(menu_bar) {
         for entry in menu.groups.iter().flatten() {
-            let command = match entry {
-                Entry::Item(MenuItem::Run(command)) => *command,
-                Entry::Item(MenuItem::Mode(Mode::Commander)) => CommandId::Commander,
-                _ => continue,
-            };
-            if !listed.iter().any(|(c, _)| *c == command) {
-                listed.push((command, menu.label));
+            match entry {
+                Entry::Item(MenuItem::Run(command)) => list(*command, vec![menu.label]),
+                Entry::Item(MenuItem::Mode(Mode::Commander)) => {
+                    list(CommandId::Commander, vec![menu.label]);
+                }
+                Entry::Item(_) => {}
+                Entry::Submenu { label, groups } => {
+                    for item in groups.iter().flatten() {
+                        if let MenuItem::Run(command) = item {
+                            list(*command, vec![menu.label, *label]);
+                        }
+                    }
+                }
             }
         }
     }
     for item in row_menu().into_iter().flatten() {
-        if let MenuItem::Run(command) = item
-            && !listed.iter().any(|(c, _)| *c == command)
-        {
-            listed.push((command, "settings_keyboard.context_menu"));
+        if let MenuItem::Run(command) = item {
+            list(command, vec!["settings_keyboard.context_menu"]);
         }
     }
     listed
@@ -46,19 +55,18 @@ pub(crate) fn listed_commands() -> Vec<(CommandId, &'static str)> {
 /// Where `command` is, as the Keyboard page lists it and its messages name
 /// it, such as "Edit > Find".
 pub(crate) fn command_place(strings: &Strings, command: CommandId) -> String {
-    let menu = if matches!(command, CommandId::ShowSearch | CommandId::ShowCommander) {
-        "settings_keyboard.notification_area"
+    let menus = if matches!(command, CommandId::ShowSearch | CommandId::ShowCommander) {
+        vec!["settings_keyboard.notification_area"]
     } else {
         listed_commands()
             .into_iter()
             .find(|(c, _)| *c == command)
-            .map_or("", |(_, menu)| menu)
+            .map_or_else(Vec::new, |(_, menus)| menus)
     };
-    format!(
-        "{} > {}",
-        without_access_key(strings.text(menu)),
-        without_access_key(strings.text(command.row().label))
-    )
+    (menus.into_iter().chain([command.row().label]))
+        .map(|key| without_access_key(strings.text(key)))
+        .collect::<Vec<_>>()
+        .join(" > ")
 }
 
 /// One row of the Keyboard page's command list.

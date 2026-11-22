@@ -650,7 +650,9 @@ pub(in crate::app) fn read_delete_list(list: &Path) -> io::Result<Vec<PathBuf>> 
         .collect()
 }
 
-fn read_capped(file: &Path, limit: u64) -> io::Result<Vec<u8>> {
+/// The bytes of `file`; an error when it holds more than `limit`, which
+/// caps the allocation.
+pub(super) fn read_capped(file: &Path, limit: u64) -> io::Result<Vec<u8>> {
     use std::io::Read;
     let mut bytes = Vec::new();
     std::fs::File::open(file)?

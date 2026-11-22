@@ -15,7 +15,10 @@
     "edit": "Dü&zen",
     "view": "&Görünüm",
     "help": "&Yardım",
-    "language": "D&il"
+    "language": "D&il",
+    "files_or_folders": "Yalnızca dosyalar veya k&lasörler",
+    "focused_entry": "&Odaktaki öğeye göre",
+    "selection_list": "S&eçim listesi"
   },
   "language": {
     "english": "İ&ngilizce",
@@ -68,7 +71,38 @@
     "edit": "&Düzenle",
     "new_folder": "Yeni klasö&r…",
     "select_files": "Dosyaları &seç…",
-    "unselect_files": "Dosyaların seçimini kal&dır…"
+    "unselect_files": "Dosyaların seçimini kal&dır…",
+    "invert_selection": "Seçimi ters &çevir",
+    "select_same_extension": "Aynı &uzantıyı seç",
+    "unselect_same_extension": "Aynı uzantının seçimini &kaldır",
+    "restore_selection": "Seçimi &geri yükle",
+    "save_selection": "Seçimi ka&ydet",
+    "select_only_files": "Yalnızca &dosyaları seç…",
+    "select_only_folders": "Yalnızca &klasörleri seç…",
+    "select_files_and_folders": "Dosyaları &ve klasörleri seç…",
+    "unselect_only_files": "Yalnızca dosyaların seçimini k&aldır…",
+    "unselect_only_folders": "Yalnızca klasörlerin seçimini kaldı&r…",
+    "select_all_files": "&Tüm dosyaları seç",
+    "select_all_folders": "Tüm klasörleri &seç",
+    "unselect_all_files": "Tüm dosyaların seçi&mini kaldır",
+    "unselect_all_folders": "Tüm k&lasörlerin seçimini kaldır",
+    "invert_only_files": "Yalnızca dosyaları ters çev&ir",
+    "invert_only_folders": "Yalnızca klasörleri ters &çevir",
+    "invert_files_and_folders": "Dosyaları ve klasörleri t&ers çevir",
+    "select_by_extension": "&Uzantıya göre seç…",
+    "unselect_by_extension": "Uzantıya göre seçimi &kaldır…",
+    "select_same_name": "Aynı &adı seç",
+    "unselect_same_name": "Aynı adın seçimini kal&dır",
+    "select_same_name_and_extension": "Aynı ad ve u&zantıyı seç",
+    "unselect_same_name_and_extension": "Aynı ad ve uzantının seçimini kaldı&r",
+    "select_same_folder": "Aynı k&lasörü seç",
+    "unselect_same_folder": "Aynı klasörün seçi&mini kaldır",
+    "select_and_move_down": "&Seç ve aşağı in",
+    "unselect_and_move_down": "Seçimi kaldır ve aşağı &in",
+    "toggle_and_move_down": "De&ğiştir ve aşağı in",
+    "save_selection_to_file": "Seçimi dosyaya &kaydet…",
+    "load_selection_from_file": "Seçimi &dosyadan yükle…",
+    "load_selection_from_clipboard": "Seçimi &panodan yükle"
   },
   "column": {
     "name": "&Ad",
@@ -1107,7 +1141,13 @@
     "no_longer_exists": "{0} artık yok. Yeniden aramak için F5'e basın.",
     "open_failed": "{0} başlatılamadı. {1} Dosya > Ayarlar > Bağlam menüsü bölümündeki komutu denetleyin.",
     "shortcut_taken": "{0} kısayolunu başka bir program kullanıyor, bu yüzden bu kısayol artık Gozler'i göstermiyor. Dosya > Ayarlar > Klavye bölümünde başka bir kısayol seçin.",
-    "registry_failed": "\"{0}\" kayıt defterine kaydedilemedi. {1}"
+    "registry_failed": "\"{0}\" kayıt defterine kaydedilemedi. {1}",
+    "restored_one": "{2} öğeden {1} tanesi seçildi. {0} öğe bu klasörde değil.",
+    "restored_other": "{2} öğeden {1} tanesi seçildi. {0} öğe bu klasörde değil.",
+    "selection_not_saved": "{0} kaydedilemedi. {1}",
+    "selection_not_read": "{0} okunamadı. {1}",
+    "file_no_names": "{0} hiç ad içermiyor.",
+    "clipboard_no_names": "Panoda ad veya dosya yok."
   },
   "sync": {
     "title": "Klasörleri eşitle",
@@ -1166,7 +1206,9 @@
   "select_files": {
     "select_title": "Dosyaları seç",
     "unselect_title": "Dosyaların seçimini kaldır",
-    "mask": "&Dosyalar, örneğin *.txt veya *.jpg;*.png:"
+    "mask": "&Dosyalar, örneğin *.txt veya *.jpg *.png:",
+    "text_files": "Metin dosyaları (*.txt)",
+    "file_name": "seçim"
   },
   "name": {
     "characters": "Dosya adı şu karakterlerin hiçbirini içeremez: \\ / : * ? \" < > |",

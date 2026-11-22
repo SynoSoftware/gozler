@@ -292,6 +292,10 @@ impl ExportFormat {
 /// them.
 const PROGRAM_ROWS: u64 = 1_000;
 
+/// The most masks a mask box lists, newest first; the oldest leaves when
+/// another is typed.
+const MASK_HISTORY: usize = 20;
+
 /// The latest background observation of Location; the core never reads a disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScopeCheck {
@@ -453,6 +457,33 @@ impl Model {
     /// opens.
     pub(crate) fn destination_folder(&self) -> Option<&str> {
         self.settings.window.destination_folder.as_deref()
+    }
+
+    /// The masks that the mask boxes list, newest first.
+    pub(crate) fn masks(&self) -> &[String] {
+        &self.settings.window.masks
+    }
+
+    /// Saves the masks a mask box still lists, which `Shift+Del` may have
+    /// shortened, with `chosen`, the mask its OK took, first.
+    pub(crate) fn save_masks(&mut self, listed: Vec<String>, chosen: Option<String>) -> Accepted {
+        let mut masks: Vec<String> = chosen.into_iter().collect();
+        for mask in listed {
+            if !masks.contains(&mask) {
+                masks.push(mask);
+            }
+        }
+        masks.truncate(MASK_HISTORY);
+        let changed = masks != self.settings.window.masks;
+        self.settings.window.masks = masks;
+        Accepted {
+            touched: Areas::NONE,
+            effects: if changed {
+                vec![Effect::NoteSavedState]
+            } else {
+                Vec::new()
+            },
+        }
     }
 
     pub(crate) fn set_destination_folder(&mut self, folder: String) -> Accepted {

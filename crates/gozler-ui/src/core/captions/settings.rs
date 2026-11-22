@@ -11,7 +11,7 @@ use gozler_core::types::{IndexProgress, VolumePhase};
 
 /// The groups of the Settings pages: each title, the static icon before it
 /// and the icon it shows.
-pub(crate) const SETTINGS_GROUPS: [(ControlId, ControlId, Glyph); 18] = [
+pub(crate) const SETTINGS_GROUPS: &[(ControlId, ControlId, Glyph)] = &[
     (
         ControlId::GeneralDisplay,
         ControlId::GeneralDisplayIcon,

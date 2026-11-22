@@ -6,6 +6,8 @@ use super::Hwnd;
 use crate::core::clipboard::{ClipboardData, ClipboardFormat, Publication};
 use crate::core::text::Strings;
 use gozler_client::CancelToken;
+use std::ffi::OsString;
+use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use windows::Win32::Foundation::{E_OUTOFMEMORY, GlobalFree, HANDLE, HGLOBAL};
@@ -17,6 +19,7 @@ use windows::Win32::System::DataExchange::{
 use windows::Win32::System::Memory::{
     GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
 };
+use windows::Win32::UI::Shell::HDROP;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE,
 };
@@ -296,34 +299,63 @@ pub(crate) fn holds_text() -> bool {
     unsafe { IsClipboardFormatAvailable(CF_UNICODETEXT) }.is_ok()
 }
 
-/// The clipboard's text, up to its first NUL; `None` when it holds none or
-/// another program keeps it open. Runs off the window's thread, because
-/// the program that owns the clipboard can make the read wait.
-pub(crate) fn text(_worker: &super::work::OffThread) -> Option<String> {
-    // SAFETY: plain values; the clipboard is closed below.
-    unsafe { OpenClipboard(None) }.ok()?;
-    // SAFETY: the clipboard is open, and the block stays locked while its
-    // units are read, within the size Windows gives it.
-    let text = unsafe {
-        GetClipboardData(CF_UNICODETEXT).ok().and_then(|data| {
-            let block = HGLOBAL(data.0);
-            let units = GlobalLock(block).cast::<u16>();
-            if units.is_null() {
-                return None;
+/// What the clipboard holds as text or files.
+pub(crate) enum Contents {
+    Text(String),
+    /// The full paths of the files on it, as Copy and File Explorer put
+    /// them there.
+    Files(Vec<PathBuf>),
+    Empty,
+    /// Another program kept the clipboard open through every retry.
+    Busy,
+}
+
+/// The clipboard's text, up to its first NUL, or else its files. Retries
+/// while another program holds the clipboard open, as Copy does. Runs off
+/// the window's thread, because the program that owns the clipboard can
+/// make the read wait.
+pub(crate) fn read(_worker: &super::work::OffThread) -> Contents {
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(crate::core::clipboard::RETRY_AFTER);
+        }
+        // SAFETY: plain values; the guard closes the clipboard on this
+        // thread, which opened it.
+        if unsafe { OpenClipboard(None) }.is_err() {
+            continue;
+        }
+        let _open = Open;
+        // SAFETY: the clipboard is open on this thread, so its blocks stay
+        // valid until it closes. The text block stays locked while its
+        // units are read, within the size Windows gives it.
+        return unsafe {
+            if let Ok(data) = GetClipboardData(CF_UNICODETEXT) {
+                let block = HGLOBAL(data.0);
+                let units = GlobalLock(block).cast::<u16>();
+                if units.is_null() {
+                    return Contents::Empty;
+                }
+                let units = std::slice::from_raw_parts(units, GlobalSize(block) / 2);
+                let end = units
+                    .iter()
+                    .position(|&unit| unit == 0)
+                    .unwrap_or(units.len());
+                let text = String::from_utf16_lossy(&units[..end]);
+                let _ = GlobalUnlock(block);
+                Contents::Text(text)
+            } else if let Ok(data) = GetClipboardData(CF_HDROP) {
+                let paths = super::shell::drop_paths(HDROP(data.0));
+                Contents::Files(
+                    (paths.iter())
+                        .map(|path| PathBuf::from(OsString::from_wide(path)))
+                        .collect(),
+                )
+            } else {
+                Contents::Empty
             }
-            let units = std::slice::from_raw_parts(units, GlobalSize(block) / 2);
-            let end = units
-                .iter()
-                .position(|&unit| unit == 0)
-                .unwrap_or(units.len());
-            let text = String::from_utf16_lossy(&units[..end]);
-            let _ = GlobalUnlock(block);
-            Some(text)
-        })
-    };
-    // SAFETY: this thread opened the clipboard above.
-    let _ = unsafe { CloseClipboard() };
-    text
+        };
+    }
+    Contents::Busy
 }
 
 mod work;

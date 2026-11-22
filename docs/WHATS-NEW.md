@@ -2,12 +2,23 @@
 
 ## Gozler 0.6.2
 
-### Leave folders out of a search
+### Select as in Total Commander, and leave folders out of a search
+
+#### Select and select again in Commander
+
+- **Select again.** `Num /` selects again what the panel's last copy, move or delete acted on. **Edit > Save selection** keeps the current selection for it, so a selection built for a later copy survives another command. When some entries are gone, a message says how many: "Selected 18 of 20. 2 entries aren't in this folder."
+- **Try unfinished entries again.** When a copy, move or delete ends, the entries it did not finish stay selected, so `F5`, `F6` or `F8` tries them again.
+- **Invert, and select by the focused entry.** `Num *` inverts the selection. `Alt+Num +` and `Alt+Num -` select or clear every entry with the focused entry's extension. **Edit > By focused entry** also selects by its name or its folder, and **Edit > Files or folders only** selects only files or only folders, for example to move every subfolder.
+- **Write masks as in Total Commander.** In Select files… (`Num +`), spaces separate masks, double quotes keep a space inside one, the masks after `|` are left out, and a mask that starts with `<` is a regular expression. `*.jpg>*.cr2` selects the `.jpg` files and each `.cr2` file with the same name. The box keeps your last 20 masks, and a mask saved by an earlier version keeps its meaning.
+- **Keep a selection in a file.** **Edit > Selection list** saves the selected names to a text file, and selects the names in a file or on the clipboard again. Total Commander reads these files too.
+
+#### Leave folders out of a search
 
 - **Leave out folders.** On the command line, `--leave-out DIR` leaves a folder and everything in it out of a search, and `--leave-in DIR` searches a folder inside it again. The nearest of these folders above a file decides, so `gozler --leave-out C:\Windows --leave-in C:\Windows\Media ext:wav` finds Windows' sounds and no other file in `C:\Windows`. A link does not change what a folder leaves out, and a folder that does not exist leaves nothing out.
 
 #### Fixed
 
+- `Num -` left a matching folder selected when Settings > General > Selection left folders out, so the next Delete removed that folder with the rest. It now clears matching folders too.
 - The window sometimes stayed behind other windows, with only its taskbar button flashing, when a shortcut, the notification area icon or a second start opened it.
 
 ## Gozler 0.6.1

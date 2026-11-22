@@ -9,7 +9,7 @@ use super::ids::ControlId;
 use super::model::{Column, Model};
 use super::panel::{Side, View};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
-use super::selection::Movement;
+use super::selection::{Change, Kinds, KindsChoice, Matches, Movement, Rule};
 use super::selection::{OPEN_LIMIT, Selection};
 use super::settings::{ContextItem, ContextMenu, Mode};
 use super::shortcuts::CommandShortcuts;
@@ -72,10 +72,42 @@ pub(crate) enum CommandId {
     /// Compare by content (DESIGN.md: Compare by content).
     Compare,
     MultiRename,
+    // The selection commands of a panel (DESIGN.md: Selecting entries).
+    RestoreSelection,
+    InvertSelection,
+    SelectSameExtension,
+    UnselectSameExtension,
+    SelectOnlyFiles,
+    SelectOnlyFolders,
+    SelectFilesAndFolders,
+    UnselectOnlyFiles,
+    UnselectOnlyFolders,
+    SelectByExtension,
+    UnselectByExtension,
+    SelectAllFiles,
+    SelectAllFolders,
+    UnselectAllFiles,
+    UnselectAllFolders,
+    InvertOnlyFiles,
+    InvertOnlyFolders,
+    InvertFilesAndFolders,
+    SelectSameName,
+    UnselectSameName,
+    SelectSameNameAndExtension,
+    UnselectSameNameAndExtension,
+    SelectSameFolder,
+    UnselectSameFolder,
+    SelectAndMoveDown,
+    UnselectAndMoveDown,
+    ToggleAndMoveDown,
+    SaveSelection,
+    SaveSelectionToFile,
+    LoadSelectionFromFile,
+    LoadSelectionFromClipboard,
 }
 
 impl CommandId {
-    pub(crate) const ALL: [CommandId; 45] = [
+    pub(crate) const ALL: [CommandId; 76] = [
         CommandId::Open,
         CommandId::OpenFileLocation,
         CommandId::ShowInCommander,
@@ -121,286 +153,677 @@ impl CommandId {
         CommandId::Update,
         CommandId::Compare,
         CommandId::MultiRename,
+        CommandId::RestoreSelection,
+        CommandId::InvertSelection,
+        CommandId::SelectSameExtension,
+        CommandId::UnselectSameExtension,
+        CommandId::SelectOnlyFiles,
+        CommandId::SelectOnlyFolders,
+        CommandId::SelectFilesAndFolders,
+        CommandId::UnselectOnlyFiles,
+        CommandId::UnselectOnlyFolders,
+        CommandId::SelectByExtension,
+        CommandId::UnselectByExtension,
+        CommandId::SelectAllFiles,
+        CommandId::SelectAllFolders,
+        CommandId::UnselectAllFiles,
+        CommandId::UnselectAllFolders,
+        CommandId::InvertOnlyFiles,
+        CommandId::InvertOnlyFolders,
+        CommandId::InvertFilesAndFolders,
+        CommandId::SelectSameName,
+        CommandId::UnselectSameName,
+        CommandId::SelectSameNameAndExtension,
+        CommandId::UnselectSameNameAndExtension,
+        CommandId::SelectSameFolder,
+        CommandId::UnselectSameFolder,
+        CommandId::SelectAndMoveDown,
+        CommandId::UnselectAndMoveDown,
+        CommandId::ToggleAndMoveDown,
+        CommandId::SaveSelection,
+        CommandId::SaveSelectionToFile,
+        CommandId::LoadSelectionFromFile,
+        CommandId::LoadSelectionFromClipboard,
     ];
 
     /// The command's row; a `match`, so every command has one.
     pub(crate) fn row(self) -> Command {
         use CommandId as C;
-        let (label, shortcuts, enabled, checked): (_, &'static [Keystroke], Enabled, Checked) =
-            match self {
-                C::Open => ("command.open", &[], open, None),
-                C::ShowInCommander => ("command.show_in_commander", &[], one_file, None),
-                C::OpenFileLocation => (
-                    "command.open_file_location",
-                    const { &[Keystroke::ctrl(Key::Enter)] },
-                    open,
-                    None,
-                ),
-                C::Explore => ("command.explore", &[], open, None),
-                C::Properties => (
-                    "command.properties",
-                    const { &[Keystroke::alt(Key::Enter)] },
-                    one_file,
-                    None,
-                ),
-                C::ExportResults => (
-                    "command.export_results",
-                    &[],
-                    |s| s.model.can_export(),
-                    None,
-                ),
-                C::Cancel => ("command.cancel", &[], |s| s.model.can_cancel_job(), None),
-                C::Settings => (
-                    "command.settings",
-                    const { &[Keystroke::ctrl(Key::Comma)] },
-                    always,
-                    None,
-                ),
-                C::Exit => (
-                    "command.exit",
-                    const { &[Keystroke::ctrl(Key::Letter(b'Q'))] },
-                    always,
-                    None,
-                ),
-                C::Copy => (
-                    "command.copy",
-                    const { &[Keystroke::ctrl(Key::Letter(b'C'))] },
-                    copy,
-                    None,
-                ),
-                C::CopyAsPath => ("command.copy_as_path", &[], files, None),
-                C::CopyName => ("command.copy_name", &[], files, None),
-                C::CopyFolder => ("command.copy_folder", &[], files, None),
-                C::SelectAll => (
-                    "command.select_all",
-                    const { &[Keystroke::ctrl(Key::Letter(b'A'))] },
-                    always,
-                    None,
-                ),
-                C::SearchInThisFolder => ("command.search_in_this_folder", &[], one_file, None),
-                C::Filters => (
-                    "command.filters",
-                    &[],
-                    always,
-                    Some(|s| s.model.panes().filters),
-                ),
-                C::Inspector => (
-                    "command.inspector",
-                    &[],
-                    always,
-                    Some(|s| s.model.panes().inspector),
-                ),
-                C::Columns => ("command.columns", &[], always, None),
-                C::Language => ("menu.language", &[], always, None),
-                C::Refresh => (
-                    "command.refresh",
-                    const { &[Keystroke::plain(Key::Function(5))] },
-                    searched,
-                    None,
-                ),
-                C::Find => (
-                    "command.find",
-                    const {
-                        &[
-                            Keystroke::ctrl(Key::Letter(b'F')),
-                            Keystroke::ctrl(Key::Letter(b'E')),
-                        ]
-                    },
-                    always,
-                    None,
-                ),
-                C::Match => ("match.label", &[], always, None),
-                C::SortBy => ("command.sort_by", &[], always, None),
-                C::ClearFilters => (
-                    "command.clear_filters",
-                    &[],
-                    |s| s.model.filters().is_set(),
-                    None,
-                ),
-                C::SearchSyntax => (
-                    "command.search_syntax",
-                    const { &[Keystroke::plain(Key::Function(1))] },
-                    always,
-                    None,
-                ),
-                C::About => ("command.about", &[], always, None),
-                C::Update => ("command.update", &[], |s| !s.model.fix().running(), None),
-                C::ShowSearch => ("command.show_search", &[], always, None),
-                C::ShowCommander => ("command.show_commander", &[], always, None),
-                // Delete, Cut and Paste are keys of the list (control_key).
-                C::CopyToFolder => ("command.copy_to_folder", &[], transfer, None),
-                C::MoveToFolder => ("command.move_to_folder", &[], transfer, None),
-                C::MultiRename => (
-                    "command.multi_rename",
-                    const { &[Keystroke::ctrl(Key::Letter(b'M'))] },
-                    file_operation,
-                    None,
-                ),
-                C::Synchronize => ("command.synchronize", &[], operations_available, None),
-                C::Compare => (
-                    "command.compare",
-                    const { &[Keystroke::ctrl_shift(Key::Letter(b'C'))] },
-                    |s| match s.list {
-                        List::Panel(_) => s.model.chosen_count(s.list) > 0,
-                        // Search has no other panel, so two selected
-                        // results are the two files.
-                        List::Search => {
-                            (s.model.search_list().selection().files()).is_some_and(|files| {
-                                files.len() == 2 && files.iter().all(|file| !file.is_dir)
-                            })
-                        }
-                    },
-                    None,
-                ),
-                C::Delete => ("command.delete", &[], file_operation, None),
-                C::Cut => ("command.cut", &[], cut, None),
-                C::Paste => ("command.paste", &[], paste, None),
-                C::FileOperations => ("command.file_operations", &[], operations_available, None),
-                C::Commander => ("command.commander", &[], always, None),
-                // `Num +` and `Num -` in a panel's list (control_key).
-                C::SelectFiles => ("command.select_files", &[], lists_folder, None),
-                C::UnselectFiles => ("command.unselect_files", &[], lists_folder, None),
-                // `Esc` in a panel's list and `Num -` in Search's
-                // (control_key).
-                C::ClearSelection => (
-                    "command.clear_selection",
-                    &[],
-                    |s| match s.list {
-                        List::Search => {
-                            !matches!(s.model.search_list().selection(), Selection::None)
-                        }
-                        List::Panel(side) => s.model.panels().panel(side).has_selection(),
-                    },
-                    None,
-                ),
-                // Commander mode keeps `F3` for View when the person's
-                // shortcut moves elsewhere (COMMANDER_KEYS).
-                C::View => (
-                    "command.view",
-                    const { &[Keystroke::plain(Key::Function(3))] },
-                    |s| s.model.file_to_view(s.list).is_some() || s.model.chosen_count(s.list) > 1,
-                    None,
-                ),
-                C::Edit => ("command.edit", &[], never, None),
-                C::NewFolder => (
-                    "command.new_folder",
-                    &[],
-                    |s| {
-                        operations_available(s)
-                            && matches!(s.list, List::Panel(side) if matches!(s.model.panels().panel(side).view(), View::Folder))
-                    },
-                    None,
-                ),
-            };
+        use Glyph as G;
+        use Modes::Both;
+        const SEARCH: Modes = Modes::Only(Mode::Search);
+        const COMMANDER: Modes = Modes::Only(Mode::Commander);
+        let (label, shortcuts, enabled, checked, glyph, modes): (
+            _,
+            &'static [Keystroke],
+            Enabled,
+            Checked,
+            Option<Glyph>,
+            Modes,
+        ) = match self {
+            C::Open => ("command.open", &[], open, None, Some(G::OpenFile), Both),
+            C::ShowInCommander => (
+                "command.show_in_commander",
+                &[],
+                one_file,
+                None,
+                Some(G::Folder),
+                SEARCH,
+            ),
+            C::OpenFileLocation => (
+                "command.open_file_location",
+                const { &[Keystroke::ctrl(Key::Enter)] },
+                open,
+                None,
+                Some(G::FolderOpen),
+                SEARCH,
+            ),
+            C::Explore => (
+                "command.explore",
+                &[],
+                open,
+                None,
+                Some(G::FileExplorer),
+                SEARCH,
+            ),
+            C::Properties => (
+                "command.properties",
+                const { &[Keystroke::alt(Key::Enter)] },
+                one_file,
+                None,
+                Some(G::Info),
+                Both,
+            ),
+            C::ExportResults => (
+                "command.export_results",
+                &[],
+                |s| s.model.can_export(),
+                None,
+                Some(G::Export),
+                SEARCH,
+            ),
+            C::Cancel => (
+                "command.cancel",
+                &[],
+                |s| s.model.can_cancel_job(),
+                None,
+                None,
+                Both,
+            ),
+            C::Settings => (
+                "command.settings",
+                const { &[Keystroke::ctrl(Key::Comma)] },
+                always,
+                None,
+                Some(G::Settings),
+                Both,
+            ),
+            C::Exit => (
+                "command.exit",
+                const { &[Keystroke::ctrl(Key::Letter(b'Q'))] },
+                always,
+                None,
+                Some(G::Cancel),
+                Both,
+            ),
+            C::Copy => (
+                "command.copy",
+                const { &[Keystroke::ctrl(Key::Letter(b'C'))] },
+                copy,
+                None,
+                Some(G::Copy),
+                SEARCH,
+            ),
+            C::CopyAsPath => (
+                "command.copy_as_path",
+                &[],
+                files,
+                None,
+                Some(G::Link),
+                SEARCH,
+            ),
+            C::CopyName => (
+                "command.copy_name",
+                &[],
+                files,
+                None,
+                Some(G::Rename),
+                SEARCH,
+            ),
+            C::CopyFolder => (
+                "command.copy_folder",
+                &[],
+                files,
+                None,
+                Some(G::Folder),
+                SEARCH,
+            ),
+            C::SelectAll => (
+                "command.select_all",
+                const { &[Keystroke::ctrl(Key::Letter(b'A'))] },
+                always,
+                None,
+                Some(G::SelectAll),
+                Both,
+            ),
+            C::SearchInThisFolder => (
+                "command.search_in_this_folder",
+                &[],
+                one_file,
+                None,
+                Some(G::Search),
+                SEARCH,
+            ),
+            C::Filters => (
+                "command.filters",
+                &[],
+                always,
+                Some(|s| s.model.panes().filters),
+                None,
+                SEARCH,
+            ),
+            C::Inspector => (
+                "command.inspector",
+                &[],
+                always,
+                Some(|s| s.model.panes().inspector),
+                None,
+                SEARCH,
+            ),
+            C::Columns => ("command.columns", &[], always, None, None, SEARCH),
+            C::Language => ("menu.language", &[], always, None, None, Both),
+            C::Refresh => (
+                "command.refresh",
+                const { &[Keystroke::plain(Key::Function(5))] },
+                searched,
+                None,
+                Some(G::Refresh),
+                Both,
+            ),
+            C::Find => (
+                "command.find",
+                const {
+                    &[
+                        Keystroke::ctrl(Key::Letter(b'F')),
+                        Keystroke::ctrl(Key::Letter(b'E')),
+                    ]
+                },
+                always,
+                None,
+                Some(G::Search),
+                Both,
+            ),
+            C::Match => ("match.label", &[], always, None, None, SEARCH),
+            C::SortBy => ("command.sort_by", &[], always, None, None, Both),
+            C::ClearFilters => (
+                "command.clear_filters",
+                &[],
+                |s| s.model.filters().is_set(),
+                None,
+                None,
+                SEARCH,
+            ),
+            C::SearchSyntax => (
+                "command.search_syntax",
+                const { &[Keystroke::plain(Key::Function(1))] },
+                always,
+                None,
+                Some(G::Help),
+                Both,
+            ),
+            C::About => ("command.about", &[], always, None, Some(G::Info), Both),
+            C::Update => (
+                "command.update",
+                &[],
+                |s| !s.model.fix().running(),
+                None,
+                Some(G::Refresh),
+                Both,
+            ),
+            C::ShowSearch => (
+                "command.show_search",
+                &[],
+                always,
+                None,
+                Some(G::BackToWindow),
+                Both,
+            ),
+            C::ShowCommander => (
+                "command.show_commander",
+                &[],
+                always,
+                None,
+                Some(G::BackToWindow),
+                Both,
+            ),
+            // Delete, Cut and Paste are keys of the list (control_key).
+            C::CopyToFolder => (
+                "command.copy_to_folder",
+                &[],
+                transfer,
+                None,
+                Some(G::CopyTo),
+                Both,
+            ),
+            C::MoveToFolder => (
+                "command.move_to_folder",
+                &[],
+                transfer,
+                None,
+                Some(G::MoveToFolder),
+                Both,
+            ),
+            C::MultiRename => (
+                "command.multi_rename",
+                const { &[Keystroke::ctrl(Key::Letter(b'M'))] },
+                file_operation,
+                None,
+                Some(G::Rename),
+                Both,
+            ),
+            C::Synchronize => (
+                "command.synchronize",
+                &[],
+                operations_available,
+                None,
+                Some(G::Refresh),
+                Both,
+            ),
+            C::Compare => (
+                "command.compare",
+                const { &[Keystroke::ctrl_shift(Key::Letter(b'C'))] },
+                |s| match s.list {
+                    List::Panel(_) => s.model.chosen_count(s.list) > 0,
+                    // Search has no other panel, so two selected results are
+                    // the two files.
+                    List::Search => {
+                        (s.model.search_list().selection().files()).is_some_and(|files| {
+                            files.len() == 2 && files.iter().all(|file| !file.is_dir)
+                        })
+                    }
+                },
+                None,
+                None,
+                Both,
+            ),
+            C::Delete => (
+                "command.delete",
+                &[],
+                file_operation,
+                None,
+                Some(G::Delete),
+                Both,
+            ),
+            C::Cut => ("command.cut", &[], cut, None, Some(G::Cut), SEARCH),
+            C::Paste => ("command.paste", &[], paste, None, Some(G::Paste), SEARCH),
+            C::FileOperations => (
+                "command.file_operations",
+                &[],
+                operations_available,
+                None,
+                None,
+                Both,
+            ),
+            C::Commander => ("command.commander", &[], always, None, None, Both),
+            // `Num +` and `Num -` in a panel's list (control_key).
+            C::SelectFiles => (
+                "command.select_files",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectFiles => (
+                "command.unselect_files",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            // `Esc` in a panel's list and `Num -` in Search's (control_key).
+            C::ClearSelection => (
+                "command.clear_selection",
+                &[],
+                |s| match s.list {
+                    List::Search => !matches!(s.model.search_list().selection(), Selection::None),
+                    List::Panel(side) => s.model.panels().panel(side).has_selection(),
+                },
+                None,
+                None,
+                Both,
+            ),
+            // Commander mode keeps `F3` for View when the person's shortcut
+            // moves elsewhere (COMMANDER_KEYS).
+            C::View => (
+                "command.view",
+                const { &[Keystroke::plain(Key::Function(3))] },
+                |s| s.model.file_to_view(s.list).is_some() || s.model.chosen_count(s.list) > 1,
+                None,
+                Some(G::View),
+                Both,
+            ),
+            C::Edit => ("command.edit", &[], never, None, Some(G::Edit), COMMANDER),
+            C::NewFolder => (
+                "command.new_folder",
+                &[],
+                |s| {
+                    operations_available(s)
+                        && matches!(s.list, List::Panel(side) if matches!(s.model.panels().panel(side).view(), View::Folder))
+                },
+                None,
+                Some(G::NewFolder),
+                COMMANDER,
+            ),
+            // The keys of these are keys of a panel's list (PANEL_KEYS).
+            C::RestoreSelection => (
+                "command.restore_selection",
+                &[],
+                |s| {
+                    lists_folder(s)
+                        && panel_of(s).is_some_and(|side| s.model.panels().remembers(side))
+                },
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SaveSelection => (
+                "command.save_selection",
+                &[],
+                |s| lists_folder(s) && chosen(s) > 0,
+                None,
+                None,
+                COMMANDER,
+            ),
+            // A search panel's selection is saved as full paths.
+            C::SaveSelectionToFile => (
+                "command.save_selection_to_file",
+                &[],
+                |s| panel_of(s).is_some() && chosen(s) > 0,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::LoadSelectionFromFile => (
+                "command.load_selection_from_file",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::LoadSelectionFromClipboard => (
+                "command.load_selection_from_clipboard",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::InvertSelection => (
+                "command.invert_selection",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectSameExtension => (
+                "command.select_same_extension",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectSameExtension => (
+                "command.unselect_same_extension",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectOnlyFiles => (
+                "command.select_only_files",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectOnlyFolders => (
+                "command.select_only_folders",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectFilesAndFolders => (
+                "command.select_files_and_folders",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectOnlyFiles => (
+                "command.unselect_only_files",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectOnlyFolders => (
+                "command.unselect_only_folders",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectByExtension => (
+                "command.select_by_extension",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectByExtension => (
+                "command.unselect_by_extension",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectAllFiles => (
+                "command.select_all_files",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectAllFolders => (
+                "command.select_all_folders",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectAllFiles => (
+                "command.unselect_all_files",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectAllFolders => (
+                "command.unselect_all_folders",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::InvertOnlyFiles => (
+                "command.invert_only_files",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::InvertOnlyFolders => (
+                "command.invert_only_folders",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::InvertFilesAndFolders => (
+                "command.invert_files_and_folders",
+                &[],
+                lists_folder,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectSameName => (
+                "command.select_same_name",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectSameName => (
+                "command.unselect_same_name",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectSameNameAndExtension => (
+                "command.select_same_name_and_extension",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectSameNameAndExtension => (
+                "command.unselect_same_name_and_extension",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectSameFolder => (
+                "command.select_same_folder",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectSameFolder => (
+                "command.unselect_same_folder",
+                &[],
+                focused_entry,
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::SelectAndMoveDown => (
+                "command.select_and_move_down",
+                &[],
+                |s| panel_of(s).is_some(),
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::UnselectAndMoveDown => (
+                "command.unselect_and_move_down",
+                &[],
+                |s| panel_of(s).is_some(),
+                None,
+                None,
+                COMMANDER,
+            ),
+            C::ToggleAndMoveDown => (
+                "command.toggle_and_move_down",
+                &[],
+                |s| panel_of(s).is_some(),
+                None,
+                None,
+                COMMANDER,
+            ),
+        };
         Command {
             label,
             shortcuts,
             enabled,
             checked,
+            glyph,
+            modes,
         }
     }
 
-    /// The icon before its label in a menu, if it has one (DESIGN.md: Look).
-    /// A command with a check mark has none, because the mark takes the
-    /// icon's place.
-    pub(crate) fn glyph(self) -> Option<Glyph> {
+    /// The rule of a panel's selection command, which runs as a mask does
+    /// (DESIGN.md: Selecting entries); `None` for every other command. A
+    /// command that clears changes folders too, whatever the setting says,
+    /// so no folder stays selected for a later Delete.
+    pub(crate) fn selection_rule(self) -> Option<Rule> {
+        use Change::{Clear, Invert, Replace, Select};
         use CommandId as C;
-        Some(match self {
-            C::Open => Glyph::OpenFile,
-            C::ShowInCommander => Glyph::Folder,
-            C::OpenFileLocation => Glyph::FolderOpen,
-            C::Explore => Glyph::FileExplorer,
-            C::Properties => Glyph::Info,
-            C::ExportResults => Glyph::Export,
-            C::Settings => Glyph::Settings,
-            C::Exit => Glyph::Cancel,
-            C::Copy => Glyph::Copy,
-            C::CopyName => Glyph::Rename,
-            C::CopyFolder => Glyph::Folder,
-            C::CopyAsPath => Glyph::Link,
-            C::SelectAll => Glyph::SelectAll,
-            C::Find | C::SearchInThisFolder => Glyph::Search,
-            C::Refresh => Glyph::Refresh,
-            C::SearchSyntax => Glyph::Help,
-            C::About => Glyph::Info,
-            C::Update => Glyph::Refresh,
-            C::ShowSearch | C::ShowCommander => Glyph::BackToWindow,
-            C::CopyToFolder => Glyph::CopyTo,
-            C::MoveToFolder => Glyph::MoveToFolder,
-            C::MultiRename => Glyph::Rename,
-            C::Synchronize => Glyph::Refresh,
-            C::Delete => Glyph::Delete,
-            C::Cut => Glyph::Cut,
-            C::Paste => Glyph::Paste,
-            C::View => Glyph::View,
-            C::Edit => Glyph::Edit,
-            C::NewFolder => Glyph::NewFolder,
-            C::Cancel
-            | C::Compare
-            | C::FileOperations
-            | C::Filters
-            | C::Inspector
-            | C::Columns
-            | C::Language
-            | C::Match
-            | C::SortBy
-            | C::ClearFilters
-            | C::Commander
-            | C::ClearSelection
-            | C::SelectFiles
-            | C::UnselectFiles => return None,
+        use Kinds::{Both, Files, Folders};
+        use KindsChoice::{Fixed, Setting};
+        use Matches as M;
+        let (matches, change, kinds) = match self {
+            C::SelectFiles => (M::Mask, Select, Setting),
+            C::UnselectFiles => (M::Mask, Clear, Fixed(Both)),
+            C::SelectOnlyFiles => (M::Mask, Select, Fixed(Files)),
+            C::SelectOnlyFolders => (M::Mask, Select, Fixed(Folders)),
+            C::SelectFilesAndFolders => (M::Mask, Select, Fixed(Both)),
+            C::UnselectOnlyFiles => (M::Mask, Clear, Fixed(Files)),
+            C::UnselectOnlyFolders => (M::Mask, Clear, Fixed(Folders)),
+            C::SelectByExtension => (M::MaskOfExtension, Select, Setting),
+            C::UnselectByExtension => (M::MaskOfExtension, Clear, Fixed(Both)),
+            C::InvertSelection => (M::Every, Invert, Setting),
+            C::InvertOnlyFiles => (M::Every, Invert, Fixed(Files)),
+            C::InvertOnlyFolders => (M::Every, Invert, Fixed(Folders)),
+            C::InvertFilesAndFolders => (M::Every, Invert, Fixed(Both)),
+            C::SelectAllFiles => (M::Every, Select, Fixed(Files)),
+            C::SelectAllFolders => (M::Every, Select, Fixed(Folders)),
+            C::UnselectAllFiles => (M::Every, Clear, Fixed(Files)),
+            C::UnselectAllFolders => (M::Every, Clear, Fixed(Folders)),
+            C::SelectSameExtension => (M::Extension, Select, Setting),
+            C::UnselectSameExtension => (M::Extension, Clear, Fixed(Both)),
+            C::SelectSameName => (M::Stem, Select, Setting),
+            C::UnselectSameName => (M::Stem, Clear, Fixed(Both)),
+            C::SelectSameNameAndExtension => (M::Name, Select, Setting),
+            C::UnselectSameNameAndExtension => (M::Name, Clear, Fixed(Both)),
+            C::SelectSameFolder => (M::Folder, Select, Setting),
+            C::UnselectSameFolder => (M::Folder, Clear, Fixed(Both)),
+            C::RestoreSelection => (M::Remembered, Replace, Fixed(Both)),
+            _ => return None,
+        };
+        Some(Rule {
+            matches,
+            change,
+            kinds,
         })
-    }
-
-    /// Whether the command belongs to `mode`: only such a command shows in
-    /// the menu bar and takes its shortcuts while `mode` shows
-    /// (DESIGN.md: Keys).
-    pub(crate) fn belongs_to(self, mode: Mode) -> bool {
-        use CommandId as C;
-        match self {
-            C::Settings
-            | C::Exit
-            | C::Language
-            | C::SearchSyntax
-            | C::About
-            | C::Update
-            | C::ShowSearch
-            | C::ShowCommander
-            | C::FileOperations
-            | C::Commander
-            | C::Synchronize
-            | C::Compare
-            | C::SelectAll
-            | C::ClearSelection
-            | C::Refresh
-            | C::Find
-            | C::SortBy
-            | C::Cancel => true,
-            C::Open
-            | C::View
-            | C::Properties
-            | C::CopyToFolder
-            | C::MoveToFolder
-            | C::MultiRename
-            | C::Delete => true,
-            C::SelectFiles | C::UnselectFiles | C::Edit | C::NewFolder => mode == Mode::Commander,
-            C::OpenFileLocation
-            | C::ShowInCommander
-            | C::Explore
-            | C::ExportResults
-            | C::Copy
-            | C::CopyAsPath
-            | C::CopyName
-            | C::CopyFolder
-            | C::SearchInThisFolder
-            | C::Filters
-            | C::Inspector
-            | C::Columns
-            | C::Match
-            | C::ClearFilters
-            | C::Cut
-            | C::Paste => mode == Mode::Search,
-        }
     }
 }
 
@@ -417,6 +840,28 @@ pub(crate) struct Command {
     pub(crate) enabled: Enabled,
     /// `Some` for a command with a check mark.
     pub(crate) checked: Checked,
+    /// The icon before its label in a menu (DESIGN.md: Look). A command
+    /// with a check mark has none, because the mark takes the icon's place.
+    pub(crate) glyph: Option<Glyph>,
+    /// Only a command of the shown mode shows in the menu bar and takes its
+    /// shortcuts (DESIGN.md: Keys).
+    pub(crate) modes: Modes,
+}
+
+/// The modes that have a command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Modes {
+    Both,
+    Only(Mode),
+}
+
+impl Modes {
+    pub(crate) fn contains(self, mode: Mode) -> bool {
+        match self {
+            Modes::Both => true,
+            Modes::Only(only) => only == mode,
+        }
+    }
 }
 
 /// A command's source list and focus remain fixed while native capture or a
@@ -462,13 +907,26 @@ fn never(_: &State) -> bool {
     false
 }
 
-/// Select files… and Unselect files… match names, which only a panel that
-/// lists a folder holds (DESIGN.md: Selecting entries).
+fn panel_of(state: &State) -> Option<Side> {
+    match state.list {
+        List::Panel(side) => Some(side),
+        List::Search => None,
+    }
+}
+
+/// Select files…, Unselect files… and the other selection commands that
+/// look at every entry's name or kind, which only a panel that lists a
+/// folder holds (DESIGN.md: Selecting entries).
 fn lists_folder(state: &State) -> bool {
-    let List::Panel(side) = state.list else {
-        return false;
-    };
-    matches!(state.model.panels().panel(side).view(), View::Folder)
+    panel_of(state)
+        .is_some_and(|side| matches!(state.model.panels().panel(side).view(), View::Folder))
+}
+
+/// The commands that select by the focused entry's extension, name or
+/// folder, which `..` does not have.
+fn focused_entry(state: &State) -> bool {
+    lists_folder(state)
+        && panel_of(state).is_some_and(|side| state.model.panels().focused_entry(side).is_some())
 }
 
 /// Refresh runs the shown search again (DESIGN.md: C17); in Commander mode it
@@ -588,10 +1046,12 @@ pub(crate) enum Key {
     Down,
     Comma,
     Period,
-    /// The number pad's `+` and `-`, which are other keys than the main
-    /// keyboard's, so they never type into quick search.
+    /// The number pad's `+`, `-`, `/` and `*`, which are other keys than
+    /// the main keyboard's, so they never type into quick search.
     NumPlus,
     NumMinus,
+    NumSlash,
+    NumStar,
     /// The main keyboard's `+` and `-`, which zoom with `Ctrl` as in
     /// Notepad.
     Plus,
@@ -600,7 +1060,7 @@ pub(crate) enum Key {
 
 impl Key {
     /// Every key without a number, for reading a key's name or code back.
-    pub(crate) const NAMED: [Key; 21] = [
+    pub(crate) const NAMED: [Key; 23] = [
         Key::Enter,
         Key::Escape,
         Key::Tab,
@@ -620,6 +1080,8 @@ impl Key {
         Key::Period,
         Key::NumPlus,
         Key::NumMinus,
+        Key::NumSlash,
+        Key::NumStar,
         Key::Plus,
         Key::Minus,
     ];
@@ -649,6 +1111,8 @@ impl Key {
             // Without `+`, which `Keystroke::from_name` splits at.
             Key::NumPlus => "NumPlus".into(),
             Key::NumMinus => "NumMinus".into(),
+            Key::NumSlash => "NumSlash".into(),
+            Key::NumStar => "NumStar".into(),
             Key::Plus => "Plus".into(),
             Key::Minus => "Minus".into(),
         }
@@ -682,6 +1146,8 @@ impl Key {
             | Key::Minus => self.name(),
             Key::NumPlus => "Num +".to_owned(),
             Key::NumMinus => "Num -".to_owned(),
+            Key::NumSlash => "Num /".to_owned(),
+            Key::NumStar => "Num *".to_owned(),
             Key::Enter => named("key.enter"),
             Key::Escape => named("key.escape"),
             Key::Tab => named("key.tab"),
@@ -816,6 +1282,13 @@ pub(crate) fn tab_stop(from: Option<TabStop>, backward: bool) -> TabStop {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyAction {
     Run(CommandId),
+    /// A number pad key that runs one of two selection commands, as
+    /// Settings > General > Selection says: `with_folders` while it
+    /// includes folders, else `files_only` (DESIGN.md: Selecting entries).
+    Choice {
+        with_folders: CommandId,
+        files_only: CommandId,
+    },
     /// `Tab`, or `Shift+Tab` when `backward`, in any control: the focus
     /// moves as [`tab_stop`] says.
     MoveTab {
@@ -868,6 +1341,9 @@ impl KeyAction {
         match self {
             KeyAction::Run(command) => Some(command),
             KeyAction::Panel(PanelKey::Escape) => Some(CommandId::ClearSelection),
+            KeyAction::Select(SelectKey::Toggle { down: true }) => {
+                Some(CommandId::ToggleAndMoveDown)
+            }
             _ => None,
         }
     }
@@ -888,6 +1364,10 @@ pub(crate) enum SelectKey {
     /// toggles it and moves the focus `down`. In a panel, Space types into
     /// the open quick search box.
     Toggle { down: bool },
+    /// Edit's Select and move down and Unselect and move down: the focused
+    /// row gets that state, also when part of a range is already in it, and
+    /// the focus moves down.
+    Set { select: bool },
     /// `Num +` in Search's list selects again the rows that Clear
     /// selection cleared, while nothing else changed the selection since.
     Restore,
@@ -1093,6 +1573,64 @@ const PANEL_KEYS: &[(Keystroke, KeyAction)] = {
             Keystroke::plain(Key::NumMinus),
             KeyAction::Run(CommandId::UnselectFiles),
         ),
+        (
+            Keystroke::plain(Key::NumStar),
+            KeyAction::Run(CommandId::InvertSelection),
+        ),
+        (
+            Keystroke::plain(Key::NumSlash),
+            KeyAction::Run(CommandId::RestoreSelection),
+        ),
+        (
+            Keystroke::alt(Key::NumPlus),
+            KeyAction::Run(CommandId::SelectSameExtension),
+        ),
+        (
+            Keystroke::alt(Key::NumMinus),
+            KeyAction::Run(CommandId::UnselectSameExtension),
+        ),
+        (
+            shift(Key::NumMinus),
+            KeyAction::Run(CommandId::UnselectOnlyFiles),
+        ),
+        (
+            Keystroke::ctrl(Key::NumMinus),
+            KeyAction::Run(CommandId::ClearSelection),
+        ),
+        (
+            Keystroke::ctrl_shift(Key::NumMinus),
+            KeyAction::Run(CommandId::UnselectAllFiles),
+        ),
+        // With `Shift`, the folder choice opposite to the setting's, as
+        // Total Commander's keys do.
+        (
+            shift(Key::NumPlus),
+            KeyAction::Choice {
+                with_folders: CommandId::SelectOnlyFiles,
+                files_only: CommandId::SelectFilesAndFolders,
+            },
+        ),
+        (
+            shift(Key::NumStar),
+            KeyAction::Choice {
+                with_folders: CommandId::InvertOnlyFiles,
+                files_only: CommandId::InvertFilesAndFolders,
+            },
+        ),
+        (
+            Keystroke::ctrl(Key::NumPlus),
+            KeyAction::Choice {
+                with_folders: CommandId::SelectAll,
+                files_only: CommandId::SelectAllFiles,
+            },
+        ),
+        (
+            Keystroke::ctrl_shift(Key::NumPlus),
+            KeyAction::Choice {
+                with_folders: CommandId::SelectAllFiles,
+                files_only: CommandId::SelectAll,
+            },
+        ),
         (shift(Key::Function(3)), KeyAction::View(ViewKey::Focused)),
         (
             Keystroke::alt(Key::Function(3)),
@@ -1294,9 +1832,8 @@ pub(crate) enum Mark {
 impl MenuItem {
     pub(crate) fn writes_selection(self, focus: Focus) -> bool {
         match self {
-            Self::Run(
-                CommandId::ClearSelection | CommandId::SelectFiles | CommandId::UnselectFiles,
-            ) => true,
+            Self::Run(command) if command.selection_rule().is_some() => true,
+            Self::Run(CommandId::ClearSelection) => true,
             Self::Run(CommandId::SelectAll) => !matches!(
                 focus,
                 Focus::SearchBox { .. } | Focus::Value { .. } | Focus::PathBox | Focus::PanelSearch
@@ -1330,7 +1867,9 @@ impl MenuItem {
                 | C::Delete
                 | C::Paste
                 | C::SearchInThisFolder
-                | C::View,
+                | C::View
+                | C::SaveSelection
+                | C::SaveSelectionToFile,
             ) => true,
             _ => false,
         }
@@ -1452,7 +1991,7 @@ impl MenuItem {
         match self {
             MenuItem::Mode(destination) => destination != mode,
             MenuItem::SortKey(SortKey::Path) => mode == Mode::Search,
-            _ => self.command().belongs_to(mode),
+            _ => self.command().row().modes.contains(mode),
         }
     }
 
@@ -1467,7 +2006,7 @@ impl MenuItem {
     /// The icon before its label, which only a command without a mark has.
     pub(crate) fn glyph(self) -> Option<Glyph> {
         match self {
-            MenuItem::Run(command) => command.glyph(),
+            MenuItem::Run(command) => command.row().glyph,
             MenuItem::Mode(Mode::Search) => Some(Glyph::Search),
             MenuItem::Mode(Mode::Commander) => Some(Glyph::TwoPage),
             MenuItem::Column(_)
@@ -1578,11 +2117,17 @@ pub(crate) fn menu_bar(mode: Mode) -> Vec<Menu> {
 /// The menus of both modes, each command in its place.
 fn every_menu() -> Vec<Menu> {
     use CommandId as C;
-    let run = |commands: &[CommandId]| {
+    let run = |commands: &[CommandId]| -> Vec<Entry> {
         commands
             .iter()
             .map(|c| Entry::Item(MenuItem::Run(*c)))
             .collect()
+    };
+    let submenu = |label, groups: &[&[CommandId]]| Entry::Submenu {
+        label,
+        groups: (groups.iter())
+            .map(|group| group.iter().map(|c| MenuItem::Run(*c)).collect())
+            .collect(),
     };
     let menu = |label, groups| Menu {
         label,
@@ -1629,8 +2174,62 @@ fn every_menu() -> Vec<Menu> {
                     C::SelectAll,
                     C::SelectFiles,
                     C::UnselectFiles,
+                    C::InvertSelection,
+                    C::SelectSameExtension,
+                    C::UnselectSameExtension,
+                    C::RestoreSelection,
+                    C::SaveSelection,
                     C::ClearSelection,
-                ]),
+                ])
+                .into_iter()
+                .chain([
+                    submenu(
+                        "menu.files_or_folders",
+                        &[
+                            &[
+                                C::SelectOnlyFiles,
+                                C::SelectOnlyFolders,
+                                C::SelectFilesAndFolders,
+                            ],
+                            &[C::UnselectOnlyFiles, C::UnselectOnlyFolders],
+                            &[C::SelectAllFiles, C::SelectAllFolders],
+                            &[C::UnselectAllFiles, C::UnselectAllFolders],
+                            &[
+                                C::InvertOnlyFiles,
+                                C::InvertOnlyFolders,
+                                C::InvertFilesAndFolders,
+                            ],
+                        ],
+                    ),
+                    submenu(
+                        "menu.focused_entry",
+                        &[
+                            &[C::SelectByExtension, C::UnselectByExtension],
+                            &[
+                                C::SelectSameName,
+                                C::UnselectSameName,
+                                C::SelectSameNameAndExtension,
+                                C::UnselectSameNameAndExtension,
+                                C::SelectSameFolder,
+                                C::UnselectSameFolder,
+                            ],
+                            &[
+                                C::SelectAndMoveDown,
+                                C::UnselectAndMoveDown,
+                                C::ToggleAndMoveDown,
+                            ],
+                        ],
+                    ),
+                    submenu(
+                        "menu.selection_list",
+                        &[&[
+                            C::SaveSelectionToFile,
+                            C::LoadSelectionFromFile,
+                            C::LoadSelectionFromClipboard,
+                        ]],
+                    ),
+                ])
+                .collect(),
                 run(&[C::Find]),
             ],
         ),
@@ -1962,7 +2561,7 @@ pub(crate) fn accelerators(shortcuts: &CommandShortcuts, mode: Mode) -> Vec<(Key
     };
     let shortcuts = CommandId::ALL
         .iter()
-        .filter(|c| c.belongs_to(mode))
+        .filter(|c| c.row().modes.contains(mode))
         .flat_map(|c| {
             shortcuts
                 .of(*c)
@@ -2103,6 +2702,21 @@ mod tests {
         }
         assert!(!shown(Mode::Commander, CommandId::Copy));
         assert!(shown(Mode::Search, CommandId::Find) && shown(Mode::Commander, CommandId::Find));
+    }
+
+    /// A command that clears changes folders too, whatever Settings >
+    /// General > Selection says, because a folder that `Num -` left
+    /// selected was deleted by the next Delete (DESIGN.md: Selecting
+    /// entries).
+    #[test]
+    fn no_clearing_command_keeps_folders_by_the_setting() {
+        for command in CommandId::ALL {
+            if let Some(rule) = command.selection_rule()
+                && rule.change == Change::Clear
+            {
+                assert_ne!(rule.kinds, KindsChoice::Setting, "{command:?}");
+            }
+        }
     }
 
     /// Tab in a panel's controls switches panels; otherwise Search's Tab

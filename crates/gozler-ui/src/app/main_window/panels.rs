@@ -6,9 +6,10 @@
 
 use super::super::dialogs::{NewFolder, SelectFiles, TransferMode, TransferStart};
 use super::super::icons::Changed;
+use super::super::work::{Load, Loaded, Save, Source};
 use super::selection::{Origin, Scroll};
-use super::{MainWindow, MeasuredColumn, Selected, Timer, measure_fits};
-use crate::core::captions::{self, PanelCaptions};
+use super::{MainWindow, MeasuredColumn, ModalStep, Selected, Timer, command_title, measure_fits};
+use crate::core::captions::{self, DialogCaptions, PanelCaptions};
 use crate::core::commands::{self, CommandId, Mark, MenuItem, MenuNode, PanelAction, PanelKey};
 use crate::core::fetch::{List, Purpose};
 use crate::core::ids::ControlId;
@@ -18,11 +19,11 @@ use crate::core::layout::{Body, PanelLayout, Px, Rect};
 use crate::core::model::{Accepted, Areas, Effect, Navigation, TakenShown};
 use crate::core::open::{Entries, EntryAction};
 use crate::core::panel::{
-    self, Entered, FolderChange, LookIn, PanelColumn, PanelFollow, PanelUpdate,
-    Panels as PanelState, Place, QuickAction, ReadAccepted, ReadAsk, ReadChange, ReadEvent,
+    self, Entered, FolderChange, LookIn, Matcher, PanelColumn, PanelFollow, PanelUpdate,
+    Panels as PanelState, Paths, Place, QuickAction, ReadAccepted, ReadAsk, ReadChange, ReadEvent,
     ReadFailure, Row, Side, TakenRows, UpdatedKind, View,
 };
-use crate::core::selection::SELECTION_LIMIT;
+use crate::core::selection::{Change, Kinds, Matches, Rule, SELECTION_LIMIT};
 use crate::core::settings::Mode;
 use crate::core::work::Waiting;
 use crate::win::controls::{Button, DropDownList, Edit, Label, ListColumn, ListView};
@@ -36,6 +37,7 @@ use gozler_core::winpath::parent_of;
 use gozler_fileops::Request;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 use windows::Win32::Foundation::LRESULT;
 
@@ -287,9 +289,6 @@ pub(super) struct Panels {
     pub(super) sides: [PanelControls; 2],
     /// Search stays visible until both panels have their initial listings.
     entering: RefCell<Option<Entering>>,
-    /// The mask that Select files… and Unselect files… show first: the
-    /// last one chosen, while the window runs.
-    select_mask: RefCell<String>,
 }
 
 struct Entering {
@@ -309,7 +308,6 @@ impl Panels {
                 PanelControls::create(parent, Side::Right)?,
             ],
             entering: RefCell::new(None),
-            select_mask: RefCell::new("*.*".to_owned()),
         })
     }
 }
@@ -2317,44 +2315,209 @@ impl Panels {
         }
     }
 
-    /// `Num +` and `Num -`: the mask, then the entries of `side`'s folder that
-    /// it matches are selected, or unselected when not `select`
-    /// (DESIGN.md: Selecting entries).
-    pub(super) fn select_matching(
+    /// A selection command of `side`'s list, `Num +` and `Num -` among
+    /// them: a typed mask's dialog first, then the entries of `side`'s
+    /// folder that its rule matches change (DESIGN.md: Selecting entries).
+    pub(super) fn select_by_rule(
         &self,
         window: &MainWindow,
         hwnd: Hwnd,
         side: Side,
-        select: bool,
+        command: CommandId,
     ) {
-        let dialog = SelectFiles::new(&self.select_mask.borrow());
-        let id = if select {
-            DialogId::SelectFiles
-        } else {
-            DialogId::UnselectFiles
+        let Some(rule) = command.selection_rule() else {
+            return;
         };
-        if window.open_dialog(hwnd, id, &dialog) != Some(DialogEnd::Ok) {
+        let masks = window.model.borrow().masks().to_vec();
+        // The newest mask, which a box that has none shows as `*.*`.
+        let newest = masks.first().map_or("*.*", String::as_str);
+        let typed = match rule.matches {
+            Matches::Mask => newest.to_owned(),
+            Matches::MaskOfExtension => {
+                let extension = window.model.borrow().panels().focused_extension(side);
+                extension.map_or_else(|| newest.to_owned(), |e| format!("*.{e}"))
+            }
+            _ => {
+                let matcher = window.model.borrow().panels().matcher(side, rule.matches);
+                if let Some(matcher) = matcher {
+                    self.start_rule(window, side, matcher, rule);
+                }
+                return;
+            }
+        };
+        let dialog = SelectFiles::new(&typed, &masks);
+        let id = match rule.change {
+            Change::Clear => DialogId::UnselectFiles,
+            Change::Select | Change::Invert | Change::Replace => DialogId::SelectFiles,
+        };
+        let captions = {
+            let model = window.model.borrow();
+            let strings = model.strings();
+            let mut captions = DialogCaptions::new(id, strings);
+            // The title names the command, such as Select only folders.
+            captions.title = command_title(strings, command);
+            captions
+        };
+        let ended = win::dialog::run_modal(hwnd, id, &captions, &dialog).ok();
+        let chosen = dialog.chosen().filter(|_| ended == Some(DialogEnd::Ok));
+        let typed = chosen.as_ref().map(|(text, _)| text.clone());
+        let accepted = window.model.borrow_mut().save_masks(dialog.masks(), typed);
+        window.apply(hwnd, accepted);
+        if let Some((_, mask)) = chosen {
+            self.start_rule(window, side, Matcher::Mask(mask), rule);
+        }
+    }
+
+    fn start_rule(&self, window: &MainWindow, side: Side, matcher: Matcher, rule: Rule) {
+        let folders = window.model.borrow().choices().select_folders;
+        window.start_matching_selection(side, matcher, rule.change, rule.kinds.kinds(folders));
+    }
+
+    /// Save selection to file…: asks for the file, then writes to it the
+    /// names of `side`'s chosen entries, or their full paths in a search
+    /// panel (DESIGN.md: Selecting entries).
+    pub(super) fn save_selection_to_file(&self, window: &MainWindow, hwnd: Hwnd, side: Side) {
+        let Some(entries) = window.selected_source(List::Panel(side)) else {
+            return;
+        };
+        let (title, text_files, file_name, folder) = {
+            let model = window.model.borrow();
+            let strings = model.strings();
+            let panel = model.panels().panel(side);
+            (
+                command_title(strings, CommandId::SaveSelectionToFile),
+                strings.text("select_files.text_files").to_owned(),
+                strings.text("select_files.file_name").to_owned(),
+                matches!(panel.view(), View::Folder).then(|| panel.folder().to_owned()),
+            )
+        };
+        let types = [shell::FileType {
+            name: &text_files,
+            extension: "txt",
+        }];
+        let Some((file, _)) =
+            shell::save_dialog(hwnd, &title, folder.as_deref(), &file_name, &types)
+        else {
+            return;
+        };
+        let save = Save {
+            entries,
+            file,
+            names: folder.is_some(),
+        };
+        window.created().work.borrow_mut().panels.save(side, save);
+    }
+
+    /// Load selection from file… and from the clipboard: reads the names,
+    /// then selects the entries of `side`'s folder that they name in place
+    /// of its selection (DESIGN.md: Selecting entries).
+    pub(super) fn load_selection(
+        &self,
+        window: &MainWindow,
+        hwnd: Hwnd,
+        side: Side,
+        command: CommandId,
+    ) {
+        let source = if command == CommandId::LoadSelectionFromFile {
+            let (title, text_files) = {
+                let model = window.model.borrow();
+                let strings = model.strings();
+                (
+                    command_title(strings, command),
+                    strings.text("select_files.text_files").to_owned(),
+                )
+            };
+            let Some(file) = shell::pick_file(hwnd, &title, &text_files, "*.txt") else {
+                return;
+            };
+            Source::File(PathBuf::from(file))
+        } else {
+            Source::Clipboard
+        };
+        let folder = window
+            .model
+            .borrow()
+            .panels()
+            .panel(side)
+            .folder()
+            .to_owned();
+        let load = Load { source, folder };
+        window.created().work.borrow_mut().panels.load(side, load);
+    }
+
+    /// Selects the entries that a Load selection command read, or says why
+    /// it read none.
+    pub(super) fn select_loaded(
+        &self,
+        window: &MainWindow,
+        hwnd: Hwnd,
+        side: Side,
+        loaded: Loaded,
+    ) {
+        match loaded.paths {
+            Ok(paths) => window.start_matching_selection(
+                side,
+                Matcher::Paths(Paths::Loaded(paths, loaded.command)),
+                Change::Replace,
+                Kinds::Both,
+            ),
+            Err(failure) => {
+                window.defer(hwnd, ModalStep::SelectionNotLoaded(loaded.command, failure));
+            }
+        }
+    }
+
+    /// Selects again the entries of `side`'s folder that the copy, move or
+    /// delete it waits for did not finish, once it ended (DESIGN.md:
+    /// Selecting entries). A rule of the person's that runs in the panel
+    /// goes first; its answer asks again.
+    pub(super) fn reselect_unfinished(&self, window: &MainWindow, side: Side) {
+        let Some(id) = window.model.borrow().panels().reselect(side) else {
+            return;
+        };
+        if window.matching_selection_pending(List::Panel(side)) {
             return;
         }
-        let Some((text, mask)) = dialog.chosen() else {
+        let ended = window.file_operations.get().and_then(|operations| {
+            let operation = operations.operation(id)?;
+            match &operation.state {
+                gozler_fileops::State::Ended(outcome) => {
+                    Some((Arc::clone(&operation.request), Arc::clone(outcome)))
+                }
+                _ => None,
+            }
+        });
+        let Some((request, outcome)) = ended else {
             return;
         };
-        self.select_mask.replace(text);
-        let folders = window.model.borrow().choices().select_folders;
-        window.start_matching_selection(side, mask, select, folders);
+        if outcome.succeeded {
+            window.model.borrow_mut().panels_mut().forget_reselect(side);
+            return;
+        }
+        window.start_matching_selection(
+            side,
+            Matcher::Paths(Paths::Unfinished(request, outcome)),
+            Change::Select,
+            Kinds::Both,
+        );
     }
 
     pub(super) fn show_matching(
         &self,
         window: &MainWindow,
+        hwnd: Hwnd,
         side: Side,
         id: crate::core::work::Id,
         answer: crate::core::panel::Selected,
     ) {
         if !window.matching_selection_current(side, id) {
             window.reject_matching_selection(side, id, answer);
+            self.reselect_unfinished(window, side);
             return;
         }
+        let reselects = answer.reselects();
+        let named = answer.named();
+        let command = answer.command();
         let shown = window.model.borrow().panels().place(side);
         let place = window
             .model
@@ -2362,9 +2525,23 @@ impl Panels {
             .panels_mut()
             .accept_matching(side, answer);
         if let Some(place) = place {
+            if reselects {
+                window.model.borrow_mut().panels_mut().forget_reselect(side);
+            }
             self.show_place(window, side, &shown, &place, Scroll::Keep, false);
+            if let Some((named, found)) = named.filter(|(named, found)| found < named)
+                && !reselects
+            {
+                let restored = ModalStep::Restored {
+                    command,
+                    named,
+                    found,
+                };
+                window.defer(hwnd, restored);
+            }
         } else {
             window.cancel_matching_selection(List::Panel(side));
+            self.reselect_unfinished(window, side);
         }
         window.retire_model();
     }

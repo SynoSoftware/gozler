@@ -1563,7 +1563,7 @@ impl<'a> SettingsDialog<'a> {
             && let Ok(font) = Font::of(heading).and_then(|font| font.semibold())
         {
             heading.set_font(&font);
-            for (title, _, _) in SETTINGS_GROUPS {
+            for &(title, _, _) in SETTINGS_GROUPS {
                 if let Some(title) = dialog::item(hwnd, title.id()) {
                     title.set_font(&font);
                 }
@@ -1878,7 +1878,7 @@ impl<'a> SettingsDialog<'a> {
     /// Gives each group's title on `page` its icon, again when icons are
     /// shown or hidden.
     fn show_group_icons(&self, page: Hwnd) {
-        for (title, icon, glyph) in SETTINGS_GROUPS {
+        for &(title, icon, glyph) in SETTINGS_GROUPS {
             if let (Some(title), Some(icon)) = (
                 dialog::item(page, title.id()),
                 GlyphLabel::of_dialog(page, icon.id()),
@@ -2841,6 +2841,7 @@ impl DialogProc for SettingsDialog<'_> {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => return false,
         };
         if handled {
@@ -3061,6 +3062,7 @@ impl DialogProc for CommandShortcut<'_> {
             | DialogMessage::ColumnClicked { .. }
             | DialogMessage::ContextMenu { .. }
             | DialogMessage::Chosen { .. }
+            | DialogMessage::Picked { .. }
             | DialogMessage::Other => false,
         }
     }

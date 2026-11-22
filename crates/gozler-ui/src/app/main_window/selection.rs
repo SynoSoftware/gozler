@@ -3,10 +3,11 @@
 
 use super::*;
 use crate::core::commands::SelectKey;
-use crate::core::panel::{Place, QuickAction, Row};
+use crate::core::panel::{Matcher, Place, QuickAction, Row};
 use crate::core::selection::changes::{Changes, Write};
 use crate::core::selection::{
-    CaptureKey, Capturing, Movement, RowsChange, marked, moved, passed, push_rows, row_count,
+    CaptureKey, Capturing, Change, Kinds, Movement, RowsChange, marked, moved, passed, push_rows,
+    row_count,
 };
 use crate::core::work::INLINE_ITEMS;
 use std::collections::LinkedList;
@@ -37,9 +38,9 @@ struct MatchingSelection {
 
 enum MatchingPhase {
     Preparing {
-        mask: gozler_core::query::NameMask,
-        select: bool,
-        folders: bool,
+        matcher: Matcher,
+        change: Change,
+        kinds: Kinds,
     },
     Running {
         id: Id,
@@ -197,20 +198,22 @@ impl MainWindow {
             .is_some_and(|matching| matching.since.elapsed() >= crate::core::work::SLOW)
     }
 
+    /// Runs a selection rule on `side`'s folder through the work owner, as
+    /// a mask does (DESIGN.md: Selecting entries).
     pub(super) fn start_matching_selection(
         &self,
         side: Side,
-        mask: gozler_core::query::NameMask,
-        select: bool,
-        folders: bool,
+        matcher: Matcher,
+        change: Change,
+        kinds: Kinds,
     ) {
         let list = List::Panel(side);
         self.native_selection(list).borrow_mut().matching = Some(MatchingSelection {
             since: Instant::now(),
             phase: MatchingPhase::Preparing {
-                mask,
-                select,
-                folders,
+                matcher,
+                change,
+                kinds,
             },
         });
         self.set_selection_enabled(list, false);
@@ -242,9 +245,9 @@ impl MainWindow {
             since,
             phase:
                 MatchingPhase::Preparing {
-                    mask,
-                    select,
-                    folders,
+                    matcher,
+                    change,
+                    kinds,
                 },
         }) = matching
         else {
@@ -254,7 +257,7 @@ impl MainWindow {
             .model
             .borrow()
             .panels()
-            .select_matching(side, mask, select, folders);
+            .select_matching(side, matcher, change, kinds);
         if let Some(input) = input {
             let id = self.created().work.borrow_mut().panels.select(side, input);
             self.native_selection(list).borrow_mut().matching = Some(MatchingSelection {
@@ -824,6 +827,18 @@ impl MainWindow {
                     control.set_focused(Some(next));
                 }
             }
+            SelectKey::Set { select } => {
+                if let Some(row) = focused
+                    && self.model.borrow().selectable(list, row)
+                    && control.row_state(row).1 != select
+                {
+                    control.select(row, select);
+                }
+                let next = focused.map_or(0, |row| row + 1);
+                if next < count {
+                    control.set_focused(Some(next));
+                }
+            }
             SelectKey::Mark(movement) => {
                 let view = control.whole_rows();
                 let Some((rows, to)) = passed(focused, movement, count, view.clone()) else {
@@ -1266,6 +1281,9 @@ impl MainWindow {
         if let List::Panel(side) = list {
             self.rows_shown(list);
             self.controls().panels.show_panel(self, side);
+            // Showing new rows ends a rule that runs, such as the one that
+            // selects an operation's unfinished entries again.
+            self.controls().panels.reselect_unfinished(self, side);
         }
         self.controls().key_bar.update_key_bar(self);
         self.resume_selection_actions(hwnd);

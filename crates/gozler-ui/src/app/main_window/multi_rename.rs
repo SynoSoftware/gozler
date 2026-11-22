@@ -473,7 +473,10 @@ fn read_dates(paths: Vec<Vec<u16>>, _worker: &OffThread, cancel: &CancelToken) -
 }
 
 fn read_clipboard(_: (), worker: &OffThread, _cancel: &CancelToken) -> Option<String> {
-    clipboard::text(worker)
+    match clipboard::read(worker) {
+        clipboard::Contents::Text(text) => Some(text),
+        _ => None,
+    }
 }
 
 /// The places that a resize moves, as the dialog opened.
@@ -2148,7 +2151,7 @@ impl DialogProc for MultiRename<'_> {
                 true
             }
             DialogMessage::Edited { id } if id == C::MultiRenameList.id() => false,
-            DialogMessage::Edited { .. } => {
+            DialogMessage::Edited { .. } | DialogMessage::Picked { .. } => {
                 self.changed(dialog);
                 true
             }
