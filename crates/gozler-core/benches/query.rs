@@ -4,7 +4,8 @@
 //! names, a known fraction containing a rare token) and measures `run_query`
 //! for rare, medium, and wildcard needles, what a user who cannot list half
 //! the folders pays for a broad search, then what keeping folder sizes costs
-//! over the same tree, and what a sort change in the window asks.
+//! over the same tree, and what a sort change in the window asks. Over a
+//! volume shaped like a system drive, it measures a folder tree to a depth.
 //! Run with `cargo bench -p gozler-core`.
 
 // Measure the effect of a thread-caching allocator on the alloc-heavy broad
@@ -27,6 +28,7 @@ use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_RE
 use std::hint::black_box;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 
 // Deep, long-named tree (WinSxS / node_modules-like) so path reconstruction pays
 // a realistic ~6-hop parent walk per file, not the 2-3 hops a flat tree gives.
@@ -313,7 +315,7 @@ fn bench_query(c: &mut Criterion<measure::Measure>) {
         ("search(document) caller(half)", Viewer::Filtered(&may_list)),
     ] {
         broad.bench_function(label, |b| {
-            b.iter(|| black_box(search_rows(&idx, &parsed, viewer)))
+            b.iter(|| black_box(search_rows(&idx, &parsed, None, viewer)))
         });
     }
 
@@ -380,8 +382,14 @@ fn bench_linked_release(c: &mut Criterion<measure::Measure>) {
     group.finish();
 }
 
-/// Reads every row of `query` over `idx` as `viewer` sees it.
-fn search_rows(idx: &VolumeIndex, query: &CompiledQuery, viewer: Viewer<'_>) -> u64 {
+/// Reads every row of `query` below `scope` over `idx` as `viewer` sees it,
+/// and returns how many rows the search found.
+fn search_rows(
+    idx: &VolumeIndex,
+    query: &CompiledQuery,
+    scope: Option<&str>,
+    viewer: Viewer<'_>,
+) -> u64 {
     let volume = BenchVolume {
         index: idx,
         mounts: [r"C:\".to_string()],
@@ -395,13 +403,15 @@ fn search_rows(idx: &VolumeIndex, query: &CompiledQuery, viewer: Viewer<'_>) -> 
     let rows = ResultRows::search(
         vec![volume],
         query,
-        None,
+        scope,
         spec,
         viewer,
         &AtomicBool::new(false),
     )
-    .expect("no scope");
-    read_pages(rows)
+    .expect("the scope is on the volume");
+    let total = rows.total();
+    read_pages(rows);
+    total
 }
 
 /// The bench's index, searched as gozlerd searches a volume.
@@ -569,9 +579,124 @@ fn bench_folder_sizes(c: &mut Criterion<measure::Measure>) {
     group.finish();
 }
 
+/// An index that [`build_system_volume`] fills, and the next file record
+/// number it gives.
+struct TreeBuilder {
+    idx: VolumeIndex,
+    next: u64,
+}
+
+impl TreeBuilder {
+    /// Adds a folder named `name` in `parent`.
+    fn folder(&mut self, parent: Frn, name: &str) -> Frn {
+        let folder = frn(self.next);
+        self.next += 1;
+        self.idx.insert_enum(&enum_rec(folder, parent, name, true));
+        folder
+    }
+
+    /// Adds below `parent` `widths[0]` folders, in each of them `widths[1]`
+    /// folders, and so on, and `files` files in each folder of the last
+    /// level. Returns how many folders it added.
+    fn tree(&mut self, parent: Frn, widths: &[u64], files: u64) -> u64 {
+        let Some((&width, deeper)) = widths.split_first() else {
+            for _ in 0..files {
+                let name = format!("file_{}.dat", self.next);
+                self.idx
+                    .insert_enum(&enum_rec(frn(self.next), parent, &name, false));
+                self.next += 1;
+            }
+            return 0;
+        };
+        let mut folders = 0;
+        for n in 0..width {
+            let folder = self.folder(parent, &format!("folder_{n:02}"));
+            folders += 1 + self.tree(folder, deeper, files);
+        }
+        folders
+    }
+}
+
+/// Builds a volume shaped like a system drive: a big `C:\Windows`, a small
+/// `C:\ProgramData`, and `C:\Users` with the link folders `All Users` and
+/// `Default User` and profiles that are several folders deep, with files in
+/// each deepest folder. `C:\Users` holds so much of the volume that a path
+/// term's candidate walk below it gives up without a depth bound. Returns
+/// the index and how many folders `C:\Users` holds.
+fn build_system_volume() -> (VolumeIndex, u64) {
+    let mut volume = TreeBuilder {
+        idx: VolumeIndex::new(NTFS_ROOT_FRN),
+        next: 1000,
+    };
+    let windows = volume.folder(NTFS_ROOT_FRN, "Windows");
+    volume.tree(windows, &[50, 40], 860);
+    let program_data = volume.folder(NTFS_ROOT_FRN, "ProgramData");
+    volume.tree(program_data, &[30, 20], 19);
+    let users = volume.folder(NTFS_ROOT_FRN, "Users");
+    let mut folders = 0;
+    for link in ["All Users", "Default User"] {
+        volume.folder(users, link);
+        folders += 1;
+    }
+    for profile in ["owner", "Public", "Default", "defaultuser0"] {
+        let profile = volume.folder(users, profile);
+        folders += 1 + volume.tree(profile, &[24, 12, 10, 8], 8);
+    }
+    volume.idx.rank_names();
+    (volume.idx, folders)
+}
+
+/// A folder tree to a depth with every row read, as TinyTorrent's Library
+/// folders setting asks for it: `gozler -path C:\Users /ad depth:<=3 -n all`.
+/// On a real system drive `C:\Users\All Users` leads to `C:\ProgramData`, so
+/// the search reads the whole volume and also finds what is below that
+/// link. Each case prints its wall time as well, at best of a few runs.
+fn bench_folder_tree(c: &mut Criterion<measure::Measure>) {
+    let (idx, folders_in_users) = build_system_volume();
+    eprintln!("built system volume: {} live entries", idx.len());
+    let scope = r"C:\Users";
+    let all_users = Links::new(vec![FolderLink {
+        link: r"C:\Users\All Users".into(),
+        target: r"C:\ProgramData".into(),
+    }]);
+    let mut group = c.benchmark_group("folder_tree_2.6M");
+    group.sample_size(10);
+    // Folders to depth 3: the two link folders, the profiles and the 24
+    // folders in each. Through the link: `C:\ProgramData` itself, its 30
+    // folders and the 20 folders in each.
+    for (label, text, links, rows) in [
+        ("depth<=3", "folder: depth:<=3", Links::default(), 102),
+        (
+            "depth<=3 link out",
+            "folder: depth:<=3",
+            all_users,
+            102 + 1 + 30 + 600,
+        ),
+        ("every depth", "folder:", Links::default(), folders_in_users),
+    ] {
+        let parsed = parse_query(text).unwrap();
+        let query = CompiledQuery::with_links(&parsed, &links, Some(scope)).unwrap();
+        let search = || search_rows(&idx, &query, Some(scope), Viewer::Everything);
+        let mut best = Duration::MAX;
+        for _ in 0..5 {
+            let start = Instant::now();
+            let found = search();
+            best = best.min(start.elapsed());
+            assert_eq!(found, rows, "{label}");
+        }
+        eprintln!(
+            "folder_tree_2.6M/{label}: {rows} rows in {:.3} ms",
+            best.as_secs_f64() * 1000.0
+        );
+        group.bench_function(label, |b| b.iter(|| black_box(search())));
+    }
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = measure::criterion();
-    targets = bench_query, bench_linked_release, bench_folder_sizes, bench_sort_change
+    targets = bench_query, bench_linked_release, bench_folder_sizes, bench_sort_change,
+        bench_folder_tree
 }
 criterion_main!(benches);

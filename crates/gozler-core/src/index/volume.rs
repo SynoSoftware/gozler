@@ -2000,10 +2000,35 @@ impl VolumeIndex {
     /// is proportional to the SUBTREE, not the volume: this is what makes a
     /// folder-scoped query independent of disk size.
     pub(crate) fn subtree_entries(&self, root: EntryIdx) -> SubtreeWalk<'_> {
+        self.walk_levels(root, u32::MAX)
+    }
+
+    /// [`Self::subtree_entries`] down to the entries whose [`Self::depth`]
+    /// is `deepest`: the walk descends no further. An entry with no depth
+    /// holds none that has one, so the walk below it is empty.
+    pub(crate) fn subtree_to_depth(&self, root: EntryIdx, deepest: u32) -> SubtreeWalk<'_> {
+        let depth = if root == self.root {
+            Some(0)
+        } else {
+            self.depth(root)
+        };
+        let levels = depth.map_or(0, |depth| deepest.saturating_sub(depth));
+        self.walk_levels(root, levels)
+    }
+
+    /// The walk below `root` down to `levels` folders below it: its children
+    /// are the first level.
+    fn walk_levels(&self, root: EntryIdx, levels: u32) -> SubtreeWalk<'_> {
         SubtreeWalk {
             entries: &self.entries,
             root,
-            cur: self.entries.first_child(root),
+            cur: if levels == 0 {
+                NIL
+            } else {
+                self.entries.first_child(root)
+            },
+            level: 1,
+            levels,
         }
     }
 
@@ -2117,6 +2142,10 @@ pub(crate) struct SubtreeWalk<'a> {
     entries: &'a EntryTable,
     root: EntryIdx,
     cur: EntryIdx,
+    /// How many folders below `root` `cur` is: 1 for its children.
+    level: u32,
+    /// The deepest `level` the walk descends to.
+    levels: u32,
 }
 
 impl Iterator for SubtreeWalk<'_> {
@@ -2126,11 +2155,16 @@ impl Iterator for SubtreeWalk<'_> {
             return None;
         }
         let yielded = self.cur;
-        // Advance: descend first, else next sibling, else climb until a
-        // sibling exists or the root is reached.
-        let down = self.entries.first_child(yielded);
+        // Advance: descend first, unless at the deepest level, else next
+        // sibling, else climb until a sibling exists or the root is reached.
+        let down = if self.level < self.levels {
+            self.entries.first_child(yielded)
+        } else {
+            NIL
+        };
         if down != NIL {
             self.cur = down;
+            self.level += 1;
         } else {
             let mut at = yielded;
             loop {
@@ -2140,6 +2174,7 @@ impl Iterator for SubtreeWalk<'_> {
                     break;
                 }
                 at = self.entries.parent(at);
+                self.level = self.level.saturating_sub(1);
                 if at == self.root || at == NIL {
                     self.cur = NIL;
                     break;

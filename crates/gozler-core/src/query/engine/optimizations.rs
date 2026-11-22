@@ -324,6 +324,20 @@ fn test_every_entry(index: &VolumeIndex, query: &CompiledQuery, scope: Option<En
     scan.records.len()
 }
 
+/// [`search`] in `folder` as its scope walk runs without a depth bound:
+/// every entry below the folder tested.
+fn walk_whole_folder(index: &VolumeIndex, query: &CompiledQuery, folder: EntryIdx) -> usize {
+    let seen = SeenBy::Everything;
+    let never = AtomicBool::new(false);
+    let mut scan = Scan::new(index, MOUNT, query, &seen, &never);
+    for idx in index.subtree_entries(folder) {
+        if !index.is_synthetic(idx) {
+            scan.visit(idx, None);
+        }
+    }
+    scan.records.len()
+}
+
 /// [`search`] with the name scan as its only shortcut: each entry bearing a
 /// name that holds one of the query's literals tested, and its folders walked
 /// up to `scope`.
@@ -708,6 +722,43 @@ fn a_big_folder_walks_for_a_broad_term() {
         || timed(|| search(&volume.index, &query, folder)),
         || timed(|| scan_every_name(&volume.index, &query, folder)),
         1.2,
+    );
+    assert_eq!(found, expected);
+}
+
+/// A search whose clauses bound the depth walks a folder only down to that
+/// depth, instead of every entry below it. A scope that a link inside it
+/// leads out of becomes a path test of the whole volume, whose candidate
+/// walk stops at the same depth instead of giving up for a scan of every
+/// entry.
+#[test]
+#[ignore = "optimization check: build.ps1 -Timing optimizations"]
+fn a_depth_bound_walks_only_its_levels() {
+    let volume = &*VOLUME;
+    let index = &volume.index;
+    let parsed = parse_query("folder: depth:<=3").expect("a valid query");
+    let query = CompiledQuery::new(&parsed).expect("the query compiles");
+    let folder = volume.big_folder();
+    let (found, expected) = assert_saves(
+        "`folder: depth:<=3` in half the volume",
+        || timed(|| search(index, &query, Some(folder))),
+        || timed(|| walk_whole_folder(index, &query, folder)),
+        10.0,
+    );
+    assert_eq!(found, expected);
+
+    let scope = format!(r"C:\{}", top_folder(0));
+    let links = Links::new(vec![FolderLink {
+        link: format!(r"{scope}\out"),
+        target: format!(r"C:\{}", top_folder(1)),
+    }]);
+    let query =
+        CompiledQuery::with_links(&parsed, &links, Some(&scope)).expect("the query compiles");
+    let (found, expected) = assert_saves(
+        "`folder: depth:<=3` in half the volume, with a link out of it",
+        || timed(|| search(index, &query, None)),
+        || timed(|| test_every_entry(index, &query, None)),
+        10.0,
     );
     assert_eq!(found, expected);
 }

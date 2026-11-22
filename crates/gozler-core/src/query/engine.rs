@@ -29,6 +29,7 @@ use super::wildcard::{CodePointBuf, OneName, Wildcard};
 use crate::attributes::PackedAttributes;
 use crate::fold::fold_accents;
 use crate::index::store::{NameId, NamePair};
+use crate::index::volume::SubtreeWalk;
 use crate::index::{EntryView, SeenBy, VolumeIndex};
 use crate::links::{Links, Reached};
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
@@ -654,6 +655,25 @@ impl CompiledQuery {
 
     fn has_empty_clause(&self) -> bool {
         self.clauses.iter().any(|clause| clause.terms.is_empty())
+    }
+
+    /// The deepest [`VolumeIndex::depth`] a match can have: the smallest
+    /// upper end of a clause that is one positive `depth:` term. A negated
+    /// term, or one beside another term in its clause, bounds nothing.
+    fn deepest(&self) -> Option<u32> {
+        self.clauses
+            .iter()
+            .filter_map(|clause| match clause.terms.as_slice() {
+                [
+                    CompiledTerm {
+                        negated: false,
+                        check: Check::Depth(range),
+                        ..
+                    },
+                ] => u32::try_from(range.max).ok(),
+                _ => None,
+            })
+            .min()
     }
 
     /// Whether `root`, the name of a volume's root in the form the query
@@ -2102,7 +2122,7 @@ fn scan_with<'q, 'i>(
         let mut cap = walk_floor;
         let mut priced = false;
         let mut walked_all = true;
-        for (visited, idx) in index.subtree_entries(root).enumerate() {
+        for (visited, idx) in scan.below(root).enumerate() {
             if visited >= cap && !priced {
                 priced = true;
                 cap = cap.max(scan_cost(index, query, &mut prefilter_names));
@@ -2308,6 +2328,8 @@ struct Scan<'q, 'i> {
     /// The folder the matches are in, set by [`scan`]; `None` for the whole
     /// volume.
     scope: Option<EntryIdx>,
+    /// [`CompiledQuery::deepest`], which no walk below an entry passes.
+    deepest: Option<u32>,
     /// Set when the request is stopped, because its client left.
     stop: &'i AtomicBool,
 }
@@ -2371,6 +2393,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             scratch,
             records: Vec::new(),
             scope: None,
+            deepest: query.deepest(),
             stop,
         }
     }
@@ -2379,6 +2402,15 @@ impl<'q, 'i> Scan<'q, 'i> {
     /// every candidate.
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
+    }
+
+    /// The entries below `root` that can match: every one, or those down to
+    /// the depth the query allows.
+    fn below(&self, root: EntryIdx) -> SubtreeWalk<'i> {
+        match self.deepest {
+            Some(deepest) => self.index.subtree_to_depth(root, deepest),
+            None => self.index.subtree_entries(root),
+        }
     }
 
     /// Whether a clause of the query is a lone `parent:` for `folder`, so
@@ -2453,7 +2485,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             // An entry that the parent links make a parent is walked
             // through as a folder is, so this does not ask which it is.
             if term.matches(index.folded_name(idx), &mut self.scratch.code_points) {
-                for below in index.subtree_entries(idx) {
+                for below in self.below(idx) {
                     visited += 1;
                     if visited > most {
                         return false;
@@ -2517,7 +2549,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             {
                 continue;
             }
-            for idx in std::iter::once(root).chain(index.subtree_entries(root)) {
+            for idx in std::iter::once(root).chain(self.below(root)) {
                 walked += 1;
                 if walked > most {
                     return false;
@@ -3266,6 +3298,129 @@ mod tests {
         };
         assert_eq!(found("empty:"), 0);
         assert_eq!(found("!empty: folder:"), 1, "only docs has a count");
+    }
+
+    /// A walk below an entry stops at the depth a clause of one positive
+    /// `depth:` term allows, so it must still reach every match at that
+    /// depth: the scope walk, the path candidates of a scope that a link
+    /// leads out of, whose target has its own depth, and the component walk
+    /// of Match path, and a walk from the volume root. A negated `depth:`, or
+    /// one beside another term, bounds nothing. The totals count what the
+    /// rows show.
+    #[test]
+    fn a_depth_bound_walks_down_to_every_match_at_it() {
+        let mut idx = docs_index();
+        for r in [
+            enum_rec(frn(104), frn(103), "lib", true),
+            enum_rec(frn(105), frn(104), "deep", true),
+            enum_rec(frn(206), frn(105), "x.rs", false),
+            enum_rec(frn(106), NTFS_ROOT_FRN, "other", true),
+        ] {
+            idx.insert_enum(&r);
+        }
+        // Enough other entries that the path candidate walk and the
+        // component walk finish instead of giving up for a scan.
+        for n in 0..40 {
+            idx.insert_enum(&enum_rec(
+                frn(300 + n),
+                frn(106),
+                &format!("f{n}.txt"),
+                false,
+            ));
+        }
+        let repo = resolve_scope(&idx, b"repo", false).expect("repo exists");
+        let found = |query: &CompiledQuery, scope: Option<&str>| {
+            let sort = SortSpec::default_for(SortKey::Path);
+            let out = run_query(&idx, r"C:\", query, scope, sort, None);
+            assert_eq!(out.total, out.rows.len() as u64);
+            let mut found = texts(&out);
+            found.sort();
+            found
+        };
+        for (text, expected) in [
+            (
+                "depth:3",
+                &[
+                    r"C:\repo\docs\guide.MD",
+                    r"C:\repo\docs\readme.md",
+                    r"C:\repo\src\lib",
+                    r"C:\repo\src\main.cs",
+                    r"C:\repo\src\readme.md",
+                ][..],
+            ),
+            (
+                "!depth:<=3",
+                &[r"C:\repo\src\lib\deep", r"C:\repo\src\lib\deep\x.rs"],
+            ),
+            (
+                "depth:<=2|x.rs",
+                &[
+                    r"C:\repo\docs",
+                    r"C:\repo\readme.md",
+                    r"C:\repo\src",
+                    r"C:\repo\src\lib\deep\x.rs",
+                ],
+            ),
+        ] {
+            let query = compiled(text);
+            assert_eq!(found(&query, Some(r"C:\repo")), expected, "{text}");
+            let never = AtomicBool::new(false);
+            let totals = run_totals(
+                &idx,
+                r"C:\",
+                &query,
+                Some(repo),
+                &SeenBy::Everything,
+                &never,
+            )
+            .expect("no size is known");
+            assert_eq!(totals.count(), expected.len() as u64, "{text}");
+        }
+
+        // A link can lead to a volume's root, which has no depth of its own.
+        let mut top: Vec<&[u8]> = idx
+            .subtree_to_depth(idx.root(), 1)
+            .filter(|&entry| !idx.is_synthetic(entry))
+            .map(|entry| idx.folded_name(entry))
+            .collect();
+        top.sort_unstable();
+        assert_eq!(top, [&b"docs"[..], b"other", b"repo"], "below the root");
+
+        let links = Links::new(vec![crate::links::FolderLink {
+            link: r"C:\repo\out".into(),
+            target: r"C:\docs".into(),
+        }]);
+        let parsed = parse_query("depth:<=2").unwrap();
+        let query = CompiledQuery::with_links(&parsed, &links, Some(r"C:\repo")).unwrap();
+        assert_eq!(
+            found(&query, Some(r"C:\repo")),
+            [
+                r"C:\docs",
+                r"C:\docs\readme.md",
+                r"C:\repo\docs",
+                r"C:\repo\readme.md",
+                r"C:\repo\src"
+            ],
+            "through a link out of the scope"
+        );
+
+        let options = ParseOptions {
+            match_path: true,
+            ..ParseOptions::default()
+        };
+        let parsed = parse_query_with("repo depth:<=2", options).unwrap();
+        let query = CompiledQuery::new(&parsed).unwrap();
+        assert!(query.component_literal.is_some());
+        assert_eq!(
+            found(&query, None),
+            [
+                r"C:\repo",
+                r"C:\repo\docs",
+                r"C:\repo\readme.md",
+                r"C:\repo\src"
+            ],
+            "Match path"
+        );
     }
 
     #[test]
@@ -4462,6 +4617,7 @@ mod tests {
                 prop::collection::vec(text(), 0..3).prop_map(Test::Extension),
                 (any::<u64>(), any::<u64>())
                     .prop_map(|(min, max)| Test::Size(SizeRange { min, max })),
+                (0u64..5, 0u64..5).prop_map(|(min, max)| Test::Depth(SizeRange { min, max })),
                 prop_oneof![Just(Kind::File), Just(Kind::Folder)].prop_map(Test::Kind),
                 (any::<i64>(), any::<i64>())
                     .prop_map(|(min, max)| Test::DateModified(DateRange { min, max })),
@@ -4515,7 +4671,9 @@ mod tests {
             /// up for the names the pricing found, or for the scan that a
             /// path term or a filter falls back to. A walk that kept its
             /// records, or names reused from the pricing that missed some,
-            /// would change the answer only for big folders.
+            /// would change the answer only for big folders. Each finds what
+            /// testing every entry finds, so a depth bound that stops the
+            /// walk too early is caught.
             #[test]
             fn a_scope_finds_the_same_walked_or_scanned(query in arb_query()) {
                 let idx = docs_index();
@@ -4535,6 +4693,15 @@ mod tests {
                 for floor in [0, 1, 2, 5] {
                     prop_assert_eq!(&found(floor), &walked, "floor {}", floor);
                 }
+                let mut every = Scan::new(&idx, r"C:\", &query, &SeenBy::Everything, &never);
+                for entry in idx.live_entries() {
+                    if !idx.is_synthetic(entry) {
+                        every.visit(entry, Some(scope));
+                    }
+                }
+                let mut tested: Vec<EntryIdx> = every.records.iter().map(|r| r.idx()).collect();
+                tested.sort_unstable();
+                prop_assert_eq!(&walked, &tested);
             }
 
             /// A search request arrives as JSON from the pipe, so any bytes
