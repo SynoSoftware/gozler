@@ -6,6 +6,10 @@
 
 - **Leave out folders.** On the command line, `--leave-out DIR` leaves a folder and everything in it out of a search, and `--leave-in DIR` searches a folder inside it again. The nearest of these folders above a file decides, so `gozler --leave-out C:\Windows --leave-in C:\Windows\Media ext:wav` finds Windows' sounds and no other file in `C:\Windows`. A link does not change what a folder leaves out, and a folder that does not exist leaves nothing out.
 
+#### Fixed
+
+- The window sometimes stayed behind other windows, with only its taskbar button flashing, when a shortcut, the notification area icon or a second start opened it.
+
 ## Gozler 0.6.1
 
 ### Multi-Rename, Compare and faster search

@@ -45,7 +45,8 @@ use windows::Win32::Graphics::Gdi::{
     RedrawWindow,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetActiveWindow, GetFocus, IsWindowEnabled, SetFocus,
+    GetActiveWindow, GetFocus, INPUT, INPUT_0, INPUT_MOUSE, IsWindowEnabled, MOUSEINPUT, SendInput,
+    SetFocus,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BeginDeferWindowPos, DeferWindowPos, DestroyWindow, EndDeferWindowPos, GWL_EXSTYLE, GWL_STYLE,
@@ -197,9 +198,20 @@ impl Hwnd {
     }
 
     /// Restores a minimized window, which comes back maximized when it was,
-    /// shows a hidden one and asks Windows to put it in front.
+    /// shows a hidden one and asks Windows to put it in front. Windows
+    /// refuses when another process got the last input, as after a shortcut
+    /// that the keyboard hook swallows; an input that moves nothing makes
+    /// this process its source, so the request is repeated once. A second
+    /// refusal leaves Windows' taskbar flash, which asks the person instead.
     pub(crate) fn bring_to_front(self) {
-        // SAFETY: plain values.
+        let nothing = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT::default(),
+            },
+        };
+        // SAFETY: plain values, and one complete mouse input, which the call
+        // copies.
         unsafe {
             let command = if IsIconic(self.0).as_bool() {
                 SW_RESTORE
@@ -207,7 +219,10 @@ impl Hwnd {
                 SW_SHOW
             };
             let _ = ShowWindow(self.0, command);
-            let _ = SetForegroundWindow(self.0);
+            if !SetForegroundWindow(self.0).as_bool() {
+                SendInput(&[nothing], size_of::<INPUT>() as i32);
+                let _ = SetForegroundWindow(self.0);
+            }
         }
     }
 
