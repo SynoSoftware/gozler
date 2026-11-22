@@ -23,7 +23,9 @@ removable drives, network drives and other filesystems are not indexed.
 
 **Left out**:
 A drive, folder or name that the Include settings keep out of the index. The
-index holds no entry for it, so no search finds it.
+index holds no entry for it, so no search finds it. A folder that
+`--leave-out` names is left out of one search only: the index still holds
+its entries, and other searches find them (see **Folder choice**).
 _Avoid_: excluded, ignored
 
 **Entry**:
@@ -136,6 +138,12 @@ its `/`.
 **Scope**:
 The folder `-path` names. A search finds the entries below it, on the volume
 whose mount prefix is the longest that starts it.
+
+**Folder choice**:
+A folder that `--leave-out` leaves out of one search, or that `--leave-in`
+searches again inside a left-out folder. The nearest choice at or above an
+entry's real folder decides. Unlike Include, it changes one search, not the
+index.
 
 **Relative path**:
 A path that starts at gozler's working directory instead of a root: a path

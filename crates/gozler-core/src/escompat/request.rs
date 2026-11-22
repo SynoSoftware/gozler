@@ -3,7 +3,7 @@
 use super::{EsPlan, ScopeFolder};
 use crate::output::ResultFormat;
 use crate::proto::{Returns, Rows, SearchRequest, Want};
-use crate::query::{QueryError, QueryStart, TermMatch};
+use crate::query::{Clause, FolderChoice, QueryError, QueryStart, TermMatch, Test};
 use crate::search::{Search, SearchInput, TextMatch};
 use crate::types::EsColumn;
 use crate::winpath::{absolute, parent_of};
@@ -51,7 +51,7 @@ pub fn build_search(
         ScopeFolder::ParentOf(path) => parent_of(&absolute(path, working_dir)),
     });
     let parent = plan.parent.as_ref().map(|dir| absolute(dir, working_dir));
-    let search = Search::new(&SearchInput {
+    let mut search = Search::new(&SearchInput {
         text: &plan.query,
         text_match: TextMatch::Terms(if plan.whole_word {
             TermMatch::WholeWords
@@ -69,6 +69,20 @@ pub fn build_search(
         working_dir: Some(working_dir),
         query_start,
     })?;
+    if !plan.folders.is_empty() {
+        let folders = plan
+            .folders
+            .iter()
+            .map(|folder| FolderChoice {
+                path: absolute(&folder.path, working_dir),
+                left_out: folder.left_out,
+            })
+            .collect();
+        search
+            .query
+            .clauses
+            .push(Clause::single(Test::Folders(folders)));
+    }
     Ok(search.request(returns))
 }
 
@@ -76,7 +90,6 @@ pub fn build_search(
 mod tests {
     use super::*;
     use crate::escompat::{Command, parse_argv};
-    use crate::query::{Clause, Test};
     use crate::winpath::is_drive_relative;
 
     /// The request for `plan` in `working_dir`, at an arbitrary query start.
@@ -149,6 +162,35 @@ mod tests {
         assert_eq!(
             scope(&["-parent", "..", "-path", r"D:\x"]).as_deref(),
             Some(r"D:\x")
+        );
+    }
+
+    /// The daemon tests real full paths, so a folder typed relative must
+    /// arrive absolute, or it would leave out nothing.
+    #[test]
+    fn the_folder_switches_name_absolute_folders() {
+        let request = search_in(
+            &plan(&[
+                "--leave-out",
+                r"..\docs",
+                "--leave-in",
+                r"C:\repo\docs\keep",
+            ]),
+            r"C:\repo\src",
+        )
+        .expect("parses");
+        assert_eq!(
+            request.query.clauses,
+            [Clause::single(Test::Folders(vec![
+                FolderChoice {
+                    path: r"C:\repo\docs".to_string(),
+                    left_out: true,
+                },
+                FolderChoice {
+                    path: r"C:\repo\docs\keep".to_string(),
+                    left_out: false,
+                },
+            ]))]
         );
     }
 

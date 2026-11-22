@@ -308,6 +308,15 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
                  hidden and system items, while `/a-hs` excludes hidden items and requires \
                  system ones.",
             ),
+            (
+                Reader::CommandLine,
+                "Of the folders that `--leave-out` and `--leave-in` name, the nearest at or \
+                 above a result decides; of two for one folder, the later wins. They test \
+                 where each result really \
+                 is: a link into a left-out folder does not bring its files back, and a \
+                 link inside one does not leave out what it leads to. A folder that does \
+                 not exist leaves nothing out.",
+            ),
         ],
     ),
     (

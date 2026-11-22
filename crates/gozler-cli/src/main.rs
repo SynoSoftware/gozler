@@ -290,7 +290,8 @@ mod win {
             .as_mut()
             .map(ScopeFolder::path_mut)
             .into_iter()
-            .chain(plan.parent.as_mut());
+            .chain(plan.parent.as_mut())
+            .chain(plan.folders.iter_mut().map(|folder| &mut folder.path));
         for folder in folders.filter(|folder| is_drive_relative(folder)) {
             let absolute = std::path::absolute(&*folder)
                 .map_err(|e| Failure::Internal(format!("cannot resolve {folder}: {e}")))?;

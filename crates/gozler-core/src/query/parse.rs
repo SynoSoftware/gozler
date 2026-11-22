@@ -241,6 +241,21 @@ pub enum Test {
         kind: Option<Kind>,
         range: SizeRange,
     },
+    /// The nearest of these folders at or above the entry's real full path,
+    /// if there is one, is not left out. A link does not reach a folder,
+    /// because a caller that leaves a folder out means the files in it.
+    /// From gozler 0.6.2, an addition within protocol 22, so the gozlerd of
+    /// gozler 0.6.1 skips it.
+    Folders(Vec<FolderChoice>),
+}
+
+/// A folder of [`Test::Folders`]: an absolute path, and whether the search
+/// leaves out what it holds or finds it again inside a left-out folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FolderChoice {
+    pub path: String,
+    pub left_out: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +316,9 @@ impl Test {
             Test::Child(text) => function(Function::Child) + text,
             Test::Depth(_) => function(Function::Depth),
             Test::ChildCount { kind, .. } => function(Function::ChildCount(*kind)),
+            // Only options make this test, and a list of folders is too long
+            // for the message that names a skipped term.
+            Test::Folders(_) => "--leave-out".to_owned(),
         }
     }
 }

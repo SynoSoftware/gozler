@@ -40,11 +40,15 @@
 use super::ExitCode;
 use crate::attributes::Attributes;
 use crate::output::{Format, ResultFormat, TableOptions};
+use crate::query::FolderChoice;
 use crate::types::{EsColumn, SortDir, SortKey, SortSpec};
 use std::borrow::Cow;
 use std::time::Duration;
 
 /// What a command line asks gozler to do.
+// A process parses one command line, so boxing the large plan would save
+// no memory.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     /// No arguments: print the overview, which says what gozler is, whether
@@ -85,6 +89,9 @@ pub struct EsPlan {
     pub scope: Option<ScopeFolder>,
     /// `-parent DIR`, verbatim: only the entries directly in DIR.
     pub parent: Option<String>,
+    /// The folders of `--leave-out` and `--leave-in`, verbatim, in
+    /// command-line order.
+    pub folders: Vec<FolderChoice>,
     /// How many results to show, from `-n`; [`EsPlan::row_limit`] applies it.
     pub limit: Limit,
     /// The columns the column switches ask for, in their order with es dedupe
@@ -148,6 +155,7 @@ impl Default for EsPlan {
             query: String::new(),
             scope: None,
             parent: None,
+            folders: Vec::new(),
             limit: Limit::Default,
             columns: Vec::new(),
             sort: SortSpec::default(),
@@ -370,6 +378,11 @@ pub(super) enum SwitchAction {
     /// `-parent`: consume the next token as the folder whose direct entries
     /// match, verbatim.
     Parent,
+    /// `--leave-out` or `--leave-in`: consume the next token as a folder the
+    /// search leaves out, or leaves in, verbatim.
+    Folder {
+        left_out: bool,
+    },
     /// `-csv`, `-tsv`, `-txt`: write the rows in this format.
     Format(Format),
     /// `-export-csv`, `-export-tsv`, `-export-txt`: consume the next token as
@@ -430,7 +443,10 @@ impl SwitchAction {
         match self {
             SwitchAction::Limit => Some("N"),
             SwitchAction::Timeout => Some("MS"),
-            SwitchAction::Scope | SwitchAction::Parent | SwitchAction::FolderSize => Some("DIR"),
+            SwitchAction::Scope
+            | SwitchAction::Parent
+            | SwitchAction::Folder { .. }
+            | SwitchAction::FolderSize => Some("DIR"),
             SwitchAction::ParentPath => Some("PATH"),
             SwitchAction::Export(_) => Some("FILE"),
             SwitchAction::SortParam => Some("KEY"),
@@ -485,6 +501,22 @@ pub(super) const SWITCHES: &[Switch] = &[
         },
         group: Group::Search,
         help: "Find only the files and folders directly in DIR",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "leave-out",
+            action: SwitchAction::Folder { left_out: true },
+        },
+        group: Group::Search,
+        help: "Leave out DIR and everything in it",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "leave-in",
+            action: SwitchAction::Folder { left_out: false },
+        },
+        group: Group::Search,
+        help: "Search DIR, even inside a folder that `--leave-out` leaves out",
     },
     Switch {
         spelling: Spelling::Es {
@@ -1138,6 +1170,10 @@ fn apply_switch(
             ));
         }
         SwitchAction::Parent => plan.parent = Some(take_param(rest, token, action)?.to_owned()),
+        SwitchAction::Folder { left_out } => plan.folders.push(FolderChoice {
+            path: take_param(rest, token, action)?.to_owned(),
+            left_out,
+        }),
         SwitchAction::Format(format) => plan.format = format,
         SwitchAction::Export(format) => {
             plan.export = Some(take_param(rest, token, action)?.to_owned());
@@ -1323,6 +1359,7 @@ mod tests {
                 query: "report".to_string(),
                 scope: Some(ScopeFolder::Dir("C:\\some dir".to_string())),
                 parent: None,
+                folders: Vec::new(),
                 limit: Limit::Rows(200),
                 columns: vec![EsColumn::Size, EsColumn::DateModified],
                 sort: SortSpec {

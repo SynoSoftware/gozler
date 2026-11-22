@@ -277,6 +277,16 @@ pub(super) enum Check {
     /// The folder's full path, without a trailing separator, which the full
     /// path of the folder that holds the entry must equal.
     Parent(Vec<u8>),
+    /// Each folder's full path, folded whatever the query's case because
+    /// Windows compares folder names ignoring it, without a trailing
+    /// separator, and whether it is left out. A map, so an entry costs one
+    /// lookup per folder above it, however many folders the test names.
+    /// `fold_path` is set when the query matches case, so the entry's full
+    /// path arrives unfolded.
+    Folders {
+        folders: FxHashMap<Vec<u8>, bool>,
+        fold_path: bool,
+    },
     Text(Target, Matcher),
     /// A path text test that one component of the full path decides, read
     /// as this bit of the entry's [`ComponentBits`]; its matcher is in
@@ -752,6 +762,7 @@ impl CompiledClause {
         let reads = self.terms.iter().map(|term| match term.check {
             Check::Text(Target::Path, _)
             | Check::Parent(_)
+            | Check::Folders { .. }
             | Check::Length {
                 target: LengthTarget::FullPath,
                 ..
@@ -812,6 +823,7 @@ struct Subject<'a> {
 struct Scratch {
     code_points: CodePointBuf,
     extension: Vec<u8>,
+    folded_path: Vec<u8>,
 }
 
 impl Check {
@@ -883,6 +895,21 @@ impl Check {
                     .collect(),
             ),
             Test::Parent(s) => Check::Parent(text(s.trim_end_matches(['\\', '/']))),
+            // Of two choices of one folder, the later wins, as the later of
+            // two options does.
+            Test::Folders(folders) => Check::Folders {
+                folders: folders
+                    .iter()
+                    .map(|folder| {
+                        // Full paths hold `\`; only the command line turns
+                        // `/` into it, and a request can come from any client.
+                        let path = folder.path.replace('/', "\\");
+                        let path = path.trim_end_matches('\\');
+                        (fold_accents(path.as_bytes()), folder.left_out)
+                    })
+                    .collect(),
+                fold_path: match_case,
+            },
             Test::Size(range) => Check::Size(*range),
             Test::Unknown(field) => Check::Unknown(*field),
             Test::Length { target, range } => Check::Length {
@@ -926,7 +953,7 @@ impl Check {
             }
             Check::Length { .. } | Check::Depth(_) => 3,
             Check::Child { .. } | Check::ChildCount { .. } => 6,
-            Check::Parent(_) => 2,
+            Check::Parent(_) | Check::Folders { .. } => 2,
             Check::Text(_, matcher) => match matcher {
                 Matcher::Contains(_)
                 | Matcher::WholeWord(_)
@@ -1023,6 +1050,22 @@ impl Check {
                     .strip_suffix(subject.name)
                     .expect("a full path ends with its name");
                 parent.strip_suffix(b"\\").unwrap_or(parent) == folder.as_slice()
+            }
+            Check::Folders { folders, fold_path } => {
+                let mut path = path();
+                if *fold_path {
+                    scratch.folded_path.clear();
+                    crate::fold::fold_accents_into(path, &mut scratch.folded_path);
+                    path = scratch.folded_path.as_slice();
+                }
+                // The entry's own path, then each folder above it, nearest
+                // first; the root's is the mount prefix without its
+                // separator, as `C:` is.
+                let above = memchr::memrchr_iter(b'\\', path).map(|end| &path[..end]);
+                std::iter::once(path)
+                    .chain(above)
+                    .find_map(|folder| folders.get(folder))
+                    .is_none_or(|left_out| !left_out)
             }
             Check::Text(target, matcher) => {
                 let text = match target {
@@ -2823,7 +2866,7 @@ mod tests {
     use crate::attributes::Attributes;
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::query::parse::{
-        Clause, ParseOptions, Term, TermMatch, parse_query, parse_query_with,
+        Clause, FolderChoice, ParseOptions, Term, TermMatch, parse_query, parse_query_with,
     };
     use crate::query::rows::{QueryOutcome, Reply, VolumeRows, run_query};
     use crate::types::{Frn, SortDir};
@@ -3629,6 +3672,57 @@ mod tests {
         );
     }
 
+    /// The nearest choice decides, and a link does not reach a left-out
+    /// folder: a caller that leaves out `C:\ProgramData`, whose junctions
+    /// lead to `C:\Users\Public`, still finds the files there.
+    #[test]
+    fn a_left_out_folder_leaves_out_only_what_is_really_in_it() {
+        let idx = docs_index();
+        let links = Links::new(vec![crate::links::FolderLink {
+            link: r"C:\docs\out".into(),
+            target: r"C:\repo".into(),
+        }]);
+        let found = |query: &str, folders: &[(&str, bool)]| {
+            let mut parsed = parse_query(query).unwrap();
+            let folders = folders
+                .iter()
+                .map(|&(path, left_out)| FolderChoice {
+                    path: path.into(),
+                    left_out,
+                })
+                .collect();
+            parsed.clauses.push(Clause::single(Test::Folders(folders)));
+            let query = CompiledQuery::with_links(&parsed, &links, None).unwrap();
+            let sort = SortSpec::default_for(SortKey::Path);
+            let mut found = texts(&run_query(&idx, r"C:\", &query, None, sort, None));
+            found.sort();
+            found
+        };
+        assert_eq!(
+            found("readme", &[(r"C:\repo", true), (r"C:\repo\docs", false)]),
+            [r"C:\docs\readme.md", r"C:\repo\docs\readme.md"]
+        );
+        assert_eq!(
+            found("readme", &[(r"C:\docs", true)]),
+            [
+                r"C:\repo\docs\readme.md",
+                r"C:\repo\readme.md",
+                r"C:\repo\src\readme.md"
+            ],
+            "the link in the left-out folder does not take its target"
+        );
+        assert_eq!(
+            found("readme", &[(r"C:\", true), (r"c:\REPO\docs\", false)]),
+            [r"C:\repo\docs\readme.md"],
+            "a drive's root, and a folder in another case"
+        );
+        assert_eq!(
+            found("readme case:", &[(r"c:\REPO", true)]),
+            [r"C:\docs\readme.md"],
+            "a folder in another case, when the query matches case"
+        );
+    }
+
     // -- whole words and regular expressions --------------------------------
 
     /// A whole word has no letter or digit right before or after it, so `_`
@@ -4342,6 +4436,12 @@ mod tests {
                 "[rhsdavxntlcoieupm]{0,3}".prop_map(|letters| Test::Attributes(
                     Attributes::from_letters(&letters).expect("every letter is an attribute")
                 )),
+                prop::collection::vec(
+                    (text(), any::<bool>())
+                        .prop_map(|(path, left_out)| FolderChoice { path, left_out }),
+                    0..3,
+                )
+                .prop_map(Test::Folders),
             ]
         }
 
