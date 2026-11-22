@@ -414,7 +414,7 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
                 Reader::CommandLine,
                 "SYSTEM, and the users and groups that `{service} see-every-file` lists, see \
                  every file, unless the search has `--my-permissions`. Everyone else sees only \
-                 the files in folders they can open, and no folder sizes.",
+                 the files in folders they can open.",
             ),
             (
                 Reader::CommandLine,

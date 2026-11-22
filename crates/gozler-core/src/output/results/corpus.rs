@@ -33,6 +33,7 @@ fn results() -> QueryResults {
         mtime_ft,
         is_dir,
         attributes: Some(Attributes::from_letters(letters).expect("attribute letters")),
+        counts: None,
         identity: None,
     };
     QueryResults {

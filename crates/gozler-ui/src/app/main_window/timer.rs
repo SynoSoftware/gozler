@@ -24,6 +24,8 @@ pub(super) enum Timer {
     ColumnFill(List),
     /// A command that waits for its selection turns slow.
     SelectionWait,
+    /// The selected folder's count shows busy text.
+    Calculating,
 }
 
 const IDS: &[(Timer, usize)] = &[
@@ -57,6 +59,7 @@ const IDS: &[(Timer, usize)] = &[
     (Timer::ColumnFill(List::Panel(Side::Left)), 30),
     (Timer::ColumnFill(List::Panel(Side::Right)), 31),
     (Timer::SelectionWait, 32),
+    (Timer::Calculating, 33),
 ];
 
 impl Timer {

@@ -17,6 +17,17 @@ use zerocopy::{FromBytes, Immutable, KnownLayout, Unaligned};
 /// fails, so no path a person can open passes more.
 pub const MAX_LINK_HOPS: usize = 63;
 
+/// A folder whose entries a search below another folder reaches
+/// ([`Links::reached_from`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reached {
+    /// The folder's real path.
+    pub folder: String,
+    /// A link leads to the folder, so the search lists the folder itself
+    /// too, at the link's path.
+    pub linked: bool,
+}
+
 /// A folder that leads to another: a junction, a folder symbolic link, or a
 /// folder that mounts a volume. Both paths are full paths as gozler prints
 /// them, without a trailing separator, and a volume's root is its root name,
@@ -160,6 +171,43 @@ impl Links {
             path.push('\\');
         }
         path
+    }
+
+    /// The folders whose entries a search below `folder`, a real path,
+    /// reaches: `folder`, and the target of each link below it or below a
+    /// folder reached so far, without a folder that lies in another, so
+    /// each entry lies below exactly one of them.
+    pub fn reached_from(&self, folder: &str) -> Vec<Reached> {
+        let mut reached = vec![Reached {
+            folder: folder.to_owned(),
+            linked: false,
+        }];
+        let mut at = 0;
+        while let Some(from) = reached.get(at).map(|r| r.folder.clone()) {
+            for link in (self.folders.iter()).filter(|l| below(&l.link, &from).is_some()) {
+                let holder = (reached.iter_mut())
+                    .map(|r| (below(&link.target, &r.folder), r))
+                    .find(|(rest, _)| rest.is_some());
+                match holder {
+                    Some((Some(""), same)) => same.linked = true,
+                    // The holder's sums already count the target.
+                    Some(_) => {}
+                    None => reached.push(Reached {
+                        folder: link.target.clone(),
+                        linked: true,
+                    }),
+                }
+            }
+            at += 1;
+        }
+        // A target can hold a folder reached before it, such as `folder`.
+        (reached.iter().enumerate())
+            .filter(|&(i, r)| {
+                !(reached.iter().enumerate())
+                    .any(|(j, other)| j != i && below(&r.folder, &other.folder).is_some())
+            })
+            .map(|(_, r)| r.clone())
+            .collect()
     }
 
     /// Whether a link below `folder`, a real path, leads to a folder outside

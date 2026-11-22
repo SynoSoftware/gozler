@@ -154,6 +154,9 @@ const SEARCH_DELAY_MS: u32 = 150;
 /// A search that answers within this time keeps the previous counts until
 /// its own arrive, so the status bar changes once (DESIGN.md: Searching).
 const SEARCHING_NAMED_MS: u32 = crate::core::work::BUSY.as_millis() as u32;
+/// A folder counted within this time shows only its count (DESIGN.md:
+/// Inspector pane).
+const CALCULATING_MS: u32 = crate::core::work::BUSY.as_millis() as u32;
 const STATUS_POLL_MS: u32 = 2_000;
 const SELECTION_DELAY_MS: u32 = 150;
 const AGE_REFRESH_MS: u32 = 60_000;
@@ -2350,6 +2353,14 @@ impl MainWindow {
     fn name_search(&self, hwnd: Hwnd, list: List) {
         hwnd.kill_timer(Timer::Searching(list).id());
         let accepted = self.model.borrow_mut().name_search(list);
+        self.apply(hwnd, accepted);
+    }
+
+    /// Says that the selected folder is counted, once its request has run
+    /// [`CALCULATING_MS`] without an answer.
+    fn show_calculating(&self, hwnd: Hwnd) {
+        hwnd.kill_timer(Timer::Calculating.id());
+        let accepted = self.model.borrow_mut().show_calculating();
         self.apply(hwnd, accepted);
     }
 
@@ -5281,6 +5292,7 @@ impl MainWindow {
         match timer {
             Timer::Search(list) => self.search(hwnd, list),
             Timer::Searching(list) => self.name_search(hwnd, list),
+            Timer::Calculating => self.show_calculating(hwnd),
             Timer::Selection(list) => self.fetch_selection(hwnd, list),
             Timer::ColumnFill(list) => self.fill_after_wait(hwnd, list),
             Timer::PanelSettle(side) => self.controls().panels.on_panel_settled(self, hwnd, side),

@@ -43,8 +43,7 @@ Combine terms, exclude names, or use regular expressions.
 - **Use the results where you need them.** Copy paths, export to CSV, or
   drag files straight into another program.
 - **See what takes up space.** Check folder sizes and item counts, or sort
-  by size to find the largest folders and files. Folder sizes are available
-  to users allowed to see every indexed file.
+  by size to find the largest folders and files.
 - **Big exports don't hold up other searches.** Keep searching while an
   export runs, even with millions of files in deeply nested folders.
 - **Results stay current.** New files, changes and renames appear

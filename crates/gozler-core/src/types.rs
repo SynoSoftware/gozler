@@ -151,6 +151,10 @@ pub enum EsColumn {
     /// Known only on an index with Dates created on.
     DateCreated,
     Attributes,
+    /// For a folder, how many files are below it.
+    Files,
+    /// For a folder, how many folders are below it.
+    Folders,
 }
 
 /// Progress of a volume's private build, separate from its published index.

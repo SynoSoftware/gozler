@@ -2297,26 +2297,39 @@ try {
                 param($folder)
                 [ordered]@{
                     size = [long](Get-ChildItem -LiteralPath $folder -Recurse -File -Force | Measure-Object Length -Sum).Sum
-                    items = @(Get-ChildItem -LiteralPath $folder -Recurse -Force).Count
+                    files = @(Get-ChildItem -LiteralPath $folder -Recurse -File -Force).Count
+                    folders = @(Get-ChildItem -LiteralPath $folder -Recurse -Directory -Force).Count
                     gozler = [long]("$(& $gozler -get-folder-size $folder)" -replace '\D', '')
                 }
+            }
+            # The Size field's "N files and M folders", as the inspector words
+            # it, leaving out a kind there is none of.
+            $contentsPattern = {
+                param($totals)
+                $counted = { param($kind, $n) (Caption "inspector.$kind$(if ($n -eq 1) { '_one' } else { '_other' })") -replace '\{0}', "$n" }
+                $text = if ($totals.folders -eq 0) { & $counted 'files' $totals.files }
+                    elseif ($totals.files -eq 0) { & $counted 'folders' $totals.folders }
+                    else { (Caption 'inspector.files_and_folders') -replace '\{0}', (& $counted 'files' $totals.files) -replace '\{1}', (& $counted 'folders' $totals.folders) }
+                Caption-Pattern 'inspector.folder_contents' '.+' ([regex]::Escape($text))
             }
             $docs = & $folderTotals (Join-Path $files 'docs')
             $src = & $folderTotals (Join-Path $files 'src')
             [void](Search-For $window "$F folder: docs|src")
             $folderRows = Row-Count $window
             $sizeOf = { param($s) "$($s.fields[$fieldLabel.size])" }
-            $calculating = Caption 'inspector.calculating'
+            # A folder's Size field is empty while it is counted, and says
+            # Calculating… once the count has run core::work::BUSY.
+            $calculating = @('', (Caption 'inspector.calculating'))
             Select-Rows $window @(0)
-            $counted = Wait-Inspector $window { param($s) $s.heading -eq 'docs' -and (& $sizeOf $s) -ne $calculating -and (& $sizeOf $s) }
+            $counted = Wait-Inspector $window { param($s) $s.heading -eq 'docs' -and (& $sizeOf $s) -notin $calculating }
             Save-Screenshot $window.MainWindowHandle 'inspector-folder-en'
             $countedSize = & $sizeOf $counted
             $folderDetail = [ordered]@{ rows = $folderRows; fixture = $docs; inspector = $counted }
             Check 'the inspector shows a folder size' ($folderRows -eq 2 -and (Bytes-Of $countedSize) -eq $docs.size -and $docs.gozler -eq $docs.size -and
-                $countedSize -match (Caption-Pattern 'inspector.folder_size_other' "$($docs.items)")) $folderDetail
-            # The second folder is selected the moment the first shows
-            # Calculating…. The first is many, the largest folder, so its
-            # count takes longest. The heading is read before the size, and
+                $countedSize -match (& $contentsPattern $docs)) $folderDetail
+            # The second folder is selected while the first is counted, its
+            # Size field still empty or Calculating…. The first is many, the largest folder,
+            # so its count takes longest. The heading is read before the size, and
             # the window sets both before it handles another message, so a
             # size read after the heading is that heading's or newer.
             [void](Search-For $window "$F folder: many|src")
@@ -2336,17 +2349,17 @@ try {
                 $heading = [GozlerProbe.Win]::ControlText($headingHwnd)
                 $size = [GozlerProbe.Win]::ControlText($sizeHwnd)
                 if ($heading -eq 'src' -and $seen -notcontains $size) { $seen.Add($size) }
-            } until (($heading -eq 'src' -and $size -ne $calculating) -or $clock.ElapsedMilliseconds -gt 10000)
+            } until (($heading -eq 'src' -and $size -notin $calculating) -or $clock.ElapsedMilliseconds -gt 10000)
             $secondDetail = [ordered]@{
                 rows = $staleRows; first_when_second_selected = $firstSize; sizes_shown_for_src = $seen; fixture = $src
             }
-            $srcSize = { param($shown) $shown -match (Caption-Pattern 'inspector.folder_size_other' "$($src.items)") -and (Bytes-Of $shown) -eq $src.size }
-            if ($firstSize -ne $calculating) {
+            $srcSize = { param($shown) $shown -match (& $contentsPattern $src) -and (Bytes-Of $shown) -eq $src.size }
+            if ($firstSize -notin $calculating) {
                 Report 'a second folder shows only its own size' 'not run' "many was counted before src was selected; $($secondDetail | ConvertTo-Json -Compress)"
             }
             else {
                 Check 'a second folder shows only its own size' ($staleRows -eq 2 -and $src.gozler -eq $src.size -and $seen.Count -gt 0 -and
-                    (& $srcSize $seen[-1]) -and -not ($seen | Where-Object { $_ -ne $calculating -and -not (& $srcSize $_) })) $secondDetail
+                    (& $srcSize $seen[-1]) -and -not ($seen | Where-Object { $_ -notin $calculating -and -not (& $srcSize $_) })) $secondDetail
             }
 
             # Three selected files sum to their sizes.

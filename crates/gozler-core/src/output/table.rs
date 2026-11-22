@@ -28,6 +28,9 @@
 //! - Attributes print as letters in plain text (`HA`) and as their
 //!   `FILE_ATTRIBUTE_*` number in CSV and TSV (`34`), as es prints them;
 //!   empty when the daemon did not send them.
+//! - gozler's own Files and Folders columns print a folder's counts as Size
+//!   prints a size: grouped and right-aligned in plain text, digits in CSV
+//!   and TSV, and empty for a file and for unknown counts.
 //! - A folder's full path carries no trailing backslash.
 
 use crate::output::format_date_local;
@@ -85,6 +88,9 @@ const PLAIN_DATE_WIDTH: usize = 19;
 /// Width of the plain-text Attributes column, es's: `RASH` fits, and more
 /// letters run past it.
 const PLAIN_ATTRIBUTES_WIDTH: usize = 4;
+/// Width of the plain-text Files and Folders columns: `9,999,999` fits,
+/// more than a 2.2 million entry volume holds, and more digits run past it.
+const PLAIN_COUNT_WIDTH: usize = 9;
 
 impl TableWriter {
     pub fn new(options: TableOptions, time_zone: TimeZone) -> Self {
@@ -160,6 +166,8 @@ impl TableWriter {
                     Some(attributes) => attributes.bits().to_string().into(),
                     None => "".into(),
                 },
+                EsColumn::Files => count_cell(item.counts.map(|c| c.files), plain),
+                EsColumn::Folders => count_cell(item.counts.map(|c| c.folders), plain),
             };
             if i > 0 {
                 // Plain text ends a line at its last value, without padding.
@@ -175,6 +183,9 @@ impl TableWriter {
                 EsColumn::Size if plain => {
                     out.extend_from_slice(format!("{cell:>PLAIN_SIZE_WIDTH$}").as_bytes());
                 }
+                EsColumn::Files | EsColumn::Folders if plain => {
+                    out.extend_from_slice(format!("{cell:>PLAIN_COUNT_WIDTH$}").as_bytes());
+                }
                 EsColumn::DateModified | EsColumn::DateCreated if plain && !last => {
                     out.extend_from_slice(format!("{cell:<PLAIN_DATE_WIDTH$}").as_bytes());
                 }
@@ -184,7 +195,9 @@ impl TableWriter {
                 EsColumn::Size
                 | EsColumn::DateModified
                 | EsColumn::DateCreated
-                | EsColumn::Attributes => {
+                | EsColumn::Attributes
+                | EsColumn::Files
+                | EsColumn::Folders => {
                     out.extend_from_slice(cell.as_bytes());
                 }
             }
@@ -230,6 +243,18 @@ fn column_name(column: EsColumn) -> &'static str {
         EsColumn::DateModified => "Date Modified",
         EsColumn::DateCreated => "Date Created",
         EsColumn::Attributes => "Attributes",
+        EsColumn::Files => "Files",
+        EsColumn::Folders => "Folders",
+    }
+}
+
+/// A Files or Folders cell: `count` grouped in plain text, digits otherwise,
+/// and empty for none.
+fn count_cell(count: Option<u32>, plain: bool) -> Cow<'static, str> {
+    match count {
+        Some(count) if plain => grouped(count.into()).into(),
+        Some(count) => count.to_string().into(),
+        None => "".into(),
     }
 }
 
@@ -281,6 +306,7 @@ mod tests {
             created_ft: None,
             is_dir,
             attributes: None,
+            counts: None,
             identity: None,
         }
     }
@@ -310,6 +336,40 @@ mod tests {
         assert_eq!(
             out.as_slice(),
             b"\xEF\xBB\xBFSize,Date Modified,Filename\r\n"
+        );
+    }
+
+    /// `--files` and `--folders` print a folder's counts as Size prints its
+    /// size, in the order of their options, and leave a file's cells empty.
+    /// TinyTorrent reads these columns by their header names, so a renamed
+    /// header or a moved cell breaks it.
+    #[test]
+    fn the_files_and_folders_columns_print_a_folders_counts() {
+        let folder = ResultItem {
+            counts: Some(crate::index::Counts {
+                files: 48_211,
+                folders: 3_120,
+            }),
+            ..item(r"C:\Users\user\.cache", Some(9_175_986_261), None, true)
+        };
+        let file = item(r"C:\Users\user\a.txt", Some(1_234), None, false);
+        let columns = vec![EsColumn::Size, EsColumn::Files, EsColumn::Folders];
+        let options = |format, header| TableOptions {
+            format,
+            columns: columns.clone(),
+            bom: false,
+            header,
+            double_quote: false,
+        };
+        assert_eq!(
+            write(options(Format::Tsv, true), &[folder.clone(), file]),
+            b"Size\tFiles\tFolders\tFilename\r\n\
+              9175986261\t48211\t3120\tC:\\Users\\user\\.cache\r\n\
+              1234\t\t\tC:\\Users\\user\\a.txt\r\n"
+        );
+        assert_eq!(
+            write(options(Format::Plain, false), &[folder]),
+            b" 9,175,986,261    48,211     3,120 C:\\Users\\user\\.cache\n"
         );
     }
 

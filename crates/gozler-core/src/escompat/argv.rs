@@ -753,6 +753,22 @@ pub(super) const SWITCHES: &[Switch] = &[
         help: "Add an Attributes column",
     },
     Switch {
+        spelling: Spelling::Native {
+            name: "files",
+            action: SwitchAction::Column(EsColumn::Files),
+        },
+        group: Group::Output,
+        help: "Add a Files column: for a folder, how many files are below it",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "folders",
+            action: SwitchAction::Column(EsColumn::Folders),
+        },
+        group: Group::Output,
+        help: "Add a Folders column: for a folder, how many folders are below it",
+    },
+    Switch {
         spelling: Spelling::Es {
             names: &["utf8-bom"],
             action: SwitchAction::Utf8Bom,

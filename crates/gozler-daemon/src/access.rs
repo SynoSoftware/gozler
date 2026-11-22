@@ -71,7 +71,7 @@ pub(crate) type MayList = dyn Fn(&[u8]) -> bool + Send;
 /// What an identified caller sees. `gozler-core` takes it as a [`Viewer`]
 /// holding a closure, not this type, because the core holds no token.
 pub(crate) enum Visibility {
-    /// Every entry, with folder sizes.
+    /// Every entry.
     Everything,
     /// The entries of the folders this check lets the caller list.
     Filtered(Box<MayList>),

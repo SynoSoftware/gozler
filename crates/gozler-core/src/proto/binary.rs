@@ -39,11 +39,13 @@
 //!                       bit3 has_attributes, bit4 gone: a row of a result
 //!                       snapshot whose file is gone, whose folder is
 //!                       u32::MAX and whose name is empty, with no other bit;
-//!                       bit5 has_created
+//!                       bit5 has_created, bit6 has_counts
 //!   size:     u64 LE    iff has_size
 //!   mtime:    i64 LE    iff has_mtime
 //!   created:  i64 LE    iff has_created
 //!   attributes: u32 LE  iff has_attributes: `FILE_ATTRIBUTE_*` bits
+//!   files:    u32 LE    iff has_counts: the files below a folder
+//!   folders:  u32 LE    iff has_counts: the folders below a folder
 //!   file_id:  u128 LE   iff identities, and not a gone row
 //! sums, iff has_sums, after the items:
 //!   files:                u64 LE
@@ -70,6 +72,7 @@ use smallvec::SmallVec;
 use super::frame::{begin_frame, end_frame};
 use super::types::{FileIdentity, MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Want};
 use crate::attributes::Attributes;
+use crate::index::Counts;
 use crate::query::{
     FolderId, IndexedVolume, MatchSums, ResultNames, ResultRows, ResultSnapshotGone, RowView,
     SnapshotRow, SnapshotRows,
@@ -98,6 +101,7 @@ const IFLAG_HAS_MTIME: u8 = 1 << 2;
 const IFLAG_HAS_ATTRIBUTES: u8 = 1 << 3;
 const IFLAG_GONE: u8 = 1 << 4;
 const IFLAG_HAS_CREATED: u8 = 1 << 5;
+const IFLAG_HAS_COUNTS: u8 = 1 << 6;
 
 /// A folder's parent field for a volume's root.
 const NO_PARENT: u32 = u32::MAX;
@@ -143,6 +147,7 @@ pub struct PageItem<'a> {
     pub mtime: Option<i64>,
     pub created: Option<i64>,
     pub attributes: Option<Attributes>,
+    pub counts: Option<Counts>,
     /// Sent when the page carries identities.
     pub file_id: Frn,
 }
@@ -296,6 +301,9 @@ impl ResultsPage {
         if item.attributes.is_some() {
             iflags |= IFLAG_HAS_ATTRIBUTES;
         }
+        if item.counts.is_some() {
+            iflags |= IFLAG_HAS_COUNTS;
+        }
         self.items.push(iflags);
         if let Some(s) = item.size {
             self.items.extend_from_slice(&s.to_le_bytes());
@@ -308,6 +316,10 @@ impl ResultsPage {
         }
         if let Some(a) = item.attributes {
             self.items.extend_from_slice(&a.bits().to_le_bytes());
+        }
+        if let Some(c) = item.counts {
+            self.items.extend_from_slice(&c.files.to_le_bytes());
+            self.items.extend_from_slice(&c.folders.to_le_bytes());
         }
         if self.identities {
             self.items.extend_from_slice(&item.file_id.0.to_le_bytes());
@@ -444,6 +456,7 @@ struct Values {
     mtime: bool,
     created: bool,
     attributes: bool,
+    counts: bool,
 }
 
 impl Values {
@@ -453,6 +466,7 @@ impl Values {
             mtime: wants.contains(&Want::DateModified),
             created: wants.contains(&Want::DateCreated),
             attributes: wants.contains(&Want::Attributes),
+            counts: wants.contains(&Want::Counts),
         }
     }
 
@@ -466,6 +480,7 @@ impl Values {
             mtime: self.mtime.then_some(row.mtime).flatten(),
             created: self.created.then_some(row.created).flatten(),
             attributes: self.attributes.then_some(row.attributes),
+            counts: self.counts.then_some(row.counts).flatten(),
             file_id: row.file_id,
         }
     }
@@ -598,6 +613,14 @@ pub fn decode_results_payload(
                 Attributes::try_from(r.u32()?).map_err(|_| BinError("unindexed attribute bits"))
             })
             .transpose()?;
+        let counts = (iflags & IFLAG_HAS_COUNTS != 0)
+            .then(|| -> Result<Counts, BinError> {
+                Ok(Counts {
+                    files: r.u32()?,
+                    folders: r.u32()?,
+                })
+            })
+            .transpose()?;
         let identity = identities
             .then(|| -> Result<Box<FileIdentity>, BinError> {
                 let file_id = Frn(r.u128()?);
@@ -620,6 +643,7 @@ pub fn decode_results_payload(
             created_ft: created,
             is_dir: iflags & IFLAG_IS_DIR != 0,
             attributes,
+            counts,
             identity,
         });
     }
@@ -690,6 +714,7 @@ mod tests {
             mtime: None,
             created: None,
             attributes: None,
+            counts: None,
             file_id: Frn::default(),
         }
     }
@@ -755,6 +780,10 @@ mod tests {
         assert!(page.push(
             PageItem {
                 is_dir: true,
+                counts: Some(Counts {
+                    files: 48_211,
+                    folders: 3_120,
+                }),
                 file_id: Frn::ntfs(42, 5),
                 ..item(t.d, b"folder")
             },
@@ -794,6 +823,7 @@ mod tests {
                         created_ft: Some(133_400_000_000_000_000),
                         is_dir: false,
                         attributes: Some(hidden_archive()),
+                        counts: None,
                         identity: identity(C_VOLUME, refs_id),
                     },
                     ResultItem {
@@ -804,6 +834,10 @@ mod tests {
                         created_ft: None,
                         is_dir: true,
                         attributes: None,
+                        counts: Some(Counts {
+                            files: 48_211,
+                            folders: 3_120,
+                        }),
                         identity: identity(D_VOLUME, Frn::ntfs(42, 5)),
                     },
                     ResultItem {
@@ -814,6 +848,7 @@ mod tests {
                         created_ft: None,
                         is_dir: false,
                         attributes: None,
+                        counts: None,
                         identity: identity(C_VOLUME, Frn::ntfs(7, 1)),
                     },
                 ],
@@ -953,6 +988,7 @@ mod tests {
                 created_ft: None,
                 is_dir: false,
                 attributes: None,
+                counts: None,
                 identity: None,
             }]
         );

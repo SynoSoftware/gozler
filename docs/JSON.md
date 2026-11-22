@@ -82,13 +82,15 @@ unknown or not requested; absence is different from zero.
 | `mtime`, `created` | Local dates as `YYYY-MM-DDTHH:MM:SS`, without a UTC offset |
 | `mtime_ft`, `created_ft` | Integer Windows FILETIME ticks: 100 ns since 1601-01-01 UTC |
 | `attributes` | Windows attribute bits, requested with `-attributes` |
+| `files`, `folders` | For a folder, how many files and folders are below it, each name of a hard-linked file counted; requested with `--files` or `--folders` |
 | `volume` | The volume's GUID path, requested with `--file-id` |
 | `file_id` | The file ID on that volume as 32 hexadecimal digits, requested with `--file-id` |
 | `path_u16` | Exact UTF-16 code units when `path` had to replace an unpaired surrogate |
 
-Creation dates depend on the **Dates created** indexing setting. Folder
-sizes are omitted for callers whose results are filtered by permissions,
-and for every search with `--my-permissions`.
+Creation dates depend on the **Dates created** indexing setting. A folder's
+`size`, `files` and `folders` count everything below it, also for a caller
+whose results are filtered by permissions and for a search with
+`--my-permissions`, and are omitted until the volume's sizes are read.
 FILETIME values exceed JavaScript's safe integer range; use an integer parser
 that preserves their precision when exact timestamps matter.
 

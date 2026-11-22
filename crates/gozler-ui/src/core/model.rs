@@ -1769,6 +1769,25 @@ impl Model {
         }
     }
 
+    /// Says that the selected folder is counted, once its request has run
+    /// [`crate::core::work::BUSY`] without an answer, so a quick answer
+    /// shows only itself (DESIGN.md: Inspector pane).
+    pub(crate) fn show_calculating(&mut self) -> Accepted {
+        match &mut self.search.list.selection {
+            Selection::Folder {
+                contents: FolderContents::Calculating { busy, .. },
+                ..
+            } if !*busy => {
+                *busy = true;
+                Accepted {
+                    touched: Areas::INSPECTOR,
+                    effects: Vec::new(),
+                }
+            }
+            _ => Accepted::default(),
+        }
+    }
+
     /// A search panel's search (DESIGN.md: Search in a panel): its typed text
     /// in Start of words, without Search's match controls, filters or sort, in
     /// the panel's folder and its subfolders or on all drives, in the panel's
@@ -1968,10 +1987,10 @@ impl Model {
         };
         let older = shown.selection.asked();
         shown.chosen_by_focus = by_focus;
-        let effect = if positions.is_empty() || shown.results.shown_ask().is_none() {
+        let mut effects = if positions.is_empty() || shown.results.shown_ask().is_none() {
             shown.set_selection(Selection::None);
             shown.chosen_size = None;
-            None
+            Vec::new()
         } else {
             let source = SelectionSource::Cached {
                 chunks: shown.results.cached(),
@@ -1982,13 +2001,15 @@ impl Model {
         };
         // The request for the older selection reads other files (DESIGN.md: T6,
         // T7); a new request of the purpose ends it too.
-        let effect = effect.or_else(|| older.map(|_| Effect::Cancel(Purpose::Selection(list))));
+        if effects.is_empty() {
+            effects.extend(older.map(|_| Effect::Cancel(Purpose::Selection(list))));
+        }
         {
             let mut accepted = Accepted {
                 touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
                 effects: vec![Effect::InspectAge, Effect::ListPasses],
             };
-            accepted.effects.extend(effect);
+            accepted.effects.extend(effects);
 
             accepted
                 .effects
@@ -2028,27 +2049,35 @@ impl Model {
     /// folder alone also asks for its contents, which the inspector shows
     /// (DESIGN.md: Inspector pane); a search panel adds up the selection's
     /// size for its status line instead.
-    fn select(&mut self, list: List, files: Arc<[ResultItem]>) -> Option<Effect> {
+    fn select(&mut self, list: List, files: Arc<[ResultItem]>) -> Vec<Effect> {
         self.filter_selection(list, SelectionSource::Files(files))
     }
 
-    fn filter_selection(&mut self, list: List, source: SelectionSource) -> Option<Effect> {
+    fn filter_selection(&mut self, list: List, source: SelectionSource) -> Vec<Effect> {
         let generation = self.generation();
-        let shown = self.list_mut(list)?;
+        let Some(shown) = self.list_mut(list) else {
+            return Vec::new();
+        };
         shown.set_selection(Selection::Filtering {
             generation,
             source,
             running: false,
         });
         shown.chosen_size = None;
-        self.inline_filter(list).and_then(|accepted| {
-            accepted.effects.into_iter().find(|effect| {
+        let Some(accepted) = self.inline_filter(list) else {
+            return Vec::new();
+        };
+        (accepted.effects.into_iter())
+            .filter(|effect| {
                 matches!(
                     effect,
-                    Effect::Fetch(_) | Effect::ReadSelectionSoon(_) | Effect::Cancel(_)
+                    Effect::Fetch(_)
+                        | Effect::CalculatingSoon
+                        | Effect::ReadSelectionSoon(_)
+                        | Effect::Cancel(_)
                 )
             })
-        })
+            .collect()
     }
 
     fn inline_filter(&mut self, list: List) -> Option<Accepted> {
@@ -2170,7 +2199,7 @@ impl Model {
         } else {
             Deselect::Taken
         };
-        let effect = self.adopt_selection(list, files, chosen_size, sums);
+        let effects = self.adopt_selection(list, files, chosen_size, sums);
         {
             let mut accepted = Accepted {
                 touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
@@ -2183,7 +2212,7 @@ impl Model {
                     Effect::InspectAge,
                 ],
             };
-            accepted.effects.extend(effect);
+            accepted.effects.extend(effects);
 
             accepted
                 .effects
@@ -2227,25 +2256,27 @@ impl Model {
         files: Arc<[ResultItem]>,
         chosen_size: Option<SelectedSize>,
         sums: Sums,
-    ) -> Option<Effect> {
-        let shown = self.list_mut(list)?;
+    ) -> Vec<Effect> {
+        let Some(shown) = self.list_mut(list) else {
+            return Vec::new();
+        };
         if files.is_empty() {
             shown.set_selection(Selection::None);
             shown.chosen_size = None;
-            return None;
+            return Vec::new();
         }
         let folder = match (list, files.as_ref()) {
             (List::Search, [entry]) if entry.is_dir => entry.clone(),
             (List::Search, _) => {
                 shown.set_selection(Selection::Files(files));
                 shown.selection_sums = sums;
-                return None;
+                return Vec::new();
             }
             (List::Panel(_), _) => {
                 shown.set_selection(Selection::Files(files));
                 shown.selection_sums = sums;
                 shown.chosen_size = chosen_size;
-                return None;
+                return Vec::new();
             }
         };
         let generation = self.generation();
@@ -2258,13 +2289,19 @@ impl Model {
         };
         self.search.list.set_selection(Selection::Folder {
             folder,
-            contents: FolderContents::Calculating(generation),
+            contents: FolderContents::Calculating {
+                generation,
+                busy: false,
+            },
         });
         self.search.list.selection_sums = sums;
-        Some(Effect::Fetch(Fetch {
-            generation,
-            ask: Ask::FolderSize(search),
-        }))
+        vec![
+            Effect::Fetch(Fetch {
+                generation,
+                ask: Ask::FolderSize(search),
+            }),
+            Effect::CalculatingSoon,
+        ]
     }
 
     /// The request for `list`'s selected rows, if it waits for one.
@@ -3173,8 +3210,8 @@ impl Model {
                 } else {
                     rows
                 };
-                let effect = if reply.files.is_empty() {
-                    None
+                let effects = if reply.files.is_empty() {
+                    Vec::new()
                 } else {
                     self.select(list, reply.files)
                 };
@@ -3188,7 +3225,7 @@ impl Model {
                             Effect::InspectAge,
                         ],
                     };
-                    accepted.effects.extend(effect);
+                    accepted.effects.extend(effects);
 
                     accepted
                         .effects
@@ -5382,6 +5419,8 @@ pub(crate) mod tests {
             generation: fetch.generation,
             outcome: Outcome::Totals(gozler_core::proto::QueryTotals {
                 count,
+                files: Some(count),
+                folders: Some(0),
                 size: 2048,
                 volumes_incomplete: false,
                 metadata_pending: false,
@@ -5391,6 +5430,8 @@ pub(crate) mod tests {
 
     /// T7: the size of a folder the person has left names another folder,
     /// and a selection that needs no count must still end the older one.
+    /// The field is empty until the count has run `BUSY`, so a quick answer
+    /// does not flash busy text.
     #[test]
     fn t7_a_selection_changed_while_a_folder_is_counted_drops_the_older_count() {
         let mut model = model();
@@ -5408,6 +5449,8 @@ pub(crate) mod tests {
         };
 
         let first = folder_size(model.set_selection(List::Search, vec![0..1].into(), None));
+        assert_eq!(size(&model), "");
+        assert_eq!(model.show_calculating().touched, Areas::INSPECTOR);
         assert_eq!(size(&model), "Calculating…");
         let second = folder_size(model.set_selection(List::Search, vec![1..2].into(), None));
         let Ask::FolderSize(search) = &second.ask else {
@@ -5421,7 +5464,7 @@ pub(crate) mod tests {
                 effects: vec![]
             }
         );
-        assert_eq!(size(&model), "Calculating…");
+        assert_eq!(size(&model), "");
         assert_eq!(
             model.accept(totals(&second, 7)),
             Accepted {
@@ -5429,7 +5472,7 @@ pub(crate) mod tests {
                 effects: vec![Effect::InspectAge]
             }
         );
-        assert_eq!(size(&model), "2 KB (2,048 bytes) in 7 items");
+        assert_eq!(size(&model), "2 KB (2,048 bytes) in 7 files");
 
         let _third = folder_size(model.set_selection(List::Search, vec![0..1].into(), None));
         assert_eq!(

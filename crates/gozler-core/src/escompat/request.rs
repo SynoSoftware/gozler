@@ -34,6 +34,9 @@ pub fn build_search(
     if plan.columns.contains(&EsColumn::Attributes) {
         wants.push(Want::Attributes);
     }
+    if plan.columns.contains(&EsColumn::Files) || plan.columns.contains(&EsColumn::Folders) {
+        wants.push(Want::Counts);
+    }
     if plan.file_id && json {
         wants.push(Want::Identity);
     }

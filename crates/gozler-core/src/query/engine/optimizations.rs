@@ -381,11 +381,12 @@ fn assert_each_name_held_once(index: &VolumeIndex) -> usize {
 }
 
 /// The entry columns ([`crate::index::store::EntryTable`]) cost 8 bytes of
-/// file ID and 55 bytes of the other columns an entry. Each byte more costs
-/// 10 MB on a volume of 10 million files.
+/// file ID and 63 bytes of the other columns an entry, 8 of them a folder's
+/// counts of files and folders. Each byte more costs 10 MB on a volume of
+/// 10 million files.
 #[test]
 #[ignore = "optimization check: build.ps1 -Timing optimizations"]
-fn an_entry_costs_63_bytes_of_columns() {
+fn an_entry_costs_71_bytes_of_columns() {
     let index = &VOLUME.index;
     let bytes = index.memory().entries.used;
     let entries = index.len() as u64;
@@ -393,7 +394,7 @@ fn an_entry_costs_63_bytes_of_columns() {
         "entry columns: {bytes} bytes for {entries} entries, {:.2} an entry",
         bytes as f64 / entries as f64
     );
-    assert!(bytes <= 63 * entries);
+    assert!(bytes <= 71 * entries);
 }
 
 /// Each distinct name is interned once, its raw form shares its folded bytes
@@ -430,7 +431,7 @@ fn the_file_id_map_costs_4_bytes_a_record() {
 /// Everything building the index kept, its columns, names, tables, maps and
 /// the allocator's overhead, costs at most this many private bytes an entry,
 /// so this check also counts memory that [`VolumeIndex::memory`] misses.
-const PRIVATE_BYTES_PER_ENTRY: u64 = 92;
+const PRIVATE_BYTES_PER_ENTRY: u64 = 100;
 
 #[test]
 #[ignore = "optimization check: build.ps1 -Timing optimizations"]
@@ -523,7 +524,7 @@ fn a_row_costs_16_bytes() {
     );
     let rows = matches
         .order()
-        .read_rows(index, &seen)
+        .read_rows(index)
         .expect("nothing changes the index");
     eprintln!("rows: {} bytes for {} entries", rows.bytes(), index.len());
     assert!(rows.bytes() <= 16 * index.len() as u64);
@@ -826,21 +827,12 @@ fn a_stopped_search_tests_no_more_entries() {
 #[ignore = "optimization check: build.ps1 -Timing optimizations"]
 fn matches_sort_by_packed_number_keys() {
     let index = &VOLUME.index;
-    let seen = SeenBy::Everything;
     let mut records = every_record(index);
     // Below the count at which `Matches::order` sorts in parallel, so both
     // sorts run on this thread.
     records.truncate(90_000);
     let by_rank = |records| {
-        let matches = key_found(
-            index,
-            MOUNT,
-            records,
-            None,
-            None,
-            SortSpec::default(),
-            &seen,
-        );
+        let matches = key_found(index, MOUNT, records, None, None, SortSpec::default());
         matches.order().records
     };
     let by_name = |mut records: Vec<SortRecord>| {
@@ -867,10 +859,9 @@ fn matches_sort_by_packed_number_keys() {
 #[ignore = "optimization check: build.ps1 -Timing optimizations"]
 fn a_page_sorts_only_its_rows() {
     let index = &VOLUME.index;
-    let seen = SeenBy::Everything;
     let records = every_record(index);
     let by_size = SortSpec::default_for(SortKey::Size);
-    let keyed = || key_found(index, MOUNT, records.clone(), None, None, by_size, &seen);
+    let keyed = || key_found(index, MOUNT, records.clone(), None, None, by_size);
     assert_saves(
         "a page of 100 rows by size",
         || {
@@ -895,10 +886,9 @@ fn a_page_sorts_only_its_rows() {
 #[ignore = "optimization check: build.ps1 -Timing optimizations"]
 fn a_long_page_sorts_in_parallel() {
     let index = &VOLUME.index;
-    let seen = SeenBy::Everything;
     let records = every_record(index);
     let by_size = SortSpec::default_for(SortKey::Size);
-    let keyed = || key_found(index, MOUNT, records.clone(), None, None, by_size, &seen);
+    let keyed = || key_found(index, MOUNT, records.clone(), None, None, by_size);
     assert_saves(
         "a page of all but 5 rows by size, on the calling thread",
         || {

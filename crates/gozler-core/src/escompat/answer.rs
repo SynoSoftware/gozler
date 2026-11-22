@@ -218,6 +218,8 @@ mod tests {
         let mut count = answer(0, 0, false);
         count.add_totals(&QueryTotals {
             count: 3,
+            files: None,
+            folders: None,
             size: 0,
             volumes_incomplete: false,
             metadata_pending: false,

@@ -30,7 +30,7 @@ use crate::attributes::PackedAttributes;
 use crate::fold::fold_accents;
 use crate::index::store::{NameId, NamePair};
 use crate::index::{EntryView, SeenBy, VolumeIndex};
-use crate::links::Links;
+use crate::links::{Links, Reached};
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
 use memchr::memmem;
 use regex::bytes::{Regex, RegexBuilder};
@@ -61,7 +61,7 @@ pub struct MatchSums {
     /// `folder_bytes` is only a lower bound: the size pass stopped on a
     /// volume searched, so a folder's size counts only the files it read
     /// ([`VolumeIndex::folder_sizes_at_least`]), or a matching folder's size
-    /// is not known to the reader, as for a filtered user.
+    /// is unknown.
     pub folder_bytes_at_least: bool,
 }
 
@@ -77,10 +77,9 @@ impl MatchSums {
     }
 }
 
-/// The [`MatchSums`] of `records`, as `seen_by` reads them. A folder inside
-/// another matching folder adds to the count only, because its size is in
-/// that folder's.
-fn match_sums(index: &VolumeIndex, records: &[SortRecord], seen_by: &SeenBy) -> MatchSums {
+/// The [`MatchSums`] of `records`. A folder inside another matching folder
+/// adds to the count only, because its size is in that folder's.
+fn match_sums(index: &VolumeIndex, records: &[SortRecord]) -> MatchSums {
     let folders: FxHashSet<EntryIdx> = records
         .iter()
         .map(|r| r.idx())
@@ -112,17 +111,17 @@ fn match_sums(index: &VolumeIndex, records: &[SortRecord], seen_by: &SeenBy) -> 
         if entry.is_dir() {
             sums.folders += 1;
             if !held(r.idx()) {
-                // A filtered user reads no folder's size. Otherwise only an
-                // index whose size pass has not ended lacks one, and the
-                // daemon searches none that holds a folder.
-                match entry.size(seen_by) {
+                // Only an index whose size pass has not ended lacks a
+                // folder's size, and the daemon searches none that holds a
+                // folder.
+                match entry.size() {
                     Some(size) => sums.folder_bytes = sums.folder_bytes.saturating_add(size),
                     None => sums.folder_bytes_at_least = true,
                 }
             }
         } else {
             sums.files += 1;
-            match entry.size(seen_by) {
+            match entry.size() {
                 Some(size) => sums.file_bytes = sums.file_bytes.saturating_add(size),
                 None => sums.files_without_size += 1,
             }
@@ -131,21 +130,29 @@ fn match_sums(index: &VolumeIndex, records: &[SortRecord], seen_by: &SeenBy) -> 
     sums
 }
 
-/// The number of matches and the summed size of the matching files.
+/// How many matches are files and folders, and the summed size of the
+/// matching files.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Totals {
-    pub count: u64,
+    pub files: u64,
+    pub folders: u64,
     /// Bytes. A file whose size is unknown adds nothing, and a folder adds
     /// nothing, because its size is the sum of its files.
     pub size: u64,
 }
 
 impl Totals {
+    /// Every match, files and folders.
+    pub fn count(&self) -> u64 {
+        self.files + self.folders
+    }
+
     /// Adds `other`, failing rather than wrapping when the size passes
     /// `u64::MAX`, which only a corrupt size in the index can make it do.
     pub fn add(&mut self, other: Totals) -> Result<(), SizeOverflow> {
         self.size = self.size.checked_add(other.size).ok_or(SizeOverflow)?;
-        self.count += other.count;
+        self.files += other.files;
+        self.folders += other.folders;
         Ok(())
     }
 }
@@ -222,10 +229,23 @@ pub struct CompiledQuery {
     /// the path, and the literal of `*\docs\*` is `\docs\`, which no name
     /// contains.
     prefilter: Vec<Vec<u8>>,
-    /// The scope the query was compiled for ([`Self::with_links`]) and the
-    /// folder a search of it reads, or `None` to read every volume.
-    scope: Option<(String, Option<String>)>,
+    /// The request's query has no clause, so it matches every entry; the
+    /// clause [`Self::with_links`] adds for a scope does not count.
+    every_entry: bool,
+    /// The scope the query was compiled for ([`Self::with_links`]).
+    scope: Option<LinkedScope>,
     link_targets: Vec<LinkTarget>,
+}
+
+/// A scope as [`CompiledQuery::with_links`] resolved it.
+struct LinkedScope {
+    /// The scope as the request gave it.
+    given: String,
+    /// The folders a search below it reaches ([`Links::reached_from`]),
+    /// starting from the scope with each link on its path followed.
+    reached: Vec<Reached>,
+    /// The folder a search of it reads, or `None` to read every volume.
+    reads: Option<String>,
 }
 
 /// Terms of which at least one must pass.
@@ -502,6 +522,7 @@ impl CompiledQuery {
             components,
             component_literal,
             prefilter,
+            every_entry: parsed.clauses.is_empty(),
             scope: None,
             link_targets: Vec::new(),
         })
@@ -543,7 +564,7 @@ impl CompiledQuery {
                 })
         });
         let reads = if parent_of_scope {
-            real
+            real.clone()
         } else {
             links.search_scope(scope)
         };
@@ -562,7 +583,11 @@ impl CompiledQuery {
             });
             query.names_decide_path = false;
         }
-        query.scope = scope.map(|scope| (scope.to_owned(), reads));
+        query.scope = scope.zip(real).map(|(given, real)| LinkedScope {
+            given: given.to_owned(),
+            reached: links.reached_from(&real),
+            reads,
+        });
         if links.is_empty() || !query.clauses.iter().flat_map(|c| &c.terms)
             .any(|term| matches!(&term.check, Check::Text(Target::Path, matcher) if matcher.reads_links())) {
             return Ok(query);
@@ -588,8 +613,23 @@ impl CompiledQuery {
     /// [`Self::with_links`] chose, and any other scope as it is.
     pub(super) fn search_scope(&self, scope: Option<&str>) -> Option<String> {
         match (&self.scope, scope) {
-            (Some((compiled, reads)), Some(scope)) if compiled == scope => reads.clone(),
+            (Some(compiled), Some(scope)) if compiled.given == scope => compiled.reads.clone(),
             (_, scope) => scope.map(str::to_owned),
+        }
+    }
+
+    /// The folders whose stored contents answer a totals search below
+    /// `scope` ([`VolumeIndex::contents`]), when the query matches every
+    /// entry: for the scope the query was compiled for, the folders a search
+    /// below it reaches through links, and any other scope as it is.
+    pub(super) fn whole_folders(&self, scope: Option<&str>) -> Option<Vec<Reached>> {
+        let scope = scope.filter(|_| self.every_entry)?;
+        match &self.scope {
+            Some(compiled) if compiled.given == scope => Some(compiled.reached.clone()),
+            _ => Some(vec![Reached {
+                folder: scope.to_owned(),
+                linked: false,
+            }]),
         }
     }
 
@@ -986,15 +1026,14 @@ impl Check {
             // A folder's size is the sum of its files, and unknown until the
             // size and date pass ends.
             Check::Size(range) if entry.is_dir() && subject.folder_sizes_at_least => {
-                return holds_from(*range, entry.size(subject.seen_by)?);
+                return holds_from(*range, entry.size()?);
             }
-            Check::Size(range) => range.contains(entry.size(subject.seen_by)?),
+            Check::Size(range) => range.contains(entry.size()?),
             Check::DateModified(range) => range.contains(entry.mtime()?),
             Check::DateCreated(range) => range.contains(entry.created()?),
             Check::Unknown(field) => match field {
                 Metadata::Size => {
-                    entry.size(subject.seen_by).is_none()
-                        || entry.is_dir() && subject.folder_sizes_at_least
+                    entry.size().is_none() || entry.is_dir() && subject.folder_sizes_at_least
                 }
                 Metadata::DateModified => entry.mtime().is_none(),
                 Metadata::DateCreated => entry.created().is_none(),
@@ -1672,17 +1711,17 @@ pub(crate) fn find_matches(
         instance: index.instance(),
         reuse_mark: index.reuse_mark(),
         scope: scope.map(|s| (s, index.entry(s).frn())),
-        sums: sums.then(|| match_sums(index, &records, seen_by)),
+        sums: sums.then(|| match_sums(index, &records)),
         mount_prefix: mount_prefix.to_string(),
     };
     let folders = (folders, folder_names);
-    key_matches(index, records, folders, sort, limit, origin, seen_by)
+    key_matches(index, records, folders, sort, limit, origin)
 }
 
 /// Keys `records`, matches an earlier search found on `index` below the
 /// scope folder `scope`, under `sort`, as [`find_matches`] keys its own but
 /// with no scan: how a result snapshot is sorted again. `sums` are the
-/// search's, and the keys hold what `seen_by` may read.
+/// search's.
 pub(crate) fn key_found(
     index: &VolumeIndex,
     mount_prefix: &str,
@@ -1690,7 +1729,6 @@ pub(crate) fn key_found(
     scope: Option<(EntryIdx, Frn)>,
     sums: Option<MatchSums>,
     sort: SortSpec,
-    seen_by: &SeenBy,
 ) -> Matches {
     let mut folder_names = ResultNames::default();
     let folders = FolderCopy::new(index, mount_prefix, None, &mut folder_names);
@@ -1702,7 +1740,7 @@ pub(crate) fn key_found(
         mount_prefix: mount_prefix.to_string(),
     };
     let folders = (folders, folder_names);
-    key_matches(index, records, folders, sort, None, origin, seen_by)
+    key_matches(index, records, folders, sort, None, origin)
 }
 
 /// Keys `records` under `sort` for [`Matches::order`], whose first `limit`
@@ -1714,14 +1752,13 @@ fn key_matches(
     sort: SortSpec,
     limit: Option<u32>,
     origin: Origin,
-    seen_by: &SeenBy,
 ) -> Matches {
     let end = match limit {
         Some(n) => (n as usize).min(records.len()),
         None => records.len(),
     };
     let path_folders = (end > 0)
-        .then(|| key_records(index, &mut records, folders, sort, seen_by))
+        .then(|| key_records(index, &mut records, folders, sort))
         .flatten();
     Matches {
         records,
@@ -1846,21 +1883,16 @@ impl Matches {
 impl OrderedMatches {
     /// Orders the runs of equal keys and makes the rows, reading each one's
     /// file ID from `index`, the index of [`find_matches`], held under its
-    /// read lock again, with the `seen_by` the matches were keyed with. A
-    /// match whose entry was removed since, and one whose slot another entry
-    /// took over since, is left out and counted out of the total, so the
-    /// rows can be fewer than the limit.
+    /// read lock again. A match whose entry was removed since, and one
+    /// whose slot another entry took over since, is left out and counted out
+    /// of the total, so the rows can be fewer than the limit.
     ///
     /// # Errors
     ///
     /// [`IndexChanged`] when `index` is not the index the matches were found
     /// in, or its entries got new indexes since, or more of its slots got new
     /// entries since than it keeps a note of.
-    pub(crate) fn read_rows(
-        mut self,
-        index: &VolumeIndex,
-        seen_by: &SeenBy,
-    ) -> Result<VolumeRows, IndexChanged> {
+    pub(crate) fn read_rows(mut self, index: &VolumeIndex) -> Result<VolumeRows, IndexChanged> {
         let origin = self.origin;
         if index.instance() != origin.instance {
             return Err(IndexChanged);
@@ -1876,7 +1908,7 @@ impl OrderedMatches {
         let removed = self.records.iter().filter(|r| !kept(r)).count();
         self.records.truncate(self.ties_end);
         self.records.retain(kept);
-        order_ties(index, seen_by, self.sort, &mut self.records);
+        order_ties(index, self.sort, &mut self.records);
         self.records.truncate(self.end);
         // Otherwise a limited search's few rows would keep the room of every
         // match. Shrinking copies the rows, so it runs only where it frees
@@ -1910,17 +1942,20 @@ pub(super) fn run_totals(
     stop: &AtomicBool,
 ) -> Result<Totals, SizeOverflow> {
     let records = scan(index, mount_prefix, query, scope, seen_by, stop).records;
-    let mut totals = Totals {
-        count: records.len() as u64,
-        size: 0,
-    };
-    for size in records
-        .iter()
-        .map(|r| index.entry(r.idx()))
-        .filter(|e| !e.is_dir())
-        .filter_map(|e| e.size(seen_by))
-    {
-        totals.add(Totals { count: 0, size })?;
+    let mut totals = Totals::default();
+    for entry in records.iter().map(|r| index.entry(r.idx())) {
+        totals.add(if entry.is_dir() {
+            Totals {
+                folders: 1,
+                ..Totals::default()
+            }
+        } else {
+            Totals {
+                files: 1,
+                size: entry.size().unwrap_or(0),
+                ..Totals::default()
+            }
+        })?;
     }
     Ok(totals)
 }
@@ -2690,7 +2725,6 @@ fn key_records(
     records: &mut [SortRecord],
     (mut folders, mut names): (FolderCopy, ResultNames),
     sort: SortSpec,
-    seen_by: &SeenBy,
 ) -> Option<ResultNames> {
     let extensions = match sort.key {
         SortKey::Extension => extension_ranks(index, records),
@@ -2710,7 +2744,7 @@ fn key_records(
                 *record = SortRecord::keyed(place, name_key, idx);
                 continue;
             }
-            SortKey::Size => KeyValue::Size(entry.size(seen_by)),
+            SortKey::Size => KeyValue::Size(entry.size()),
             SortKey::DateModified => KeyValue::DateModified(entry.mtime()),
             SortKey::DateCreated => KeyValue::DateCreated(entry.created()),
             SortKey::Extension => KeyValue::Extension(extensions[&folded_extension(index, idx)]),
@@ -2745,14 +2779,13 @@ fn folded_extension(index: &VolumeIndex, idx: EntryIdx) -> Option<&[u8]> {
 }
 
 /// Orders each run of records with equal keys in `records`, which are sorted
-/// by their keys, with [`compare`], which reads the names, the file IDs and
-/// the parents from the index, and the sizes `seen_by` may read.
-fn order_ties(index: &VolumeIndex, seen_by: &SeenBy, sort: SortSpec, records: &mut [SortRecord]) {
+/// by their keys, with [`compare`], which reads the names, the file IDs,
+/// the parents and the sizes from the index.
+fn order_ties(index: &VolumeIndex, sort: SortSpec, records: &mut [SortRecord]) {
     use rayon::iter::ParallelIterator;
     use rayon::slice::ParallelSliceMut;
     let ranked = |record| Ranked {
         index,
-        seen_by,
         sort,
         record,
     };
@@ -2769,7 +2802,6 @@ fn order_ties(index: &VolumeIndex, seen_by: &SeenBy, sort: SortSpec, records: &m
 /// tie-break key is loaded only when a comparison reaches it.
 struct Ranked<'a> {
     index: &'a VolumeIndex,
-    seen_by: &'a SeenBy,
     sort: SortSpec,
     record: SortRecord,
 }
@@ -2791,7 +2823,7 @@ impl OrderFields for Ranked<'_> {
         self.index.folded_name(self.record.idx())
     }
     fn size(&self) -> Option<u64> {
-        self.entry().size(self.seen_by)
+        self.entry().size()
     }
     fn mtime(&self) -> Option<i64> {
         self.entry().mtime()
@@ -3358,7 +3390,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert_eq!((totals.count, totals.size), (3, 4096 + 200));
+        assert_eq!((totals.count(), totals.size), (3, 4096 + 200));
     }
 
     /// After a size pass that stopped, a folder's size counts only the files
@@ -4475,7 +4507,7 @@ mod tests {
                 let page = run_query(&idx, r"C:\", &query, scoped.then_some(r"C:\repo"), SortSpec::default(), None);
                 let scope = scoped.then(|| resolve_scope(&idx, b"repo", false).expect("repo exists"));
                 let totals = run_totals(&idx, r"C:\", &query, scope, &SeenBy::Everything, &AtomicBool::new(false)).expect("no size is known");
-                prop_assert_eq!(totals.count, page.total);
+                prop_assert_eq!(totals.count(), page.total);
             }
 
             /// A scoped search finds the same entries however far its walk
@@ -4864,17 +4896,11 @@ mod tests {
         };
         let kept = matches(&idx);
         idx.optimize_storage();
-        assert!(
-            kept.read_rows(&idx, &SeenBy::Everything).is_ok(),
-            "no entry moved"
-        );
+        assert!(kept.read_rows(&idx).is_ok(), "no entry moved");
         let ordered = matches(&idx);
         idx.apply_batch(&[delete(frn(103))]);
         idx.optimize_storage();
-        assert_eq!(
-            ordered.read_rows(&idx, &SeenBy::Everything).err(),
-            Some(IndexChanged)
-        );
+        assert_eq!(ordered.read_rows(&idx).err(), Some(IndexChanged));
     }
 
     /// An entry removed between the two locks is left out, and out of the
@@ -4900,7 +4926,7 @@ mod tests {
         .order();
         idx.apply_batch(&[delete(frn(103))]);
         let answer = ordered
-            .read_rows(&idx, &SeenBy::Everything)
+            .read_rows(&idx)
             .expect("the index kept its entry indexes");
         let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(paths, ["photo.JPG", "docs\\sub\\Report.PDF"]);
@@ -4931,9 +4957,7 @@ mod tests {
         idx.apply_batch(&[delete(frn(103))]);
         idx.apply_batch(&[enum_rec(frn(300), NTFS_ROOT_FRN, "new.txt", false)]);
         assert_eq!(idx.head_of(frn(300)), notes, "the new file took the slot");
-        let answer = ordered
-            .read_rows(&idx, &SeenBy::Everything)
-            .expect("one reuse is kept");
+        let answer = ordered.read_rows(&idx).expect("one reuse is kept");
         let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(
             paths,
@@ -4967,10 +4991,7 @@ mod tests {
             idx.apply_batch(&[enum_rec(next, NTFS_ROOT_FRN, "churn.tmp", false)]);
             last = next;
         }
-        assert_eq!(
-            ordered.read_rows(&idx, &SeenBy::Everything).err(),
-            Some(IndexChanged)
-        );
+        assert_eq!(ordered.read_rows(&idx).err(), Some(IndexChanged));
     }
 
     /// `docs` with `a.txt`, `b.txt`, `c.txt` and `sub\d.txt`.
@@ -5010,7 +5031,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .order()
-        .read_rows(&idx, &SeenBy::Everything)
+        .read_rows(&idx)
         .expect("nothing changed");
         idx.apply_batch(&[
             delete(frn(101)),
@@ -5047,7 +5068,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .order()
-        .read_rows(&idx, &SeenBy::Everything)
+        .read_rows(&idx)
         .expect("nothing changed");
         idx.apply_batch(&[rename(frn(102), NTFS_ROOT_FRN, "b.txt", false)]);
         let (paths, total) = read_all(answer, &mut idx);
@@ -5077,7 +5098,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .order()
-        .read_rows(&idx, &SeenBy::Everything)
+        .read_rows(&idx)
         .expect("nothing changed");
         idx.apply_batch(&[rename(frn(104), NTFS_ROOT_FRN, "holiday.JPG", false)]);
         let (paths, total) = read_all(answer, &mut idx);
@@ -5112,7 +5133,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .order()
-        .read_rows(&idx, &SeenBy::Everything)
+        .read_rows(&idx)
         .expect("nothing changed");
         let a = idx.head_of(frn(100));
         let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 0, None);
@@ -5162,7 +5183,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .order()
-        .read_rows(&idx, &SeenBy::Everything)
+        .read_rows(&idx)
         .expect("nothing changed");
         idx.apply_batch(&[rename(frn(100), frn(999), "sub", true)]);
         let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 0, None);
@@ -5193,7 +5214,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .order()
-        .read_rows(&idx, &SeenBy::Everything)
+        .read_rows(&idx)
         .expect("nothing changed");
         idx.apply_batch(&[delete(frn(103))]);
         idx.optimize_storage();
@@ -5230,7 +5251,7 @@ mod tests {
                             &AtomicBool::new(false),
                         )
                         .order()
-                        .read_rows(idx, &SeenBy::Everything)
+                        .read_rows(idx)
                         .expect("nothing changed");
                         (answer, SeenBy::Everything)
                     })
@@ -5283,7 +5304,7 @@ mod tests {
                         &AtomicBool::new(false),
                     )
                     .order()
-                    .read_rows(idx, &SeenBy::Everything)
+                    .read_rows(idx)
                     .expect("nothing changed");
                     (answer, SeenBy::Everything)
                 })
@@ -5317,7 +5338,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .order()
-        .read_rows(&idx, &SeenBy::Everything)
+        .read_rows(&idx)
         .expect("nothing changed");
         let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 3, None);
         let mut pages: Vec<Vec<String>> = Vec::new();
@@ -5400,8 +5421,7 @@ mod tests {
             let parsed = compiled("");
             for sort in all_sorts() {
                 let ordered = find_matches(&idx, r"C:\", &parsed, None, sort, None, false, &SeenBy::Everything, &AtomicBool::new(false)).order();
-                let everything = SeenBy::Everything;
-                let ranked = |record| Ranked { index: &idx, seen_by: &everything, sort, record };
+                let ranked = |record| Ranked { index: &idx, sort, record };
                 for &a in &ordered.records {
                     for &b in &ordered.records {
                         if a.keys() < b.keys() {

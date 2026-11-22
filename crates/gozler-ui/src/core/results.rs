@@ -927,6 +927,7 @@ pub(crate) mod tests {
                     created_ft: None,
                     is_dir: false,
                     attributes: None,
+                    counts: None,
                     identity: None,
                 })
                 .collect(),

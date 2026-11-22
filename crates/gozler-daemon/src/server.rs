@@ -795,7 +795,8 @@ fn stream_rows(
     }
 }
 
-/// The reply to a [`Returns::Totals`] search, of the matches `viewer` sees.
+/// The reply to a [`Returns::Totals`] search, of the matches `viewer` sees,
+/// or of every entry below a folder for every viewer ([`search_totals`]).
 fn totals(
     volumes: Vec<Arc<VolumeState>>,
     query: &CompiledQuery,

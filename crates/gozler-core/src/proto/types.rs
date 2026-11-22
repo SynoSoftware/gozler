@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::attributes::Attributes;
 use crate::include::IndexSettings;
+use crate::index::Counts;
 use crate::links::Links;
 use crate::query::{MatchSums, ParsedQuery, RowsSpec, SearchTotals};
 use crate::scope::VolumeMounts;
@@ -218,6 +219,8 @@ pub enum Want {
     Identity,
     /// [`QueryResults::sums`].
     Sums,
+    /// [`ResultItem::counts`].
+    Counts,
 }
 
 /// A server→client message.
@@ -315,6 +318,13 @@ impl QueryResults {
 pub struct QueryTotals {
     /// Every match, files and folders.
     pub count: u64,
+    /// The matches that are files; `None` from a service that sends only
+    /// `count`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub files: Option<u64>,
+    /// The matches that are folders; `None` as for `files`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub folders: Option<u64>,
     /// The summed size of the matching files in bytes. A folder adds nothing,
     /// because its size is the sum of its files, and a file whose size is
     /// unknown adds nothing.
@@ -328,7 +338,9 @@ pub struct QueryTotals {
 impl From<SearchTotals> for QueryTotals {
     fn from(found: SearchTotals) -> Self {
         QueryTotals {
-            count: found.totals.count,
+            count: found.totals.count(),
+            files: Some(found.totals.files),
+            folders: Some(found.totals.folders),
             size: found.totals.size,
             volumes_incomplete: found.volumes_incomplete,
             metadata_pending: found.metadata_pending,
@@ -363,6 +375,10 @@ pub struct ResultItem {
     /// The attributes, as `FILE_ATTRIBUTE_*` bits; `None` = not requested.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub attributes: Option<Attributes>,
+    /// For a folder, how many files and folders are below it, as `files`
+    /// and `folders`; `None` = a file, unknown or not requested.
+    #[serde(flatten)]
+    pub counts: Option<Counts>,
     /// `None` = not requested, or a gone row. Boxed, so the items of a
     /// search that does not ask for it stay small.
     #[serde(flatten)]
@@ -390,6 +406,7 @@ impl ResultItem {
             created_ft: None,
             is_dir: false,
             attributes: None,
+            counts: None,
             identity: None,
         }
     }
@@ -441,10 +458,10 @@ pub struct DaemonStatus {
 /// client's token for each request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CallerSees {
-    /// Every entry, with folder sizes: the client runs as SYSTEM or holds an
-    /// account on the list of users and groups who see every file.
+    /// Every entry: the client runs as SYSTEM or holds an account on the
+    /// list of users and groups who see every file.
     EveryFile,
-    /// The entries in folders the client may list, and no folder sizes.
+    /// The entries in folders the client may list.
     Filtered,
     /// Nothing: gozlerd could not tell who the client is, so it refuses the
     /// client's searches.
@@ -637,6 +654,7 @@ mod tests {
                 created_ft: None,
                 is_dir: false,
                 attributes: None,
+                counts: None,
                 identity: None,
             },
             ResultItem {
@@ -647,6 +665,7 @@ mod tests {
                 created_ft: None,
                 is_dir: true,
                 attributes: None,
+                counts: None,
                 identity: None,
             },
         ]
@@ -793,6 +812,7 @@ mod tests {
             created_ft: None,
             is_dir: false,
             attributes: None,
+            counts: None,
             identity: None,
         };
         let json = serde_json::to_string(&item).expect("serialize");
@@ -826,6 +846,7 @@ mod tests {
             created_ft: None,
             is_dir: false,
             attributes: None,
+            counts: None,
             identity: None,
         };
         assert!(item.path.contains('\u{FFFD}'));

@@ -67,7 +67,7 @@ _Avoid_: flags, attribute bits (in prose)
 A file's size or date that gozler did not read, because the size and date pass
 failed or stopped, or could not read that file. A folder's size is unknown
 until its volume's size and date pass completes, and stays unknown when the
-pass failed or stopped. For a filtered user, every folder's size is unknown.
+pass failed or stopped.
 
 **Folder size**:
 The sum of the known sizes of every file below a folder, each hard link
@@ -90,8 +90,8 @@ caller would see as a filtered user.
 _Avoid_: whitelist, exception list, admin list
 
 **Filtered user**:
-A user who does not see every file: they see only visible entries, and no
-folder sizes.
+A user who does not see every file: they see only visible entries. A folder's
+size still counts every file below it, as for every user.
 _Avoid_: restricted user, limited user
 
 ## Command line

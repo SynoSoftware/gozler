@@ -2,6 +2,7 @@ use super::results::Shown;
 use super::search_list::SearchList;
 use super::selection::{FolderContents, Selection, Sums};
 use gozler_core::attributes::Attributes;
+use gozler_core::proto::QueryTotals;
 
 #[derive(Default)]
 pub(super) struct Inspector {
@@ -35,12 +36,8 @@ enum Facts {
 #[derive(PartialEq)]
 enum Size {
     File(Option<u64>),
-    Calculating,
-    Folder {
-        count: u64,
-        bytes: u64,
-        incomplete: bool,
-    },
+    Calculating { busy: bool },
+    Folder(QueryTotals),
 }
 
 impl Inspector {
@@ -87,12 +84,8 @@ impl Facts {
         };
         let size = match contents {
             None => Size::File(entry.size),
-            Some(FolderContents::Calculating(_)) => Size::Calculating,
-            Some(FolderContents::Counted(totals)) => Size::Folder {
-                count: totals.count,
-                bytes: totals.size,
-                incomplete: totals.volumes_incomplete || totals.metadata_pending,
-            },
+            Some(FolderContents::Calculating { busy, .. }) => Size::Calculating { busy: *busy },
+            Some(FolderContents::Counted(totals)) => Size::Folder(totals.clone()),
         };
         Self::Entry {
             path: entry.path.clone(),

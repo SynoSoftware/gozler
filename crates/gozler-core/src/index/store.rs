@@ -18,6 +18,7 @@ use crate::attributes::PackedAttributes;
 use crate::types::{EntryIdx, Frn, NIL};
 use core::num::NonZeroU32;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 
 /// Interned-name handle: an index into the name store's tables.
 pub(crate) type NameId = u32;
@@ -794,6 +795,15 @@ fn narrow(frn: Frn) -> u64 {
     u64::try_from(frn.0).expect("widen_for widens the column before it stores a wide ID")
 }
 
+/// How many files and how many folders a folder holds below it, each name
+/// of a hard-linked file counted. A volume holds fewer entries than
+/// [`EntryIdx`] numbers, so each fits 32 bits.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Counts {
+    pub files: u32,
+    pub folders: u32,
+}
+
 /// Struct-of-arrays entry storage. Every column is indexed by [`EntryIdx`];
 /// one entry exists per link name, so a hard-linked file has several entries
 /// sharing an [`Frn`], chained through `next_link`. Entries sharing an
@@ -806,6 +816,9 @@ pub(crate) struct EntryTable {
     name_id: Vec<NameId>,
     flags: Vec<EntryFlags>,
     size: Vec<u64>,
+    /// How many files and folders a folder holds below it, kept beside its
+    /// size sum (see `VolumeIndex::compute_folder_sizes`); none for a file.
+    below: Vec<Counts>,
     mtime: Vec<i64>,
     /// Each entry's date created, [`MTIME_UNKNOWN`] while unknown, held
     /// only while Dates created is on, because it costs 8 bytes an entry.
@@ -887,6 +900,7 @@ impl EntryTable {
             self.name_id[i] = name_id;
             self.flags[i] = flags;
             self.size[i] = size;
+            self.below[i] = Counts::default();
             self.mtime[i] = mtime;
             if let Some(created) = &mut self.created {
                 created[i] = MTIME_UNKNOWN;
@@ -907,6 +921,7 @@ impl EntryTable {
             push_eighth(&mut self.name_id, name_id);
             push_eighth(&mut self.flags, flags);
             push_eighth(&mut self.size, size);
+            push_eighth(&mut self.below, Counts::default());
             push_eighth(&mut self.mtime, mtime);
             if let Some(created) = &mut self.created {
                 push_eighth(created, MTIME_UNKNOWN);
@@ -945,6 +960,7 @@ impl EntryTable {
         self.first_child[i] = NIL;
         self.next_child[i] = NIL;
         self.prev_child[i] = NIL;
+        self.below[i] = Counts::default();
         self.descriptor[i] = None;
         self.free.push(idx);
         self.live -= 1;
@@ -1002,6 +1018,10 @@ impl EntryTable {
     #[inline]
     pub(crate) fn size(&self, idx: EntryIdx) -> u64 {
         self.size[idx as usize]
+    }
+    #[inline]
+    pub(crate) fn below(&self, idx: EntryIdx) -> Counts {
+        self.below[idx as usize]
     }
     #[inline]
     pub(crate) fn mtime(&self, idx: EntryIdx) -> i64 {
@@ -1062,6 +1082,10 @@ impl EntryTable {
     #[inline]
     pub(crate) fn set_size(&mut self, idx: EntryIdx, size: u64) {
         self.size[idx as usize] = size;
+    }
+    #[inline]
+    pub(crate) fn set_below(&mut self, idx: EntryIdx, below: Counts) {
+        self.below[idx as usize] = below;
     }
     #[inline]
     pub(crate) fn set_mtime(&mut self, idx: EntryIdx, mtime: i64) {
@@ -1151,6 +1175,7 @@ impl EntryTable {
         compact_column(&mut self.name_id, &remap, live, |id| id);
         compact_column(&mut self.flags, &remap, live, |flags| flags);
         compact_column(&mut self.size, &remap, live, |size| size);
+        compact_column(&mut self.below, &remap, live, |below| below);
         compact_column(&mut self.mtime, &remap, live, |mtime| mtime);
         if let Some(created) = &mut self.created {
             compact_column(created, &remap, live, |created| created);
@@ -1180,6 +1205,7 @@ impl EntryTable {
             + ComponentBytes::of_vec(&self.name_id)
             + ComponentBytes::of_vec(&self.flags)
             + ComponentBytes::of_vec(&self.size)
+            + ComponentBytes::of_vec(&self.below)
             + ComponentBytes::of_vec(&self.mtime)
             + self
                 .created
@@ -1205,6 +1231,7 @@ impl EntryTable {
         shrink_vec(&mut self.name_id);
         shrink_vec(&mut self.flags);
         shrink_vec(&mut self.size);
+        shrink_vec(&mut self.below);
         shrink_vec(&mut self.mtime);
         if let Some(created) = &mut self.created {
             shrink_vec(created);

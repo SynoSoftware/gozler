@@ -107,8 +107,13 @@ pub(crate) enum Selection {
 /// What the inspector knows of the contents of the one selected folder.
 #[derive(Debug, PartialEq)]
 pub(crate) enum FolderContents {
-    /// Its one request is in flight as this generation.
-    Calculating(Generation),
+    /// Its one request is in flight as this generation. `busy` once it has
+    /// run [`crate::core::work::BUSY`] without an answer, so the inspector
+    /// says so.
+    Calculating {
+        generation: Generation,
+        busy: bool,
+    },
     Counted(QueryTotals),
 }
 
@@ -140,7 +145,7 @@ impl Selection {
         match self {
             Selection::Reading { asked, .. } => *asked,
             Selection::Folder {
-                contents: FolderContents::Calculating(generation),
+                contents: FolderContents::Calculating { generation, .. },
                 ..
             } => Some(*generation),
             Selection::None

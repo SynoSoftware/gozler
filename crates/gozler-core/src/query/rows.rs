@@ -1,11 +1,13 @@
 //! A search's answer as rows, read from the index one page at a time.
 //!
 //! [`ResultRows::search`] runs a search over the volumes it is given and
-//! [`search_totals`] sums one. A search holds each volume's index twice
-//! through [`IndexedVolume`]: under the first hold it resolves the scope
-//! folder and finds and keys the matches ([`super::engine::find_matches`]),
-//! without a hold it sorts them, and under the second hold they become the
-//! rows. Each page then holds the volumes it reads again.
+//! [`search_totals`] sums one, or reads the sums the index keeps for a
+//! folder when the search matches every entry below it. A search holds each
+//! volume's index twice through [`IndexedVolume`]: under the first hold it
+//! resolves the scope folder and finds and keys the matches
+//! ([`super::engine::find_matches`]), without a hold it sorts them, and
+//! under the second hold they become the rows. Each page then holds the
+//! volumes it reads again.
 //!
 //! After the sort, each match becomes its row: its entry and its file ID,
 //! and nothing else, so an answer of millions of rows holds no name and no
@@ -20,11 +22,12 @@
 //!
 //! A search reads for one [`Viewer`]. Under its first hold of each volume it
 //! asks the viewer about every descriptor of the index once ([`SeenBy`]),
-//! and the request keeps those answers to its end: the scan, the keys and
-//! every page read the volume's entries through them, so a filtered user
-//! never gets a row, a count or a folder size of an entry they cannot see.
-//! The answers hold while the index keeps its instance, which every later
-//! hold checks.
+//! and the request keeps those answers to its end: the scan and every page
+//! read the volume's entries through them, so a filtered user never gets a
+//! row or a count of an entry they cannot see. A folder's size, and the
+//! totals of every entry below a folder, are the index's sums for every
+//! viewer ([`crate::index::EntryView::size`]). The answers hold while the
+//! index keeps its instance, which every later hold checks.
 //!
 //! [`Reply`] merges several volumes' rows one page at a time, by [`compare`]
 //! or, for a path sort, by the folders' folded paths, because folder ranks
@@ -43,7 +46,8 @@ use super::order::{OrderFields, SortRecord, compare, compare_paths};
 use super::paths::{FolderCopy, FolderId, ResultNames, root_name};
 use crate::attributes::Attributes;
 use crate::fold::fold_accents;
-use crate::index::{SeenBy, VolumeIndex};
+use crate::index::{Counts, SeenBy, VolumeIndex};
+use crate::links::Reached;
 use crate::scope::{Scope, VolumeMounts};
 use crate::types::{EntryIdx, Frn, SortDir, SortKey, SortSpec};
 use core::cmp::Ordering;
@@ -218,6 +222,8 @@ pub struct RowView<'a> {
     pub mtime: Option<i64>,
     pub created: Option<i64>,
     pub attributes: Attributes,
+    /// For a folder, how many files and folders are below it.
+    pub counts: Option<Counts>,
     pub file_id: Frn,
 }
 
@@ -442,10 +448,11 @@ impl Reply {
                 folder,
                 name: entry.name(),
                 is_dir: entry.is_dir(),
-                size: entry.size(&volume.seen_by),
+                size: entry.size(),
                 mtime: entry.mtime(),
                 created: entry.created(),
                 attributes: entry.attributes(),
+                counts: entry.counts(),
                 file_id,
             };
             if !push(v, volume.next, row, &self.names) {
@@ -675,7 +682,6 @@ impl VolumeReader {
     fn live<'a>(&'a self, index: &'a VolumeIndex) -> Live<'a> {
         Live {
             index,
-            seen_by: &self.seen_by,
             idx: self.answer.rows.get(self.next).0,
             volume: self.answer.mount_prefix.as_bytes(),
         }
@@ -711,7 +717,6 @@ fn row_folder(
 /// A row as the merge of several volumes reads it: straight from its index.
 struct Live<'a> {
     index: &'a VolumeIndex,
-    seen_by: &'a SeenBy,
     idx: EntryIdx,
     volume: &'a [u8],
 }
@@ -727,7 +732,7 @@ impl OrderFields for Live<'_> {
         self.index.folded_name(self.idx)
     }
     fn size(&self) -> Option<u64> {
-        self.index.entry(self.idx).size(self.seen_by)
+        self.index.entry(self.idx).size()
     }
     fn mtime(&self) -> Option<i64> {
         self.index.entry(self.idx).mtime()
@@ -958,7 +963,7 @@ impl<V: IndexedVolume> ResultRows<V> {
             }
             // Without a hold, so the journal does not wait for the sort.
             let ordered = matches.order();
-            let read = ordered.read_rows(&volume.read().index, &seen_by);
+            let read = ordered.read_rows(&volume.read().index);
             match read {
                 Ok(answer) => {
                     if let (Some(sums), Some(found)) = (sums.as_mut(), answer.sums()) {
@@ -1046,8 +1051,12 @@ impl<V: IndexedVolume> ResultRows<V> {
 /// The totals of every match of `query` over `volumes` below `scope`, an
 /// absolute folder, or everywhere without one, that `viewer` sees. Each
 /// volume sums its matches under one hold from the sizes its index holds, so
-/// no row is made: `-get-folder-size C:\` covers the whole volume. `stop`
-/// is as in [`ResultRows::search`].
+/// no row is made. A query that matches every entry below a folder, as
+/// `-get-folder-size` asks, visits none: it adds the counts and the sizes
+/// the indexes keep for the folders the search reaches (`stored_totals`).
+/// **Owner decision:** that answer counts the entries `viewer` may not see
+/// too, because a count of only the visible ones walks the folder, as long
+/// as 2.6 s for `C:\Users`. `stop` is as in [`ResultRows::search`].
 ///
 /// # Errors
 ///
@@ -1060,6 +1069,11 @@ pub fn search_totals<V: IndexedVolume>(
     viewer: Viewer<'_>,
     stop: &AtomicBool,
 ) -> Result<SearchTotals, TotalsError> {
+    if let Some(folders) = query.whole_folders(scope)
+        && let Some(stored) = stored_totals(&volumes, &folders, query.match_case())?
+    {
+        return Ok(stored);
+    }
     let (per_volume, coverage) = run_held(
         targets(volumes, query.search_scope(scope).as_deref())?,
         query.match_case(),
@@ -1077,6 +1091,87 @@ pub fn search_totals<V: IndexedVolume>(
         volumes_incomplete: coverage.volumes_incomplete,
         metadata_pending: coverage.metadata_pending,
     })
+}
+
+/// The totals of every entry below `folders`, which lie in no other, and of
+/// each of them a link leads to, from the sums each volume's index keeps,
+/// with no walk: each folder's on the volume whose mount owns it, and the
+/// root's of a volume mounted below one. `None` when such an index keeps no
+/// sums yet, as before its first build ends, so the caller scans.
+///
+/// # Errors
+///
+/// [`TotalsError::NotIndexed`] when the first folder is on no volume, and
+/// [`TotalsError::Overflow`] when the summed size passes `u64::MAX`.
+fn stored_totals<V: IndexedVolume>(
+    volumes: &[V],
+    folders: &[Reached],
+    match_case: bool,
+) -> Result<Option<SearchTotals>, TotalsError> {
+    let mounts: Vec<VolumeMounts> = volumes.iter().map(IndexedVolume::mounts).collect();
+    let routes: Vec<Scope> = (folders.iter())
+        .map(|r| Scope::of(Some(r.folder.as_str()), mounts.iter().copied()))
+        .collect();
+    let reaches = |at: usize, number: usize| {
+        routes[at].includes(Some(folders[at].folder.as_str()), number, mounts[number])
+    };
+    if let Some(first) = folders.first()
+        && !(0..volumes.len()).any(|number| reaches(0, number))
+    {
+        return Err(NotIndexed {
+            scope: first.folder.clone(),
+        }
+        .into());
+    }
+    let mut totals = Totals::default();
+    let mut coverage = Coverage::default();
+    for (number, volume) in volumes.iter().enumerate() {
+        let mut whole = false;
+        let mut below = Vec::new();
+        for (at, route) in routes.iter().enumerate() {
+            match *route {
+                Scope::Folder {
+                    volume: owner,
+                    folder,
+                } if owner == number => below.push((folder, folders[at].linked)),
+                _ if reaches(at, number) => whole = true,
+                _ => {}
+            }
+        }
+        if !whole && below.is_empty() {
+            continue;
+        }
+        let held = volume.read();
+        coverage.volumes_incomplete |= !held.complete;
+        coverage.metadata_pending |= held.metadata_pending;
+        let index: &VolumeIndex = &held.index;
+        // A volume's root is never a row, so a link to it adds no folder.
+        let entries: Vec<(EntryIdx, bool)> = if whole {
+            vec![(index.root(), false)]
+        } else {
+            (below.iter())
+                .filter_map(|&(folder, linked)| {
+                    let entry = resolve_scope(index, folder.as_bytes(), match_case)?;
+                    Some((entry, linked && entry != index.root()))
+                })
+                .collect()
+        };
+        for (entry, linked) in entries {
+            let Some(contents) = index.contents(entry) else {
+                return Ok(None);
+            };
+            totals.add(Totals {
+                files: contents.counts.files.into(),
+                folders: u64::from(contents.counts.folders) + u64::from(linked),
+                size: contents.size,
+            })?;
+        }
+    }
+    Ok(Some(SearchTotals {
+        totals,
+        volumes_incomplete: coverage.volumes_incomplete,
+        metadata_pending: coverage.metadata_pending,
+    }))
 }
 
 /// What the volumes a search reached said about its answer, read once, at
@@ -1371,10 +1466,9 @@ mod tests {
                 };
                 let keyed: Vec<Vec<u8>> = all.iter().map(|&(v, idx)| folder_path(v, idx)).collect();
                 let mut order: Vec<usize> = (0..all.len()).collect();
-                let everything = SeenBy::Everything;
                 let live = |at: usize| {
                     let (v, idx) = all[at];
-                    Live { index: held[v], seen_by: &everything, idx, volume: mounts[v].as_bytes() }
+                    Live { index: held[v], idx, volume: mounts[v].as_bytes() }
                 };
                 order.sort_by(|&a, &b| match sort.key {
                     SortKey::Path => compare_paths(sort.dir, &live(a), &keyed[a], &live(b), &keyed[b]),
@@ -1866,11 +1960,167 @@ mod tests {
         }
     }
 
+    /// The totals of every entry below a folder come from the sums the
+    /// index keeps, and give what the scan of that folder counts: the files
+    /// below it, each name of a hard-linked file counted, and the folders,
+    /// the folder itself and the entries under lost+found left out, and the
+    /// known sizes of its files. Without it, `-get-folder-size` and the
+    /// inspector show another number than the scan, which they showed
+    /// before, and than the folder's Size column.
+    #[test]
+    fn a_folder_total_reads_the_kept_sums_as_the_scan_counts_them() {
+        use crate::layout::{LayoutFile, LayoutName};
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
+        let frn = |n: u64| Frn::ntfs(n, 1);
+        let entries = [
+            (100, NTFS_ROOT_FRN, "docs", None),
+            (101, frn(100), "sub", None),
+            (102, NTFS_ROOT_FRN, "other", None),
+            (200, frn(100), "a.txt", Some(5)),
+            (201, frn(101), "b.txt", Some(7)),
+            (202, frn(101), "unread.txt", None),
+            (203, frn(999), "orphan.txt", Some(13)),
+        ];
+        for (n, parent, name, size) in entries {
+            let is_file = name.contains('.');
+            index.insert_enum(&ParsedUsnRecord {
+                frn: frn(n),
+                parent_frn: parent,
+                reason: USN_REASON_FILE_CREATE,
+                attributes: if is_file { 0 } else { FILE_ATTRIBUTE_DIRECTORY },
+                name: name.as_bytes().to_vec(),
+            });
+            if let Some(size) = size {
+                index.set_stat(frn(n), size, 0);
+            }
+        }
+        let link = |parent| LayoutName {
+            parent_frn: frn(parent),
+            name: b"link.bin".to_vec(),
+            dos_only: false,
+        };
+        index.enrich(&LayoutFile {
+            frn: frn(204),
+            attributes: 0x20,
+            size: Some(11),
+            mtime_ft: Some(5),
+            created_ft: None,
+            security: None,
+            names: vec![link(100), link(102)],
+        });
+        index.compute_folder_sizes();
+
+        let mounts = [r"C:\".to_string()];
+        let every = compiled("", false);
+        let never = AtomicBool::new(false);
+        for (scope, files, folders, size) in [
+            (r"C:\", 5, 3, 34),
+            (r"C:\docs", 4, 1, 23),
+            (r"C:\docs\sub", 2, 0, 7),
+            (r"C:\other", 1, 0, 11),
+        ] {
+            let kept = search_totals(
+                vec![plain(&index, &mounts)],
+                &every,
+                Some(scope),
+                Viewer::Everything,
+                &never,
+            )
+            .expect("on the volume")
+            .totals;
+            assert_eq!(
+                (kept.files, kept.folders, kept.size),
+                (files, folders, size),
+                "{scope}"
+            );
+            let folder = resolve_scope(&index, &scope.as_bytes()[3..], false);
+            let scanned = run_totals(&index, r"C:\", &every, folder, &SeenBy::Everything, &never)
+                .expect("no overflow");
+            assert_eq!(kept, scanned, "{scope}");
+        }
+    }
+
+    /// The totals of every entry below a folder that holds a link out count
+    /// what the rows list: the entries below each folder the links reach,
+    /// through a link in a target too, and each folder once, though a link
+    /// leads back into the scope. Without it, `-get-folder-size` gives
+    /// another count and size than `-path` lists for the same folder.
+    #[test]
+    fn a_folder_total_counts_the_entries_its_links_reach_as_the_rows_do() {
+        use crate::links::{FolderLink, Links};
+        let mut index = VolumeIndex::new(NTFS_ROOT_FRN);
+        let frn = |n: u64| Frn::ntfs(n, 1);
+        let entries = [
+            (100, NTFS_ROOT_FRN, "docs", None),
+            (101, frn(100), "out", None),
+            (102, NTFS_ROOT_FRN, "repo", None),
+            (103, frn(102), "sub", None),
+            (104, frn(102), "back", None),
+            (105, frn(102), "on", None),
+            (106, NTFS_ROOT_FRN, "far", None),
+            (107, NTFS_ROOT_FRN, "other", None),
+            (200, frn(100), "a.txt", Some(5)),
+            (201, frn(102), "b.txt", Some(7)),
+            (202, frn(103), "c.txt", Some(11)),
+            (203, frn(106), "e.txt", Some(17)),
+            (204, frn(107), "d.txt", Some(13)),
+        ];
+        for (n, parent, name, size) in entries {
+            let is_file = name.contains('.');
+            index.insert_enum(&ParsedUsnRecord {
+                frn: frn(n),
+                parent_frn: parent,
+                reason: USN_REASON_FILE_CREATE,
+                attributes: if is_file { 0 } else { FILE_ATTRIBUTE_DIRECTORY },
+                name: name.as_bytes().to_vec(),
+            });
+            if let Some(size) = size {
+                index.set_stat(frn(n), size, 0);
+            }
+        }
+        index.compute_folder_sizes();
+        let link = |link: &str, target: &str| FolderLink {
+            link: link.into(),
+            target: target.into(),
+        };
+        let links = Links::new(vec![
+            link(r"C:\docs\out", r"C:\repo"),
+            link(r"C:\repo\back", r"C:\docs"),
+            link(r"C:\repo\on", r"C:\far"),
+        ]);
+        let scope = r"C:\docs";
+        let parsed = crate::query::parse_query("").expect("parses");
+        let every = CompiledQuery::with_links(&parsed, &links, Some(scope)).expect("compiles");
+        let mounts = [r"C:\".to_string()];
+
+        let (rows, total, sums) = rows_as(
+            vec![plain(&index, &mounts)],
+            &every,
+            Some(scope),
+            SortSpec::default(),
+            Viewer::Everything,
+        );
+        let totals = search_totals(
+            vec![plain(&index, &mounts)],
+            &every,
+            Some(scope),
+            Viewer::Everything,
+            &AtomicBool::new(false),
+        )
+        .expect("on the volume")
+        .totals;
+        // a.txt and out; through out: repo, b.txt, sub, c.txt, back and
+        // on; through back: docs; through on: far and e.txt.
+        assert_eq!((rows.len(), total), (11, 11), "{rows:?}");
+        assert_eq!((sums.files, sums.folders, sums.file_bytes), (4, 7, 40));
+        assert_eq!((totals.files, totals.folders, totals.size), (4, 7, 40));
+    }
+
     /// A filtered user finds, counts and sums only the entries of the
-    /// folders they may list, gets no folder size, and a `size:` term
-    /// matches none of their folders. Without it, a reader that skips the
-    /// filter shows the names, the count or the space of files the user
-    /// cannot see.
+    /// folders they may list. Without it, a reader that skips the filter
+    /// shows the names, the count or the space of files the user cannot see.
+    /// A folder's size and the totals of a whole folder are the index's
+    /// sums, the files they cannot see included, by the owner's decision.
     #[test]
     fn a_filtered_user_finds_only_the_entries_of_folders_they_may_list() {
         let index = visibility_index();
@@ -1920,10 +2170,16 @@ mod tests {
 
         let every = compiled("", false);
         let (rows, _, sums) = rows_as(vec![plain(&index, &mounts)], &every, None, by_name, caller);
-        assert!(
-            rows.iter()
-                .all(|(path, size)| [a, b].contains(&path.as_str()) || size.is_none()),
-            "no folder has a size: {rows:?}"
+        assert_eq!(
+            rows,
+            [
+                (a.to_string(), Some(5)),
+                (b.to_string(), Some(7)),
+                (hidden.to_string(), Some(11)),
+                (open.to_string(), Some(12)),
+                (sub.to_string(), Some(7)),
+                (unread.to_string(), Some(17)),
+            ]
         );
         let shown = |sums: MatchSums| {
             (
@@ -1934,7 +2190,7 @@ mod tests {
                 sums.folder_bytes_at_least,
             )
         };
-        assert_eq!(shown(sums), (2, 12, 4, 0, true));
+        assert_eq!(shown(sums), (2, 12, 4, 40, false));
         let (_, _, sums) = rows_as(
             vec![plain(&index, &mounts)],
             &every,
@@ -1944,7 +2200,10 @@ mod tests {
         );
         assert_eq!(shown(sums), (4, 40, 4, 40, false));
 
-        assert_eq!(paths(&compiled("size:>0", false), None, caller), [a, b]);
+        assert_eq!(
+            paths(&compiled("size:>0", false), None, caller),
+            [a, b, hidden, open, sub, unread]
+        );
 
         let txt = compiled("txt", false);
         let totals = |viewer| {
@@ -1956,56 +2215,23 @@ mod tests {
                 &AtomicBool::new(false),
             );
             let totals = found.expect("no scope, no overflow").totals;
-            (totals.count, totals.size)
+            (totals.count(), totals.size)
         };
         assert_eq!(totals(caller), (2, 12));
         assert_eq!(totals(Viewer::Everything), (4, 40));
-    }
 
-    /// A size sort places a filtered user's folders by name, on one
-    /// volume and in the merge of two. Without it, the order of the tie runs
-    /// or of the merge shows which folder is larger.
-    #[test]
-    fn a_size_sort_places_a_filtered_users_folders_by_name() {
-        let index = visibility_index();
-        let mounts = [[r"C:\".to_string()], [r"D:\".to_string()]];
-        let may_list = |descriptor: &[u8]| descriptor == OPEN;
-        let by_size = SortSpec {
-            key: SortKey::Size,
-            dir: SortDir::Desc,
-        };
-        let every = compiled("", false);
-        let names = |volumes: Vec<PlainVolume>| {
-            let (rows, _, _) = rows_as(volumes, &every, None, by_size, Viewer::Filtered(&may_list));
-            rows.into_iter().map(|(path, _)| path).collect::<Vec<_>>()
-        };
+        let below_hidden = search_totals(
+            vec![plain(&index, &mounts)],
+            &every,
+            Some(hidden),
+            caller,
+            &AtomicBool::new(false),
+        )
+        .expect("on the volume")
+        .totals;
         assert_eq!(
-            names(vec![plain(&index, &mounts[0])]),
-            [
-                r"C:\open\sub\b.txt",
-                r"C:\open\a.txt",
-                r"C:\hidden",
-                r"C:\open",
-                r"C:\open\sub",
-                r"C:\unread"
-            ]
-        );
-        assert_eq!(
-            names(vec![plain(&index, &mounts[0]), plain(&index, &mounts[1])]),
-            [
-                r"C:\open\sub\b.txt",
-                r"D:\open\sub\b.txt",
-                r"C:\open\a.txt",
-                r"D:\open\a.txt",
-                r"C:\hidden",
-                r"D:\hidden",
-                r"C:\open",
-                r"D:\open",
-                r"C:\open\sub",
-                r"D:\open\sub",
-                r"C:\unread",
-                r"D:\unread"
-            ]
+            (below_hidden.files, below_hidden.folders, below_hidden.size),
+            (1, 0, 11)
         );
     }
 

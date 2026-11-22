@@ -133,14 +133,35 @@ fn entry(
     let exact = |bytes: u64| exact_size(strings, numbers, bytes);
     let name = text::name_of(&entry.path);
     let size = match contents {
-        Some(FolderContents::Calculating(_)) => strings.text("inspector.calculating").to_owned(),
+        // The service answers from the sums it keeps, so the field stays
+        // empty for a quick answer and no busy text flashes (DESIGN.md:
+        // Inspector pane).
+        Some(FolderContents::Calculating { busy: false, .. }) => String::new(),
+        Some(FolderContents::Calculating { busy: true, .. }) => {
+            strings.text("inspector.calculating").to_owned()
+        }
         Some(FolderContents::Counted(totals)) => {
-            let key = if totals.volumes_incomplete || totals.metadata_pending {
-                "inspector.folder_size_at_least"
-            } else {
-                "inspector.folder_size"
-            };
-            strings.count(key, totals.count, numbers, &[&exact(totals.size)])
+            let at_least = totals.volumes_incomplete || totals.metadata_pending;
+            match (totals.files, totals.folders) {
+                (Some(files), Some(folders)) => {
+                    let both = files_and_folders(strings, numbers, files, folders);
+                    let key = if at_least {
+                        "inspector.folder_contents_at_least"
+                    } else {
+                        "inspector.folder_contents"
+                    };
+                    strings.format(key, &[&exact(totals.size), &both])
+                }
+                // A service that counts no files and folders apart.
+                _ => {
+                    let key = if at_least {
+                        "inspector.folder_size_at_least"
+                    } else {
+                        "inspector.folder_size"
+                    };
+                    strings.count(key, totals.count, numbers, &[&exact(totals.size)])
+                }
+            }
         }
         None => entry.size.map_or_else(unknown, exact),
     };
@@ -203,16 +224,24 @@ pub(crate) fn age(strings: &Strings, numbers: &dyn Numbers, modified: i64, now: 
     strings.format("inspector.age", &[&strings.count(key, count, numbers, &[])])
 }
 
+/// How many files and folders, leaving out a kind there is none of.
+fn files_and_folders(strings: &Strings, numbers: &dyn Numbers, files: u64, folders: u64) -> String {
+    let counted_files = strings.count("inspector.files", files, numbers, &[]);
+    let counted_folders = strings.count("inspector.folders", folders, numbers, &[]);
+    match (files, folders) {
+        (_, 0) => counted_files,
+        (0, _) => counted_folders,
+        _ => strings.format(
+            "inspector.files_and_folders",
+            &[&counted_files, &counted_folders],
+        ),
+    }
+}
+
 /// Several selected entries: how many files and folders, and the size of
 /// the files.
 fn several(strings: &Strings, numbers: &dyn Numbers, sums: Sums) -> InspectorCaptions {
-    let files = strings.count("inspector.files", sums.files, numbers, &[]);
-    let folders = strings.count("inspector.folders", sums.folders, numbers, &[]);
-    let heading = match (sums.files, sums.folders) {
-        (_, 0) => files,
-        (0, _) => folders,
-        _ => strings.format("inspector.files_and_folders", &[&files, &folders]),
-    };
+    let heading = files_and_folders(strings, numbers, sums.files, sums.folders);
     let total = if sums.files == 0 {
         strings.text("inspector.no_files").to_owned()
     } else {

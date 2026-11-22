@@ -242,6 +242,7 @@ mod tests {
             created_ft: None,
             is_dir,
             attributes: None,
+            counts: None,
             identity: None,
         }
     }

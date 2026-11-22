@@ -1108,12 +1108,7 @@ mod tests {
         index.set_stat(read, 5, 0);
         finish_index(&mut index);
         let docs = index.head_of(docs).expect("docs is indexed");
-        assert_eq!(
-            index
-                .entry(docs)
-                .size(&gozler_core::index::SeenBy::Everything),
-            Some(5)
-        );
+        assert_eq!(index.entry(docs).size(), Some(5));
     }
 
     /// One `folder_security` answer: the descriptor and the USN, `None` for a

@@ -748,7 +748,7 @@ fn enrich_builds_hard_link_chain_findable_under_every_name() {
         let mut link_count = 0;
         while cur != crate::types::NIL {
             assert_eq!(
-                idx.entry(cur).size(&SeenBy::Everything),
+                idx.entry(cur).size(),
                 Some(4096),
                 "every hard-link entry must carry the file's size"
             );
@@ -871,7 +871,7 @@ fn a_reconciled_link_gets_the_size_and_date_of_its_file() {
             let e = idx.entry(cur);
             out.push((
                 String::from_utf8_lossy(e.name()).into_owned(),
-                e.size(&SeenBy::Everything),
+                e.size(),
                 e.mtime(),
             ));
             cur = e.next_link();
@@ -1717,8 +1717,8 @@ fn apply_change(idx: &mut VolumeIndex, change: &IndexChange) {
 
 proptest! {
     /// After the size and date pass ends, every way the journal changes the
-    /// index keeps each folder's size equal to the sum recomputed from the
-    /// files below it: creates, deletes, size changes, moves of files and of
+    /// index keeps each folder's size, and its counts of files and folders,
+    /// equal to those recomputed from the entries below it: creates, deletes, size changes, moves of files and of
     /// folders, hard links added and removed, placeholders, record numbers
     /// reused, deletes of unknown IDs, and loops in the parent links. Before
     /// the pass ends, every folder's size is unknown.

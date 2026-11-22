@@ -253,6 +253,7 @@ impl MainWindow {
             Effect::NameSearchSoon(list) => {
                 hwnd.set_timer(Timer::Searching(list).id(), SEARCHING_NAMED_MS)
             }
+            Effect::CalculatingSoon => hwnd.set_timer(Timer::Calculating.id(), CALCULATING_MS),
             Effect::ReadSelectionSoon(list) => {
                 let current = self.model.borrow().list(list).is_some_and(|shown| {
                     matches!(shown.selection(), Selection::Reading { asked: None, .. })

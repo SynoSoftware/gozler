@@ -152,10 +152,9 @@ impl Listable {
 /// What one request sees of one volume's index.
 #[derive(Debug)]
 pub enum SeenBy {
-    /// A user who sees every file: every entry, with folder sizes.
+    /// A user who sees every file: every entry.
     Everything,
     /// A filtered user: the entries in the folders these answers let them
-    /// list, and no folder sizes, because a folder's size would count files
-    /// they cannot see.
+    /// list.
     Filtered(Listable),
 }

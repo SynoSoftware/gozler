@@ -20,7 +20,7 @@ mod descriptors;
 pub mod settle;
 
 pub use descriptors::{DescriptorId, Listable, SeenBy};
-pub use store::{ComponentBytes, IdWidth};
+pub use store::{ComponentBytes, Counts, IdWidth};
 pub use volume::{
     Anomaly, ApplyOutcome, EntryView, IndexMemory, IndexStats, LinkTarget, NTFS_ROOT_FRN,
     PathStatus, VolumeIndex,

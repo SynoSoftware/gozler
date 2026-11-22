@@ -269,13 +269,12 @@ impl ResultSnapshot {
                     answer.scope,
                     answer.sums,
                     sort,
-                    &seen_by,
                 );
                 (matches, seen_by)
             };
             // Without a hold, so the journal does not wait for the sort.
             let ordered = matches.order();
-            let rows = ordered.read_rows(&volume.read().index, &seen_by);
+            let rows = ordered.read_rows(&volume.read().index);
             answers.push((rows.map_err(|IndexChanged| ResultSnapshotGone)?, seen_by));
         }
         Ok(ResultRows {
@@ -472,10 +471,11 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
                         folder,
                         name: entry.name(),
                         is_dir: entry.is_dir(),
-                        size: entry.size(seen_by),
+                        size: entry.size(),
                         mtime: entry.mtime(),
                         created: entry.created(),
                         attributes: entry.attributes(),
+                        counts: entry.counts(),
                         file_id,
                     })
                 }

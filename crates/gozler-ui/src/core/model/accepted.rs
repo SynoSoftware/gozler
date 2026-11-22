@@ -97,6 +97,9 @@ pub(crate) enum Effect {
     SearchAgain(Vec<List>),
     SearchSoon(List),
     NameSearchSoon(List),
+    /// Says that the selected folder is counted once its request has run
+    /// [`crate::core::work::BUSY`].
+    CalculatingSoon,
     ReadSelectionSoon(List),
     Cancel(Purpose),
     AskLatestRelease,
