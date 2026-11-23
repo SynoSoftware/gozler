@@ -318,7 +318,7 @@ fn test_every_entry(index: &VolumeIndex, query: &CompiledQuery, scope: Option<En
     let mut scan = Scan::new(index, MOUNT, query, &seen, &never);
     for idx in index.live_entries() {
         if !index.is_synthetic(idx) {
-            scan.visit(idx, scope);
+            scan.visit::<false>(idx, scope);
         }
     }
     scan.records.len()
@@ -332,7 +332,7 @@ fn walk_whole_folder(index: &VolumeIndex, query: &CompiledQuery, folder: EntryId
     let mut scan = Scan::new(index, MOUNT, query, &seen, &never);
     for idx in index.subtree_entries(folder) {
         if !index.is_synthetic(idx) {
-            scan.visit(idx, None);
+            scan.visit::<false>(idx, None);
         }
     }
     scan.records.len()
@@ -348,7 +348,7 @@ fn scan_every_name(index: &VolumeIndex, query: &CompiledQuery, scope: Option<Ent
     for_each_name_containing_any(index, &query.prefilter, |id| {
         for idx in index.name_chain(id) {
             if !index.is_synthetic(idx) {
-                scan.visit(idx, scope);
+                scan.visit::<false>(idx, scope);
             }
         }
         true

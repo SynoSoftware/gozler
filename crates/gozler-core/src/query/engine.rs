@@ -2100,7 +2100,7 @@ fn scan_with<'q, 'i>(
         scan.scope = (root != index.root()).then_some(root);
         for idx in index.children(root) {
             if !index.is_synthetic(idx) {
-                scan.visit(idx, None);
+                scan.visit::<false>(idx, None);
             }
         }
         return scan;
@@ -2131,7 +2131,7 @@ fn scan_with<'q, 'i>(
                 walked_all = false;
                 break;
             }
-            if !index.is_synthetic(idx) && !scan.visit(idx, None) {
+            if !index.is_synthetic(idx) && !scan.visit::<false>(idx, None) {
                 return scan;
             }
         }
@@ -2147,7 +2147,7 @@ fn scan_with<'q, 'i>(
         let mut on_name = |id: NameId| {
             index
                 .name_chain(id)
-                .all(|idx| index.is_synthetic(idx) || scan.visit(idx, scope))
+                .all(|idx| index.is_synthetic(idx) || scan.visit::<false>(idx, scope))
         };
         // A scope walk that priced this scan already found the names.
         match prefilter_names {
@@ -2199,7 +2199,7 @@ fn scan_with<'q, 'i>(
         scan.records.reserve_exact(index.len());
     }
     for idx in index.live_entries() {
-        if !index.is_synthetic(idx) && !scan.visit(idx, scope) {
+        if !index.is_synthetic(idx) && !scan.visit::<false>(idx, scope) {
             break;
         }
     }
@@ -2436,12 +2436,14 @@ impl<'q, 'i> Scan<'q, 'i> {
 
     /// Keeps entry `idx` as a candidate if it passes every clause. Returns
     /// `false`, and tests nothing, once the request was stopped, so a loop
-    /// over entries ends without a stop check of its own.
-    fn visit(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> bool {
+    /// over entries ends without a stop check of its own. A path walk sets
+    /// `PATH_WALK`, because each of its candidates runs the path tests, so
+    /// they are inlined into it; every other caller calls them.
+    fn visit<const PATH_WALK: bool>(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> bool {
         if self.stopped() {
             return false;
         }
-        if let Some(record) = self.evaluate(idx, scope) {
+        if let Some(record) = self.evaluate::<PATH_WALK>(idx, scope) {
             self.records.push(record);
         }
         true
@@ -2481,7 +2483,7 @@ impl<'q, 'i> Scan<'q, 'i> {
             if above.is_none_or(|above| above & (1 << bit) != 0) {
                 continue;
             }
-            self.visit(idx, scope);
+            self.visit::<true>(idx, scope);
             // An entry that the parent links make a parent is walked
             // through as a folder is, so this does not ask which it is.
             if term.matches(index.folded_name(idx), &mut self.scratch.code_points) {
@@ -2491,7 +2493,7 @@ impl<'q, 'i> Scan<'q, 'i> {
                         return false;
                     }
                     if !index.is_synthetic(below) {
-                        self.visit(below, scope);
+                        self.visit::<true>(below, scope);
                     }
                 }
             }
@@ -2555,19 +2557,23 @@ impl<'q, 'i> Scan<'q, 'i> {
                     return false;
                 }
                 if visited.insert(idx) && !index.is_synthetic(idx) {
-                    self.visit(idx, scope);
+                    self.visit::<true>(idx, scope);
                 }
             }
         }
         true
     }
 
-    fn evaluate(&mut self, idx: EntryIdx, scope: Option<EntryIdx>) -> Option<SortRecord> {
+    fn evaluate<const PATH_WALK: bool>(
+        &mut self,
+        idx: EntryIdx,
+        scope: Option<EntryIdx>,
+    ) -> Option<SortRecord> {
         let index = self.index;
         let query = self.query;
         let entry_clauses = &query.clauses[..query.component_clauses];
         let entry = index.entry(idx);
-        let subject = Subject {
+        let mut subject = Subject {
             index,
             idx,
             // The precomputed folded name serves a case-insensitive query.
@@ -2629,25 +2635,34 @@ impl<'q, 'i> Scan<'q, 'i> {
         }
 
         if self.component_bits.is_some() || self.query_paths.is_some() {
-            self.run_path_tests(subject)?;
+            if PATH_WALK {
+                self.path_tests(&mut subject)?;
+            } else {
+                self.run_path_tests(&mut subject)?;
+            }
         }
         Some(SortRecord::new(idx))
     }
 
+    /// [`Self::path_tests`] out of line, which leaves [`Self::visit`] small
+    /// for the candidates of every query that no path walk serves.
+    #[inline(never)]
+    fn run_path_tests<'s>(&'s mut self, subject: &mut Subject<'s>) -> Option<()> {
+        self.path_tests(subject)
+    }
+
     /// The component and path clauses of [`Self::evaluate`] for `subject`:
     /// `None` when it fails one or has no path. Only a query with a path term
-    /// runs them, and out of line they leave [`Self::visit`] small for the
-    /// candidates of every other query.
-    #[inline(never)]
-    fn run_path_tests(&mut self, subject: Subject<'_>) -> Option<()> {
+    /// runs them. `subject` lives as long as the borrow of `self`, so it can
+    /// hold `self.path`.
+    #[inline(always)]
+    fn path_tests<'s>(&'s mut self, subject: &mut Subject<'s>) -> Option<()> {
         let index = self.index;
         let query = self.query;
         let idx = subject.idx;
         let later = &query.clauses[query.component_clauses..];
         let (component_clauses, path_clauses) =
             later.split_at(query.path_clauses - query.component_clauses);
-        // A shorter lifetime, so the subject can borrow `self.path`.
-        let mut subject: Subject<'_> = subject;
         let in_name = query.names_decide_path
             && path_clauses[0].passes_in_name(subject.name, &mut self.scratch.code_points);
         if let Some(bits) = &mut self.component_bits {
@@ -2662,11 +2677,10 @@ impl<'q, 'i> Scan<'q, 'i> {
                     query.component_bits(text, first, code_points)
                 })?;
                 subject.components = Some(found);
-                if !component_clauses
-                    .iter()
-                    .all(|clause| clause.passes(&subject, None, &mut self.scratch))
-                {
-                    return None;
+                for clause in component_clauses {
+                    if !clause.passes(subject, None, &mut self.scratch) {
+                        return None;
+                    }
                 }
             }
         }
@@ -2684,11 +2698,10 @@ impl<'q, 'i> Scan<'q, 'i> {
             let path = paths.full_path_into(index, idx, &mut self.path)?;
             subject.path = Some(&self.path);
             subject.path_length = path.utf16_len;
-            if !path_clauses
-                .iter()
-                .all(|clause| clause.passes(&subject, path.target, &mut self.scratch))
-            {
-                return None;
+            for clause in path_clauses {
+                if !clause.passes(subject, path.target, &mut self.scratch) {
+                    return None;
+                }
             }
         }
         Some(())
@@ -3037,7 +3050,7 @@ mod tests {
             let seen = SeenBy::Everything;
             let mut every = Scan::new(&idx, r"C:\", &query, &seen, &never);
             for entry in idx.live_entries().filter(|&e| !idx.is_synthetic(e)) {
-                every.visit(entry, None);
+                every.visit::<false>(entry, None);
             }
             let sorted = |scan: Scan<'_, '_>| {
                 let mut entries: Vec<_> = scan.records.iter().map(|r| r.idx()).collect();
@@ -3115,7 +3128,7 @@ mod tests {
             let seen = SeenBy::Everything;
             let mut every = Scan::new(&idx, r"C:\", &query, &seen, &never);
             for entry in idx.live_entries().filter(|&e| !idx.is_synthetic(e)) {
-                every.visit(entry, None);
+                every.visit::<false>(entry, None);
             }
             let sorted = |scan: Scan<'_, '_>| {
                 let mut entries: Vec<_> = scan.records.iter().map(|r| r.idx()).collect();
@@ -4435,7 +4448,7 @@ mod tests {
                 .live_entries()
                 .filter(|&entry| !index.is_synthetic(entry))
             {
-                full.visit(entry, None);
+                full.visit::<false>(entry, None);
             }
             let sorted = |scan: Scan<'_, '_>| {
                 let mut entries: Vec<_> = scan.records.iter().map(|record| record.idx()).collect();
@@ -4696,7 +4709,7 @@ mod tests {
                 let mut every = Scan::new(&idx, r"C:\", &query, &SeenBy::Everything, &never);
                 for entry in idx.live_entries() {
                     if !idx.is_synthetic(entry) {
-                        every.visit(entry, Some(scope));
+                        every.visit::<false>(entry, Some(scope));
                     }
                 }
                 let mut tested: Vec<EntryIdx> = every.records.iter().map(|r| r.idx()).collect();
