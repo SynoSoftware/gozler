@@ -49,7 +49,6 @@ DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableWelcomePage=yes
 WizardStyle=modern dynamic
-LicenseFile=..\LICENSE
 OutputDir=..\target\installer
 OutputBaseFilename=gozler-{#AppVersion}-x64-Setup
 Compression=lzma2/max
@@ -63,7 +62,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 UninstallAppRunningError={#AppName} is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to stop uninstalling.
 
 [CustomMessages]
-WhatsNew=View what's new
+WhatsNew=What's new
 StartService=Starting the {#AppName} service...
 ServiceFailed=The {#AppName} service could not be installed (exit code %1). Search does not work until it runs. Run "gozlerd install" in an elevated terminal to retry.
 CleanupCaption=Keep or remove other programs
@@ -80,14 +79,15 @@ WindowStays={#AppName} is still running, so Setup can't replace it.%n%nExit {#Ap
 GozFailed=Setup couldn't remove goz (error code %1).%n%nTo remove goz's service, open a terminal as administrator and run:%n  pushd "%2"%n  .\gozd.exe uninstall%n%nIf the command succeeds, delete goz.exe and gozd.exe from that folder.
 
 [Files]
+#ifdef WhatsNewFile
+Source: "{#WhatsNewFile}"; Flags: dontcopy noencryption
+#endif
 Source: "..\target\release\gozlerd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\gozler.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\gozler-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
-#ifdef WhatsNewFile
-Source: "{#WhatsNewFile}"; DestDir: "{app}"; Flags: ignoreversion
-#endif
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\gozler-ui.exe"
@@ -97,9 +97,6 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\gozler-ui.exe"
 ; so its settings, its sign-in entry and its File Explorer command are that
 ; person's.
 Filename: "{app}\gozler-ui.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: postinstall nowait skipifsilent runasoriginaluser
-#ifdef WhatsNewFile
-Filename: "{app}\WhatsNew.txt"; Description: "{cm:WhatsNew}"; Flags: postinstall shellexec skipifsilent unchecked runasoriginaluser; Check: IsUpgrade
-#endif
 
 [UninstallRun]
 Filename: "{app}\gozler-ui.exe"; Parameters: "--unregister-shortcut"; Flags: runhidden waituntilterminated; RunOnceId: "RestoreWindowsShortcut"
@@ -145,13 +142,44 @@ var
   SeeEveryFilePage: TInputOptionWizardPage;
   SignedInUser: String;
 #ifdef WhatsNewFile
-  Upgrading: Boolean;
+  WhatsNewButton: TNewButton;
 #endif
 
 #ifdef WhatsNewFile
-function IsUpgrade: Boolean;
+procedure ShowWhatsNew(Sender: TObject);
+var
+  Dialog: TSetupForm;
+  Notes: TNewMemo;
+  CloseButton: TNewButton;
+  NotesFile: String;
 begin
-  Result := Upgrading;
+  NotesFile := ExpandConstant('{tmp}\WhatsNew.txt');
+  if not FileExists(NotesFile) then
+    ExtractTemporaryFile('WhatsNew.txt');
+  Dialog := CreateCustomForm(480, 350, True, True);
+  try
+    Dialog.Caption := CustomMessage('WhatsNew');
+    Dialog.Position := poMainFormCenter;
+    CloseButton := TNewButton.Create(Dialog);
+    CloseButton.Parent := Dialog;
+    CloseButton.SetBounds(Dialog.ClientWidth - ScaleX(87), Dialog.ClientHeight - ScaleY(35),
+      ScaleX(75), ScaleY(23));
+    CloseButton.Caption := SetupMessage(msgButtonOK);
+    CloseButton.ModalResult := mrOk;
+    CloseButton.Default := True;
+    CloseButton.Cancel := True;
+    Notes := TNewMemo.Create(Dialog);
+    Notes.Parent := Dialog;
+    Notes.SetBounds(ScaleX(12), ScaleY(12), Dialog.ClientWidth - ScaleX(24),
+      CloseButton.Top - ScaleY(24));
+    Notes.ReadOnly := True;
+    Notes.ScrollBars := ssVertical;
+    Notes.Lines.LoadFromFile(NotesFile);
+    Dialog.ActiveControl := Notes;
+    Dialog.ShowModal;
+  finally
+    Dialog.Free;
+  end;
 end;
 #endif
 
@@ -371,7 +399,7 @@ begin
   if CleanupPage <> nil then
     After := CleanupPage.ID
   else
-    After := wpLicense;
+    After := wpWelcome;
   SeeEveryFilePage := CreateInputOptionPage(After, CustomMessage('SeeEveryFileCaption'),
     CustomMessage('SeeEveryFileDescription'),
     FmtMessage(CustomMessage('SeeEveryFileText'), [SignedInUser]), False, False);
@@ -384,7 +412,7 @@ procedure CreateCleanupPage;
 var
   I: Integer;
 begin
-  CleanupPage := CreateInputOptionPage(wpLicense, CustomMessage('CleanupCaption'),
+  CleanupPage := CreateInputOptionPage(wpWelcome, CustomMessage('CleanupCaption'),
     CustomMessage('CleanupDescription'), CustomMessage('CleanupText'), False, False);
   for I := 0 to GetArrayLength(Found) - 1 do
     if Found[I].IsGoz then
@@ -408,8 +436,18 @@ var
   Daemon: String;
 begin
 #ifdef WhatsNewFile
-  // Read the uninstall key before Setup writes it for this installation.
-  Upgrading := RegKeyExists(HKLM64, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1');
+  if not WizardSilent and
+    RegKeyExists(HKLM64, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1') then
+  begin
+    WhatsNewButton := TNewButton.Create(WizardForm);
+    WhatsNewButton.Parent := WizardForm;
+    WhatsNewButton.SetBounds(ScaleX(12), WizardForm.NextButton.Top,
+      ScaleX(92), WizardForm.NextButton.Height);
+    WhatsNewButton.Anchors := [akLeft, akBottom];
+    WhatsNewButton.Caption := CustomMessage('WhatsNew');
+    WhatsNewButton.OnClick := @ShowWhatsNew;
+    WhatsNewButton.Visible := False;
+  end;
 #endif
   InstallFolder := ExpandConstant('{#AppFolder}');
   // Services first, so a folder that both a service and a PATH name keeps its
@@ -426,6 +464,14 @@ begin
     CreateCleanupPage;
   CreateSeeEveryFilePage;
 end;
+
+#ifdef WhatsNewFile
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if WhatsNewButton <> nil then
+    WhatsNewButton.Visible := CurPageID = wpFinished;
+end;
+#endif
 
 // Whether the person chose to remove Found[I]. A silent install removes
 // nothing, so a script never removes a program by accident.

@@ -37,7 +37,8 @@ This release gives TinyTorrent's Library the search options it needs to find med
 
 #### Setup
 
-- **Read the release notes after an update.** Select **View what's new** on the last page of Setup to open these notes in your text editor. **Launch Gozler** is a separate choice on the same page.
+- **Read the release notes after an update.** Select **What's new** on the last page to read these notes in Setup. **Launch Gozler** is a separate choice on the same page.
+- **Install without an agreement screen.** Gozler's own code now uses the Mozilla Public License 2.0. The download includes both that license and the MIT notice for code from goz.
 
 #### Fixed
 

@@ -1,7 +1,7 @@
 # Gozler
 
 [![CI](https://github.com/SynoSoftware/gozler/actions/workflows/ci.yml/badge.svg)](https://github.com/SynoSoftware/gozler/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License: MPL 2.0](https://img.shields.io/badge/license-MPL%202.0-blue.svg)](LICENSE)
 
 **Find files instantly. Copy, move and delete them blazingly fast.**
 
@@ -215,4 +215,11 @@ It began as a fork of [goz v0.2.0](https://github.com/mustafaahci/goz)
 by Mustafa Ahci, who created the original index, daemon and historical
 benchmarks.
 
-Licensed under the [MIT License](LICENSE).
+## License
+
+Source code and changes written by Synapse N.V. for Gozler are licensed under the
+[Mozilla Public License 2.0](LICENSE). Code brought in from goz retains its
+[MIT License](LICENSE-MIT) and copyright notices. Existing MIT grants remain in effect.
+
+To get the source for an installed version, open its [GitHub release](https://github.com/SynoSoftware/gozler/releases)
+and select **Source code** under **Assets**.

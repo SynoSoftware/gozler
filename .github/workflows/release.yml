@@ -92,6 +92,7 @@ jobs:
             target/release/gozlerd.exe, `
             target/release/gozler-ui.exe, `
             LICENSE, `
+            LICENSE-MIT, `
             README.md
 
       - name: Publish release
