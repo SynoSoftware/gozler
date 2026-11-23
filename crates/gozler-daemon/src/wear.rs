@@ -1,6 +1,11 @@
 //! The service's side of the wear watch ([`Request::Wear`]): the run id, the
-//! sequence counter that numbers every event of every volume, and the wait of
-//! a held request.
+//! sequence counter that numbers every event of every volume, the wear
+//! alarm's limits that windows watch, and the wait of a held request.
+//!
+//! The service checks every value of each limit that a held request names
+//! ([`watched`]): a subject crosses again at each higher value it reaches,
+//! so each request gets the crossings that reach its own limits, whatever
+//! limits other windows watch.
 //!
 //! A window holds one wear request, and the service answers it when it has
 //! something newer than the request's `after`, so neither side runs a timer
@@ -12,12 +17,16 @@
 //! [`Request::Wear`]: gozler_core::proto::Request::Wear
 
 use std::os::windows::io::AsHandle;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use gozler_core::alarm::{Warning, Watched, week_allowance};
+use gozler_core::index::alarms::Crossed;
 use gozler_core::proto::{
-    MAX_SERVER_FRAME, RepeatsAfter, Response, WearReply, WearRequest, encode_response_frame,
+    Alarm, Alarmed, MAX_SERVER_FRAME, RepeatsAfter, Response, WearLimits, WearReply, WearRequest,
+    encode_response_frame,
 };
 use gozler_core::query::Viewer;
 use gozler_winfs::WinError;
@@ -43,6 +52,67 @@ static WAKE: Notify = Notify::const_new();
 
 /// The id of this run of the service ([`run_id`]).
 static RUN: OnceLock<u64> = OnceLock::new();
+
+/// How long a request's limits stay watched after it was answered: the
+/// window asks again at once, on a new connection, and a write in between
+/// must still be checked.
+const KEPT: Duration = Duration::from_secs(60);
+
+/// The limits of each held request, and of each answered in the last
+/// [`KEPT`].
+static WATCHES: Mutex<Vec<Watch>> = Mutex::new(Vec::new());
+
+/// Gives each [`Watch`] its id.
+static WATCH_IDS: AtomicU64 = AtomicU64::new(0);
+
+struct Watch {
+    id: u64,
+    limits: WearLimits,
+    /// When its request ended; `None` while it is held.
+    ended: Option<Instant>,
+}
+
+fn watches() -> std::sync::MutexGuard<'static, Vec<Watch>> {
+    WATCHES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The wear alarm's limits that the windows watch.
+pub(crate) fn watched() -> Watched {
+    let mut watches = watches();
+    watches.retain(|watch| watch.ended.is_none_or(|ended| ended.elapsed() < KEPT));
+    let mut watched = Watched::default();
+    for watch in watches.iter() {
+        watched.add(&watch.limits);
+    }
+    watched
+}
+
+/// A held request's limits, watched from its start until [`KEPT`] after it
+/// ends, also when it ends with an error.
+struct Watching(u64);
+
+impl Watching {
+    fn start(limits: WearLimits) -> Option<Watching> {
+        if limits.is_off() {
+            return None;
+        }
+        let id = WATCH_IDS.fetch_add(1, Ordering::Relaxed);
+        watches().push(Watch {
+            id,
+            limits,
+            ended: None,
+        });
+        Some(Watching(id))
+    }
+}
+
+impl Drop for Watching {
+    fn drop(&mut self) {
+        if let Some(watch) = watches().iter_mut().find(|watch| watch.id == self.0) {
+            watch.ended = Some(Instant::now());
+        }
+    }
+}
 
 /// Wakes every held wear request, so each reads the lists again. The tail
 /// calls it after a batch that made or updated an event, from its own
@@ -118,7 +188,10 @@ fn answer(
         Viewer::Everything => None,
         Viewer::Filtered(may_list) => Some(may_list),
     };
+    let new = |number: u64| above.is_some_and(|above| number > above) && number <= highest;
+    let limits = request.limits;
     let mut events = Vec::new();
+    let mut alarms = Vec::new();
     let mut dropped = 0;
     for volume in volumes.iter() {
         let read = volume.read();
@@ -126,36 +199,95 @@ fn answer(
         let list = index.repeats();
         dropped += list.dropped();
         let reaches = |event: &gozler_core::index::repeats::RepeatEvent| {
-            above.is_some_and(|above| event.number > above)
-                && event.number <= highest
-                && event.copies >= request.copies
+            new(event.number) && event.copies >= request.copies
         };
         events.extend(list.reported(index, volume.mount_prefix(), reaches, may_list));
+        let files = index.alarms();
+        dropped += files.dropped();
+        let reaches = |w: &Warning<Crossed>| new(w.number) && reaches_file(&limits, w);
+        alarms.extend(files.reported(index, volume.mount_prefix(), reaches, may_list));
     }
-    if matches!(wanted, Wanted::Above(_)) && events.is_empty() {
+    let (others, others_dropped) = crate::alarms::reported(&limits, new, may_list.is_none());
+    alarms.extend(others);
+    dropped += others_dropped;
+    // A crossing is read against the highest watched limit it reached,
+    // which may be another window's; each window is told its own.
+    for alarm in &mut alarms {
+        if let Some(limit) = own_limit(&limits, &alarm.what) {
+            alarm.limit = limit;
+        }
+    }
+    if matches!(wanted, Wanted::Above(_)) && events.is_empty() && alarms.is_empty() {
         return None;
     }
-    events.sort_unstable_by_key(|event| event.number);
-    // A reply over the byte budget ends at the last event that fits, and
-    // `highest` names it, so the client's next request asks for the rest.
+    // A reply over the byte budget ends at the last event or alarm that
+    // fits, in the order of their numbers, and `highest` names it, so the
+    // client's next request asks for the rest.
+    let mut sizes: Vec<(u64, usize)> = (events.iter())
+        .map(|event| {
+            let deepest = event.deepest.as_deref().map_or(0, str::len);
+            (event.number, event.top.len() + deepest)
+        })
+        .chain(alarms.iter().map(|alarm| (alarm.number, path_bytes(alarm))))
+        .collect();
+    sizes.sort_unstable();
     let mut bytes = 0;
-    let fits = events
-        .iter()
-        .take_while(|event| {
-            bytes += event.top.len() + event.deepest.as_deref().map_or(0, str::len);
+    let fits = (sizes.iter())
+        .take_while(|&&(_, size)| {
+            bytes += size;
             bytes <= REPLY_PATH_BYTES
         })
         .count();
-    if fits < events.len() {
-        events.truncate(fits);
-        highest = events.last().map_or(highest, |event| event.number);
+    if let Some(&(cut, _)) = sizes.get(fits) {
+        events.retain(|event| event.number < cut);
+        alarms.retain(|alarm| alarm.number < cut);
+        highest = sizes[..fits].last().map_or(highest, |&(number, _)| number);
     }
+    events.sort_unstable_by_key(|event| event.number);
+    alarms.sort_unstable_by_key(|alarm| alarm.number);
     Some(WearReply {
         run,
         highest,
         events,
         dropped,
+        alarms,
     })
+}
+
+/// Whether a file's or a folder's crossing reaches `limits`, the request's
+/// own: the limit is on and the value crossed it.
+fn reaches_file(limits: &WearLimits, warning: &Warning<Crossed>) -> bool {
+    let limit = match warning.subject {
+        Crossed::FileWrites { .. } => limits.file_writes.map(u64::from),
+        Crossed::FileWritten { .. } => limits.file_written,
+        Crossed::FolderWritten(_) => limits.folder_written,
+    };
+    limit.is_some_and(|limit| warning.reading.value >= limit)
+}
+
+/// The limit of `limits` that a crossing of `what` is read against, in the
+/// unit of its value; `None` while that limit is off.
+fn own_limit(limits: &WearLimits, what: &Alarmed) -> Option<u64> {
+    match what {
+        Alarmed::FileWrites { .. } => limits.file_writes.map(u64::from),
+        Alarmed::FileWritten { .. } => limits.file_written,
+        Alarmed::FolderWritten { .. } => limits.folder_written,
+        Alarmed::ProgramWritten { .. } => limits.program_written,
+        Alarmed::DiskWeek { .. } => limits.disk_week.map(week_allowance),
+    }
+}
+
+/// The bytes of the paths and names that `alarm` holds.
+fn path_bytes(alarm: &Alarm) -> usize {
+    match &alarm.what {
+        Alarmed::FileWrites { path }
+        | Alarmed::FileWritten { path }
+        | Alarmed::FolderWritten { path } => path.as_deref().map_or(0, str::len),
+        Alarmed::ProgramWritten { path } => path.len(),
+        Alarmed::DiskWeek { model, mounts, .. } => {
+            model.as_deref().map_or(0, str::len) + mounts.iter().map(String::len).sum::<usize>()
+        }
+    }
 }
 
 /// How a held wear request ended.
@@ -179,7 +311,8 @@ static WAITING: Notify = Notify::const_new();
 /// applies to a held request at its next reply. While it waits, it reads the
 /// pipe, so a window that closes frees its pipe instance and its connection
 /// at once. It has no idle timeout: a window holds its request for as long
-/// as it runs.
+/// as it runs. The request's limits, bounded ([`WearLimits::bounded`]), are
+/// [`watched`] while it is held.
 ///
 /// # Errors
 ///
@@ -191,6 +324,11 @@ pub(crate) async fn hold(
     visibility: Visibility,
     request: WearRequest,
 ) -> anyhow::Result<Held> {
+    let request = WearRequest {
+        limits: request.limits.bounded(),
+        ..request
+    };
+    let _watching = Watching::start(request.limits);
     let mut read_buf = [0u8; 1];
     let mut access = Access::Sees(visibility);
     let mut woke = false;
@@ -259,7 +397,7 @@ mod tests {
     use gozler_core::index::settle::Batch;
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
-        FrameDecoder, MAX_SERVER_FRAME, RepeatsAfter, Response, WearReply, WearRequest,
+        FrameDecoder, MAX_SERVER_FRAME, RepeatsAfter, Response, WearLimits, WearReply, WearRequest,
         decode_response_frame,
     };
     use gozler_core::query::{ResultNames, Viewer};
@@ -316,6 +454,7 @@ mod tests {
         WearRequest {
             after: RepeatsAfter { run, number },
             copies,
+            limits: WearLimits::default(),
         }
     }
 

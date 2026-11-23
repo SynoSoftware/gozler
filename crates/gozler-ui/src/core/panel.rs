@@ -20,7 +20,7 @@
 //!   because the change notifications and the end arrive in no fixed order.
 //!   A moment counter orders the ends and the starts of the readings.
 
-use super::fetch::{Ask, ChunkAsk, FromSnapshot, Generation, Outcome};
+use super::fetch::{Ask, ChunkAsk, FromSnapshot, Generation, Needs, Outcome};
 use super::model::Column;
 use super::query::{self, Filters, Matching};
 use super::search_list::{Deselect, SearchList};
@@ -33,7 +33,7 @@ use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::winpath::{absolute, is_root, parent_of};
 use gozler_fileops::{OperationId, Rename, Request, Taken};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -49,7 +49,7 @@ pub(crate) use counting::{Counted, Counting};
 use quick::Quick;
 pub(crate) use quick::{Finding, Found, QuickAction};
 use rows::{FolderRows, Name, name_hash, name_key, same_name};
-pub(crate) use rows::{give_sizes, sort_listing};
+pub(crate) use rows::{Given, give_sizes, sort_listing};
 pub(crate) use selecting::{Matcher, Paths, Selected, Selecting, decoded, listed_paths, listing};
 
 const PENDING_ROWS: usize = 32;
@@ -64,14 +64,22 @@ const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
 const FILE_ATTRIBUTE_SYSTEM: u32 = 0x4;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
-fn size_query(folder: &str) -> Option<ChunkAsk> {
+/// The most entries on screen whose values one live refresh asks for by
+/// name, below the service's limit of 256 terms in a query.
+const VISIBLE_NAMES: usize = 200;
+
+/// The request for the entries of `folder` that `text` names, with the
+/// values `needs` names: its subfolders, and with the writes each file
+/// written in the last hour, because a file's writes come in the same
+/// request (DESIGN.md: Folder sizes); or the entries on screen, by name.
+fn size_query(folder: &str, text: &str, needs: Needs) -> Option<ChunkAsk> {
     let filters = Filters {
         location: Some(folder.to_owned()),
         only_directly: true,
         ..Filters::default()
     };
     let search = query::search(
-        "folder:",
+        text,
         Matching::default(),
         &filters,
         &QueryStart {
@@ -87,7 +95,7 @@ fn size_query(folder: &str) -> Option<ChunkAsk> {
         start: 0,
         len: SIZE_ROWS,
         snapshot: FromSnapshot::No,
-        writes: false,
+        needs,
     })
 }
 
@@ -130,6 +138,11 @@ pub(crate) struct Entry {
     pub(crate) size: u64,
     /// The last write time as a `FILETIME` value.
     pub(crate) modified: i64,
+    /// The creation time as a `FILETIME` value.
+    pub(crate) created: i64,
+    /// What gozlerd gives the entry besides a folder's size, boxed, because
+    /// only a column or the sort that the person chose reads it.
+    indexed: Option<Box<Indexed>>,
     /// The hash of the name's folded form, made once by the thread that read
     /// the entry. The window finds a name by it and folds a name only when
     /// the hash matches, because a stored folded name would take more than
@@ -151,6 +164,8 @@ impl Entry {
             attributes,
             size,
             modified,
+            created: 0,
+            indexed: None,
             sized: false,
             link: false,
         }
@@ -159,6 +174,22 @@ impl Entry {
     /// This entry, a junction or a symbolic link when `link` says so.
     pub(crate) fn linked(self, link: bool) -> Entry {
         Entry { link, ..self }
+    }
+
+    /// This entry, created at `created`, a `FILETIME` value.
+    pub(crate) fn created(self, created: i64) -> Entry {
+        Entry { created, ..self }
+    }
+
+    /// A folder's counts from gozlerd, while a column asks for them.
+    pub(crate) fn counts(&self) -> Option<gozler_core::index::Counts> {
+        self.indexed.as_ref()?.counts
+    }
+
+    /// The writes of the last hour from gozlerd, while a column or the sort
+    /// asks for them.
+    pub(crate) fn writes(&self) -> Option<gozler_core::proto::ItemWrites> {
+        self.indexed.as_ref()?.writes
     }
 
     /// Whether the list shows Windows' link arrow on the entry's icon.
@@ -223,6 +254,24 @@ impl Entry {
     /// names; [`Panel::row_of`] looks for the exact name first.
     fn is(&self, name: &Name) -> bool {
         self.hash == name.hash && same_name(&self.name, &name.raw)
+    }
+}
+
+/// What gozlerd gives a panel's entry besides a folder's size
+/// (DESIGN.md: Folder sizes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Indexed {
+    /// A folder's files and folders below it.
+    pub(crate) counts: Option<gozler_core::index::Counts>,
+    pub(crate) writes: Option<gozler_core::proto::ItemWrites>,
+}
+
+impl Indexed {
+    fn of(row: &ResultItem) -> Option<Indexed> {
+        (row.counts.is_some() || row.writes.is_some()).then_some(Indexed {
+            counts: row.counts,
+            writes: row.writes,
+        })
     }
 }
 
@@ -424,8 +473,10 @@ pub(crate) enum TakenRows {
     },
 }
 
-/// A column of a panel's list (DESIGN.md: A panel, Search in a panel).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A column of a panel's list (DESIGN.md: A panel, Search in a panel). Its
+/// names are `ui.json`'s.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum PanelColumn {
     Name,
     Ext,
@@ -433,40 +484,65 @@ pub(crate) enum PanelColumn {
     Folder,
     Size,
     DateModified,
+    DateCreated,
+    Attributes,
+    Writes,
+    Written,
+    Files,
+    Folders,
 }
 
 impl PanelColumn {
-    /// A folder panel's columns, in their order.
-    pub(crate) const FOLDER: [PanelColumn; 4] = [
-        PanelColumn::Name,
-        PanelColumn::Ext,
-        PanelColumn::Size,
-        PanelColumn::DateModified,
-    ];
-    /// A search panel's columns, in their order.
-    pub(crate) const SEARCH: [PanelColumn; 5] = [
+    /// Every column, in the list's order (DESIGN.md: A panel).
+    pub(crate) const ALL: [PanelColumn; 11] = [
         PanelColumn::Name,
         PanelColumn::Ext,
         PanelColumn::Folder,
         PanelColumn::Size,
         PanelColumn::DateModified,
+        PanelColumn::DateCreated,
+        PanelColumn::Attributes,
+        PanelColumn::Writes,
+        PanelColumn::Written,
+        PanelColumn::Files,
+        PanelColumn::Folders,
+    ];
+    /// The columns a panel shows only while the person chooses them. It
+    /// shows the others until the person hides them, and Name always.
+    pub(crate) const CHOSEN: [PanelColumn; 6] = [
+        PanelColumn::DateCreated,
+        PanelColumn::Attributes,
+        PanelColumn::Writes,
+        PanelColumn::Written,
+        PanelColumn::Files,
+        PanelColumn::Folders,
     ];
 
-    /// What a click on its header sorts by; `None` for Folder, whose
-    /// header does not sort (DESIGN.md: Search in a panel).
+    /// The column that shows Search's `column`.
+    pub(crate) fn of(column: Column) -> PanelColumn {
+        (PanelColumn::ALL.into_iter())
+            .find(|panel| panel.search_column() == column)
+            .expect("every Search column has a panel column")
+    }
+
+    /// Whether a panel shows it until the person hides it: a column the
+    /// person can hide that is not one of [`PanelColumn::CHOSEN`].
+    fn shown_until_hidden(self) -> bool {
+        self.search_column().row().can_hide && !PanelColumn::CHOSEN.contains(&self)
+    }
+
+    /// What a click on its header sorts by: Search's column's key, and
+    /// `None` for Folder, whose header does not sort (DESIGN.md: Search in
+    /// a panel).
     pub(crate) fn sort_key(self) -> Option<SortKey> {
         match self {
-            PanelColumn::Name => Some(SortKey::Name),
-            PanelColumn::Ext => Some(SortKey::Extension),
             PanelColumn::Folder => None,
-            PanelColumn::Size => Some(SortKey::Size),
-            PanelColumn::DateModified => Some(SortKey::DateModified),
+            _ => self.search_column().row().sort_key,
         }
     }
 
-    /// Sizes are right-aligned, so their digits line up.
     pub(crate) fn right_aligned(self) -> bool {
-        self == PanelColumn::Size
+        self.search_column().row().right_aligned
     }
 
     /// The Search column whose default width it takes, and whose text a
@@ -478,8 +554,47 @@ impl PanelColumn {
             PanelColumn::Folder => Column::Path,
             PanelColumn::Size => Column::Size,
             PanelColumn::DateModified => Column::DateModified,
+            PanelColumn::DateCreated => Column::DateCreated,
+            PanelColumn::Attributes => Column::Attributes,
+            PanelColumn::Writes => Column::Writes,
+            PanelColumn::Written => Column::Written,
+            PanelColumn::Files => Column::Files,
+            PanelColumn::Folders => Column::Folders,
         }
     }
+}
+
+/// The columns of [`PanelColumn::CHOSEN`] that `ui.json` names.
+fn chosen_columns<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<PanelColumn>, D::Error> {
+    named_columns(deserializer, |column| PanelColumn::CHOSEN.contains(&column))
+}
+
+/// The columns shown until hidden that `ui.json` names.
+fn hidden_columns<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<PanelColumn>, D::Error> {
+    named_columns(deserializer, PanelColumn::shown_until_hidden)
+}
+
+/// The columns that `ui.json` names and `kind` accepts, in the list's
+/// order, without a name this version does not know, so a file from a
+/// newer version keeps the panel's other settings.
+fn named_columns<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    kind: fn(PanelColumn) -> bool,
+) -> Result<Vec<PanelColumn>, D::Error> {
+    let named = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Array(names) => names,
+        _ => Vec::new(),
+    };
+    let named: Vec<PanelColumn> = (named.into_iter())
+        .filter_map(|name| serde_json::from_value(name).ok())
+        .collect();
+    Ok((PanelColumn::ALL.into_iter())
+        .filter(|column| kind(*column) && named.contains(column))
+        .collect())
 }
 
 /// A listing the panel asks its reading thread for.
@@ -516,12 +631,13 @@ impl PartialEq for ReadSizes {
 impl Eq for ReadSizes {}
 
 impl ReadSizes {
-    pub(crate) fn values(&self) -> Vec<(Box<[u16]>, u64)> {
+    pub(crate) fn values(&self) -> Vec<Given> {
         self.0
             .as_ref()
             .into_iter()
             .flat_map(|rows| rows.entries())
-            .filter_map(|entry| Some((entry.name.clone(), entry.folder_size()?)))
+            .filter(|entry| entry.folder_size().is_some() || entry.indexed.is_some())
+            .map(Given::of)
             .collect()
     }
 }
@@ -705,6 +821,21 @@ pub(crate) struct SavedPanel {
     /// The folders the panel showed last, newest first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) history: Vec<String>,
+    /// The columns of [`PanelColumn::CHOSEN`] that the person chose.
+    #[serde(
+        default,
+        deserialize_with = "chosen_columns",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(crate) columns: Vec<PanelColumn>,
+    /// The columns shown until hidden that the person hid. A file from
+    /// before they could be hidden has none, so the panel shows them.
+    #[serde(
+        default,
+        deserialize_with = "hidden_columns",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub(crate) hidden: Vec<PanelColumn>,
 }
 
 /// One panel.
@@ -716,12 +847,21 @@ pub(crate) struct Panel {
     rows: Arc<FolderRows>,
     /// The sort the person chose, which the header shows.
     sort: SortSpec,
+    /// The columns of [`PanelColumn::CHOSEN`] that the person chose, and
+    /// the columns shown until hidden that the person hid, each in the
+    /// list's order.
+    chosen: Vec<PanelColumn>,
+    hidden: Vec<PanelColumn>,
     history: Vec<String>,
     /// The folder the panel last showed on each drive in this session, by
     /// the drive's folded root.
     drive_folders: HashMap<Vec<u8>, String>,
     read: Option<Read>,
     sizes_asked: Option<Generation>,
+    /// The names the sizes request in flight asked for, so its answer
+    /// changes only their values; `None` for a request of the whole folder
+    /// ([`Panels::ask_visible`]).
+    names_asked: Option<Arc<HashSet<Box<[u16]>>>>,
     /// gozlerd answered a sizes request since the list was emptied, so a
     /// folder without a size is unknown, not yet asked.
     sized: bool,
@@ -836,10 +976,13 @@ impl Panel {
             view: View::Reading,
             rows: Arc::new(FolderRows::empty(saved.sort)),
             sort: saved.sort,
+            chosen: saved.columns.clone(),
+            hidden: saved.hidden.clone(),
             history: saved.history.clone(),
             drive_folders: HashMap::new(),
             read: None,
             sizes_asked: None,
+            names_asked: None,
             sized: false,
             free: None,
             quick: Quick::default(),
@@ -927,6 +1070,40 @@ impl Panel {
 
     pub(crate) fn sort(&self) -> SortSpec {
         self.sort
+    }
+
+    /// The list's columns, in their order.
+    pub(crate) fn columns(&self) -> Vec<PanelColumn> {
+        (PanelColumn::ALL.into_iter())
+            .filter(|column| self.shows(*column))
+            .collect()
+    }
+
+    /// Whether the list shows `column`.
+    pub(crate) fn shows(&self, column: PanelColumn) -> bool {
+        if !self.can_show(column) {
+            false
+        } else if PanelColumn::CHOSEN.contains(&column) {
+            self.chosen.contains(&column)
+        } else {
+            !self.hidden.contains(&column)
+        }
+    }
+
+    /// Whether the list can show `column`: Folder only in a search panel,
+    /// because every row of a folder panel is in the same folder.
+    pub(crate) fn can_show(&self, column: PanelColumn) -> bool {
+        column != PanelColumn::Folder || matches!(self.view, View::Search(_))
+    }
+
+    /// The values the rows carry besides their sizes: those a chosen column
+    /// shows, and the writes a folder panel sorts by itself
+    /// ([`sort_listing`]), which a search panel leaves to gozlerd.
+    pub(crate) fn needs(&self) -> Needs {
+        let mut needs = Needs::of(self.chosen.iter().map(|c| c.search_column()));
+        needs.writes |= !matches!(self.view, View::Search(_))
+            && matches!(self.sort.key, SortKey::Writes | SortKey::Written);
+        needs
     }
 
     /// The path box's text: the folder a reading goes to, from the moment
@@ -1745,12 +1922,32 @@ impl Panels {
         std::mem::replace(&mut self.active, side) != side
     }
 
+    /// Shows `column` in `side`'s list, or hides it, unless it is Name;
+    /// whether the rows now lack values that it needs.
+    pub(crate) fn toggle_column(&mut self, side: Side, column: PanelColumn) -> bool {
+        let panel = self.panel_mut(side);
+        let before = panel.needs();
+        let toggled = |listed: &[PanelColumn]| -> Vec<PanelColumn> {
+            (PanelColumn::ALL.into_iter())
+                .filter(|c| listed.contains(c) != (*c == column))
+                .collect()
+        };
+        if PanelColumn::CHOSEN.contains(&column) {
+            panel.chosen = toggled(&panel.chosen);
+        } else if column.shown_until_hidden() {
+            panel.hidden = toggled(&panel.hidden);
+        }
+        panel.needs().exceed(before)
+    }
+
     /// What `ui.json` saves.
     pub(crate) fn saved(&self) -> SavedPanels {
         let saved = |panel: &Panel| SavedPanel {
             folder: panel.saved_folder().map(str::to_owned),
             sort: panel.sort,
             history: panel.history.clone(),
+            columns: panel.chosen.clone(),
+            hidden: panel.hidden.clone(),
         };
         SavedPanels {
             left: saved(&self.panels[0]),
@@ -1765,6 +1962,8 @@ impl Panels {
             panel.saved_folder() == saved.folder.as_deref()
                 && panel.sort == saved.sort
                 && panel.history == saved.history
+                && panel.chosen == saved.columns
+                && panel.hidden == saved.hidden
         };
         self.active == saved.active
             && same(&self.panels[0], &saved.left)
@@ -2058,6 +2257,7 @@ impl Panels {
         panel.clear();
         panel.read = None;
         panel.sizes_asked = None;
+        panel.names_asked = None;
         panel.set_awaited(None);
         panel.focused = None;
         panel.set_view(View::Search(Box::new(PanelSearch {
@@ -2804,14 +3004,63 @@ impl Panels {
     /// its folder, from gozlerd (DESIGN.md: Folder sizes).
     pub(crate) fn ask_sizes(&mut self, side: Side, generation: Generation) -> Option<Ask> {
         let panel = self.panel_mut(side);
+        let needs = panel.needs();
+        // Folders come first, so the first entry says whether any is one.
+        let first = panel.rows.entries().first();
         if !matches!(panel.view, View::Folder)
-            || !panel.rows.entries().first().is_some_and(Entry::is_folder)
+            || !first.is_some_and(|entry| entry.is_folder() || needs.writes)
         {
             panel.sizes_asked = None;
+            panel.names_asked = None;
             return None;
         }
-        let ask = size_query(&panel.folder)?;
+        let text = if needs.writes {
+            "folder: | writes:>0"
+        } else {
+            "folder:"
+        };
+        let ask = size_query(&panel.folder, text, needs)?;
         panel.sizes_asked = Some(generation);
+        panel.names_asked = None;
+        Some(Ask::FolderSizes(side, ask))
+    }
+
+    /// The live refresh's request for `side`'s rows `visible` (DESIGN.md:
+    /// Folder sizes): gozlerd's values of the entries on screen again, each
+    /// asked by its name, so the request reads only the folder's own entries
+    /// and its answer carries no row the screen does not show. A file is
+    /// asked only while a column or the sort shows its writes, because its
+    /// size and dates come from the disk. `None` while the panel shows no
+    /// folder, a sizes request waits, or no entry on screen has a value
+    /// from gozlerd.
+    pub(crate) fn ask_visible(
+        &mut self,
+        side: Side,
+        visible: Range<u64>,
+        generation: Generation,
+    ) -> Option<Ask> {
+        let panel = self.panel_mut(side);
+        if !matches!(panel.view, View::Folder) || panel.sizes_asked.is_some() {
+            return None;
+        }
+        let needs = panel.needs();
+        let names: HashSet<Box<[u16]>> = visible
+            .filter_map(|row| panel.entry(row))
+            .filter(|entry| entry.is_folder() || needs.writes)
+            .take(VISIBLE_NAMES)
+            .map(|entry| entry.name.clone())
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        // A Windows name holds no `"` and no `|`, so quotes keep it whole.
+        let text = (names.iter())
+            .map(|name| format!("wfn:\"{}\"", String::from_utf16_lossy(name)))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let ask = size_query(&panel.folder, &text, needs)?;
+        panel.sizes_asked = Some(generation);
+        panel.names_asked = Some(Arc::new(names));
         Some(Ask::FolderSizes(side, ask))
     }
 
@@ -2834,8 +3083,15 @@ impl Panels {
             return false;
         }
         panel.sizes_asked = None;
-        panel.sized = true;
-        if let Some(update) = panel.submit(RowChange::Sizes(Box::new(outcome)), &taken) {
+        let names = panel.names_asked.take();
+        // Only an answer for the whole folder tells which folders gozlerd
+        // has no size for.
+        panel.sized |= names.is_none();
+        let sizes = RowChange::Sizes {
+            outcome: Box::new(outcome),
+            names,
+        };
+        if let Some(update) = panel.submit(sizes, &taken) {
             panel.ready_update = Some(update);
         }
         true
@@ -2847,6 +3103,7 @@ impl Panels {
             return false;
         }
         panel.sizes_asked = None;
+        panel.names_asked = None;
         true
     }
 
@@ -4171,12 +4428,12 @@ pub(crate) mod tests {
         assert_eq!(panels.panel(Side::Left).destination(), Some(r"C:\a"));
     }
 
-    /// A panel holds about 100 bytes for each entry (DESIGN.md: Memory budget):
-    /// the entry itself, its row's index, and its name on the heap. A field
-    /// that grows the entry would pass every other test.
+    /// A panel holds about 116 bytes for each entry (DESIGN.md: Memory
+    /// budget): the entry itself, its row's index, and its name on the heap.
+    /// A field that grows the entry would pass every other test.
     #[test]
     fn an_entry_fits_the_memory_budget() {
-        assert!(size_of::<Entry>() <= 48, "{} bytes", size_of::<Entry>());
+        assert!(size_of::<Entry>() <= 64, "{} bytes", size_of::<Entry>());
     }
 
     /// A change notification during a move to another folder reads
@@ -4205,6 +4462,39 @@ pub(crate) mod tests {
         let ask = panels.start_reading(Side::Left, || unreachable!("a saved folder"));
         assert_eq!(ask.expect("a folder panel reads").path, r"D:\x");
         assert_eq!(panels.saved().left.folder.as_deref(), Some(r"D:\x"));
+    }
+
+    /// A file from a newer version that names a column this one does not
+    /// know keeps the panel's folder and its columns; Name is never hidden.
+    #[test]
+    fn an_unknown_column_name_keeps_the_panel_s_other_settings() {
+        let saved: SavedPanel = serde_json::from_str(
+            r#"{"folder": "D:\\x", "columns": ["owner", "writes", "name"],
+                "hidden": ["owner", "size", "name", "writes"]}"#,
+        )
+        .expect("the panel loads");
+        assert_eq!(saved.folder.as_deref(), Some(r"D:\x"));
+        assert_eq!(saved.columns, [PanelColumn::Writes]);
+        assert_eq!(saved.hidden, [PanelColumn::Size]);
+    }
+
+    /// A file from before a panel could hide columns names only the chosen
+    /// ones, and the panel shows them after the columns it always showed.
+    #[test]
+    fn an_older_file_s_chosen_columns_follow_the_usual_ones() {
+        let saved: SavedPanel =
+            serde_json::from_str(r#"{"columns": ["writes"]}"#).expect("the panel loads");
+        let panel = Panel::new(&saved);
+        assert_eq!(
+            panel.columns(),
+            [
+                PanelColumn::Name,
+                PanelColumn::Ext,
+                PanelColumn::Size,
+                PanelColumn::DateModified,
+                PanelColumn::Writes
+            ]
+        );
     }
 
     /// The path box expands environment variables, joins a relative path to

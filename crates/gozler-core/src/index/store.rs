@@ -899,6 +899,10 @@ pub struct Counts {
     pub folders: u32,
 }
 
+/// The bytes that Dates created adds to the index for each entry: the size
+/// of an element of the created column of `EntryTable`.
+pub const CREATED_ENTRY_BYTES: u64 = size_of::<i64>() as u64;
+
 /// Struct-of-arrays entry storage. Every column is indexed by [`EntryIdx`];
 /// one entry exists per link name, so a hard-linked file has several entries
 /// sharing an [`Frn`], chained through `next_link`. Entries sharing an

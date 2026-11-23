@@ -23,6 +23,10 @@
 //!    of the batch's writes (`Writes::add_sizes`);
 //! 4. the link set of each file whose links changed.
 //!
+//! A file that a program holds open writes no record until it closes, so
+//! [`OpenFiles`] keeps such files, and the tail reads their sizes again
+//! every few seconds.
+//!
 //! Such a folder's entries are hidden until its descriptor is read, and the
 //! later steps can take seconds, so the descriptors come first. The link step
 //! finds each link's folder by its file ID, and that folder may be one the
@@ -37,14 +41,17 @@
 
 use std::collections::{HashSet, VecDeque};
 
+use crate::alarm::Watched;
 use crate::index::volume::{Room, make_room};
 use crate::index::writes;
 use crate::index::{Anomaly, ApplyOutcome, LinkTarget, VolumeIndex};
 use crate::layout::LayoutFile;
 use crate::types::Frn;
 use crate::usn::record::{
-    FILE_ATTRIBUTE_REPARSE_POINT, ParsedUsnRecord, USN_REASON_RENAME_NEW_NAME,
+    FILE_ATTRIBUTE_REPARSE_POINT, ParsedUsnRecord, USN_REASON_CLOSE, USN_REASON_FILE_CREATE,
+    USN_REASON_FILE_DELETE, USN_REASON_RENAME_NEW_NAME, USN_REASON_RENAME_OLD_NAME,
 };
+use rustc_hash::FxHashMap;
 
 /// What the walk and the settle read from the volume.
 pub trait VolumeReads {
@@ -185,18 +192,28 @@ pub struct Batch<'a> {
     /// rather than in the write lock's hold, because folding the names is
     /// most of what counting costs.
     pub name_keys: Vec<u64>,
+    /// The wear alarm's limits that a window watches, which the batch's
+    /// writes are checked against ([`VolumeIndex::alarms`]).
+    pub limits: Watched,
 }
 
 impl<'a> Batch<'a> {
     /// A batch of `records` that replays no build and no walk, as most
-    /// batches do.
+    /// batches do, and checks no limit.
     pub fn of(records: &'a [ParsedUsnRecord]) -> Self {
         Batch {
             records,
             replaying_walk: false,
             detects_repeats: true,
             name_keys: writes::name_keys(records),
+            limits: Watched::default(),
         }
+    }
+
+    /// When the batch's last change was made, a FILETIME; 0 for a batch of
+    /// no records.
+    pub fn time(&self) -> i64 {
+        self.records.last().map_or(0, |rec| rec.time)
     }
 }
 
@@ -433,6 +450,7 @@ pub fn settle_batch<R: VolumeReads>(
                         .ok()
                         .map(|at| stats[at].1.size)
                 });
+                i.check_written(&writes, &batch.limits, batch.time());
             }
             for (frn, stat) in &stats {
                 i.set_stat(*frn, stat.size, stat.mtime);
@@ -495,14 +513,182 @@ pub fn settle_batch<R: VolumeReads>(
     Ok(settled)
 }
 
+/// At most this many files of a volume are re-read while a program holds
+/// them open ([`OpenFiles`]).
+const MOST_OPEN: usize = 256;
+
+/// The files of a volume that a program holds open for writing: the latest
+/// record of each has a data bit and no `CLOSE`. NTFS writes a record only
+/// when an open adds a reason bit and when the last handle closes, so a
+/// program that keeps a file open and writes it on writes no record, and
+/// the size step never reads its new size. [`Self::read`] reads it.
+///
+/// The list keeps at most `MOST_OPEN` files. When it is full, a new file
+/// waits, because the files held open longest are the ones it is for. A
+/// record with `CLOSE`, a delete or a rename takes a file off it.
+#[derive(Default)]
+pub struct OpenFiles {
+    /// Each file's open: the kinds of write and whether it created the file.
+    /// [`Self::read`] fills in the rows from the index.
+    files: FxHashMap<Frn, writes::PendingWrite>,
+}
+
+impl OpenFiles {
+    /// Notes the files that `batch` leaves open for writing, and those it
+    /// closes, deletes or renames. Call it for every batch, in order.
+    pub fn note(&mut self, batch: &Batch<'_>) {
+        let ends = USN_REASON_CLOSE
+            | USN_REASON_FILE_DELETE
+            | USN_REASON_RENAME_NEW_NAME
+            | USN_REASON_RENAME_OLD_NAME;
+        for rec in batch.records {
+            if rec.is_dir() {
+                continue;
+            }
+            if rec.reason & ends != 0 {
+                self.files.remove(&rec.frn);
+            } else if rec.reason & writes::DATA != 0
+                && (self.files.len() < MOST_OPEN || self.files.contains_key(&rec.frn))
+            {
+                let open = writes::PendingWrite {
+                    frn: rec.frn,
+                    folder: rec.parent_frn,
+                    name: 0,
+                    step: 0,
+                    marks: writes::Marks::of(rec.reason),
+                    created: rec.reason & USN_REASON_FILE_CREATE != 0,
+                    closed: false,
+                    renamed: false,
+                };
+                self.files.insert(rec.frn, open);
+            }
+        }
+    }
+
+    /// Reads the size and date of each listed file with the index unlocked,
+    /// and answers those that differ from the index. `cancelled` is asked
+    /// before each file. A file that is gone, that the index no longer
+    /// holds, or whose record names a folder the Include rules leave out
+    /// leaves the list; the others take their rows from the name the index
+    /// holds now.
+    pub fn read<R: VolumeReads>(
+        &mut self,
+        index: &impl SharedIndex,
+        reads: &mut R,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> OpenSizes {
+        if self.files.is_empty() {
+            return OpenSizes(Vec::new());
+        }
+        index.read(|i| {
+            self.files.retain(|&frn, open| {
+                let Some(head) = i.head_of(frn).filter(|_| !i.is_left_out(open.folder)) else {
+                    return false;
+                };
+                open.folder = i.entry(i.entry(head).parent()).frn();
+                open.name = writes::key_of(i, head);
+                true
+            });
+        });
+        let mut read = Vec::new();
+        let mut gone = Vec::new();
+        for open in self.files.values() {
+            if cancelled() {
+                break;
+            }
+            match reads.stat(open.frn) {
+                Ok(Some(stat)) => read.push((*open, stat)),
+                Ok(None) => gone.push(open.frn),
+                Err(_) => {}
+            }
+        }
+        for frn in gone {
+            self.files.remove(&frn);
+        }
+        let mut changed: Vec<(writes::PendingWrite, FileStat)> = index.read(|i| {
+            read.into_iter()
+                .filter(|(open, stat)| {
+                    i.head_of(open.frn).is_some_and(|head| {
+                        let entry = i.entry(head);
+                        entry.size() != Some(stat.size) || entry.mtime() != Some(stat.mtime)
+                    })
+                })
+                .collect()
+        });
+        // `add_sizes` takes each file's writes together.
+        changed.sort_by_key(|(open, _)| open.frn);
+        OpenSizes(changed)
+    }
+}
+
+/// The sizes and dates of open files that [`OpenFiles::read`] found to
+/// differ from the index, sorted by file ID.
+pub struct OpenSizes(Vec<(writes::PendingWrite, FileStat)>);
+
+impl OpenSizes {
+    /// Stores the sizes and dates in one short write, adds the bytes the
+    /// files grew by to the table of writes by rule 4, and checks them
+    /// against `limits` at `time`, a FILETIME. It counts no write: the
+    /// journal counts them.
+    pub fn add(self, index: &impl SharedIndex, limits: &Watched, time: i64) {
+        if self.0.is_empty() {
+            return;
+        }
+        let grown = self.pending(time);
+        index.write(|i| {
+            i.move_hour(time, limits);
+            i.writes_mut().begin_batch();
+            // Before `set_stat`, which replaces the sizes before.
+            i.add_write_sizes(&grown, &[], |frn| self.size(frn));
+            i.check_written(&grown, limits, time);
+            self.store_in(i);
+        });
+    }
+
+    /// Stores the sizes and dates right after a rebuild, and marks each
+    /// file's rows "at least": the build read sizes from the MFT, which can
+    /// be older or newer than the last read, so the growth between them is
+    /// unknown. `limits` and `time` move the hour, as [`Self::add`] does.
+    pub fn store(self, index: &impl SharedIndex, limits: &Watched, time: i64) {
+        if self.0.is_empty() {
+            return;
+        }
+        let changed = self.pending(time);
+        index.write(|i| {
+            i.move_hour(time, limits);
+            i.writes_mut().mark_at_least(&changed);
+            self.store_in(i);
+        });
+    }
+
+    /// Each file's writes, in the step of `time`.
+    fn pending(&self, time: i64) -> Vec<writes::PendingWrite> {
+        let step = time.div_euclid(writes::STEP_TICKS);
+        let at = |open: &writes::PendingWrite| writes::PendingWrite { step, ..*open };
+        self.0.iter().map(|(open, _)| at(open)).collect()
+    }
+
+    fn size(&self, frn: Frn) -> Option<u64> {
+        let at = self.0.binary_search_by_key(&frn, |(open, _)| open.frn);
+        at.ok().map(|at| self.0[at].1.size)
+    }
+
+    fn store_in(&self, index: &mut VolumeIndex) {
+        for (open, stat) in &self.0 {
+            index.set_stat(open.frn, stat.size, stat.mtime);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Batch, FileLink, FileStat, Listed, VolumeReads, Walk, WalkFailed, settle_batch,
+        Batch, FileLink, FileStat, Listed, OpenFiles, VolumeReads, Walk, WalkFailed, settle_batch,
         walk_folders,
     };
+    use crate::alarm::Watched;
     use crate::index::volume::{Room, make_room};
-    use crate::index::writes::Writes;
+    use crate::index::writes::{Writes, Written};
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::layout::{LayoutFile, LayoutName};
     use crate::types::Frn;
@@ -865,6 +1051,85 @@ mod tests {
             .of_name(ROOT, b"log.txt")
             .expect("the write counted");
         assert_eq!((values.writes, values.written), (1, 2 << 20));
+    }
+
+    /// An index whose `log.txt` held 10 MB and has a table of writes, after
+    /// an append to 11 MB with no `CLOSE`, and the list that holds it open.
+    fn held_open(reads: &mut Fake) -> (RefCell<VolumeIndex>, OpenFiles) {
+        let index = index_of(&[(id(10), ROOT, "log.txt", false)]);
+        {
+            let mut i = index.borrow_mut();
+            i.set_stat(id(10), 10 << 20, 0);
+            let mut table = Writes::for_entries(0);
+            table.keep(i.writes_mut(), 0);
+            *i.writes_mut() = table;
+        }
+        let mut open = OpenFiles::default();
+        let extend = USN_REASON_DATA_EXTEND;
+        let append = [record(id(10), ROOT, "log.txt", false, extend)];
+        open.note(&Batch::of(&append));
+        reads.sizes.insert(id(10), 11 << 20);
+        settle(&index, reads, &append, false).expect("nothing to walk");
+        (index, open)
+    }
+
+    /// Closes `log.txt` at the size `reads` holds, and answers its writes
+    /// and its Written.
+    fn close(
+        index: &RefCell<VolumeIndex>,
+        reads: &mut Fake,
+        open: &mut OpenFiles,
+    ) -> (u32, Written) {
+        let closed = USN_REASON_DATA_EXTEND | USN_REASON_CLOSE;
+        let records = [record(id(10), ROOT, "log.txt", false, closed)];
+        open.note(&Batch::of(&records));
+        settle(index, reads, &records, false).expect("nothing to walk");
+        let index = index.borrow();
+        let values = index
+            .writes()
+            .of_name(ROOT, b"log.txt")
+            .expect("the write counted");
+        (values.writes, Written::of(values.written, values.marks))
+    }
+
+    /// A program that holds a file open and appends to it writes no record,
+    /// and the refresh counts the growth. The file's `CLOSE` record then
+    /// finds the size the refresh stored, so the growth counts once; read
+    /// from the size before the refresh, it would count twice. The close
+    /// takes the file off the list.
+    #[test]
+    fn a_file_held_open_counts_its_growth_once() {
+        let mut reads = Fake::default();
+        let (index, mut open) = held_open(&mut reads);
+
+        reads.sizes.insert(id(10), 15 << 20);
+        let sizes = open.read(&index, &mut reads, || false);
+        sizes.add(&index, &Watched::default(), 0);
+
+        let counted = close(&index, &mut reads, &mut open);
+        assert_eq!(counted, (1, Written::Exact(5 << 20)));
+        assert!(open.files.is_empty());
+    }
+
+    /// A rebuild stores a size from the MFT, here older than the last read.
+    /// The read right after it stores the size and marks the file "at
+    /// least", so the growth since the last read is neither counted again,
+    /// from the older size, nor dropped as if exact.
+    #[test]
+    fn a_rebuild_neither_counts_again_nor_drops_a_held_files_growth() {
+        let mut reads = Fake::default();
+        let (index, mut open) = held_open(&mut reads);
+        reads.sizes.insert(id(10), 15 << 20);
+        let sizes = open.read(&index, &mut reads, || false);
+        sizes.add(&index, &Watched::default(), 0);
+
+        index.borrow_mut().set_stat(id(10), 12 << 20, 0);
+        reads.sizes.insert(id(10), 16 << 20);
+        let sizes = open.read(&index, &mut reads, || false);
+        sizes.store(&index, &Watched::default(), 0);
+
+        let counted = close(&index, &mut reads, &mut open);
+        assert_eq!(counted, (1, Written::AtLeast(5 << 20)));
     }
 
     /// After `make_room`, the batch grows no buffer under the write lock.

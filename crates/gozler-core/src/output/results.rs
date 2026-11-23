@@ -3,6 +3,7 @@
 //! bytes for the same rows.
 
 use super::{TableOptions, TableWriter, format_date_local};
+use crate::index::writes::Written;
 use crate::proto::{QueryResults, ResultItem};
 use crate::query::MatchSums;
 use jiff::tz::TimeZone;
@@ -116,6 +117,27 @@ struct JsonItem<'a> {
     mtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     created: Option<String>,
+    #[serde(flatten)]
+    written: Option<JsonWritten>,
+}
+
+/// An item's Written: `null` when no byte of it is known, and with
+/// `written_at_least` when it is only the least the writes put on the disk.
+#[derive(Serialize)]
+struct JsonWritten {
+    written: Option<u64>,
+    written_at_least: bool,
+}
+
+impl JsonWritten {
+    fn of(item: &ResultItem) -> Option<JsonWritten> {
+        let writes = item.writes?;
+        let written = Written::of(writes.written, writes.marks);
+        Some(JsonWritten {
+            written: written.known(),
+            written_at_least: matches!(written, Written::AtLeast(_)),
+        })
+    }
 }
 
 impl<'a> JsonResults<'a> {
@@ -134,6 +156,7 @@ impl<'a> JsonResults<'a> {
                     item,
                     mtime: date(item.mtime_ft),
                     created: date(item.created_ft),
+                    written: JsonWritten::of(item),
                 })
                 .collect(),
             more: all.more || all.total > all.items.len() as u64,

@@ -655,7 +655,10 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         function: Function::Written,
         example: ">1gb",
         help: "Files and folders whose writes in the last hour put this many bytes on the \
-               disk, counted as `writes:` counts; accepts the values of `size:`",
+               disk, counted as `writes:` counts; accepts the values of `size:`; matches \
+               only what the known bytes prove: a value with unknown bytes, as from a cut or \
+               a write inside a file, never matches `written:<1mb`, and matches `written:>1mb` only \
+               when its known bytes pass 1 MB",
     },
     SearchFunction {
         names: &["ww"],

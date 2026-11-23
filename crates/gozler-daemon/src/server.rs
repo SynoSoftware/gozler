@@ -112,6 +112,8 @@ async fn accept_loop(
         return Ok(());
     };
     let conn_limit = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    // Ends with the runtime, when this loop returns.
+    tokio::spawn(crate::alarms::sample_every_step());
     tracing::info!(pipe = PIPE_NAME, "query server listening");
     let mut connect_failures = Throttle::default();
     let mut dropped_clients = Throttle::default();
@@ -520,12 +522,13 @@ impl Serving<'_> {
     /// Answers one request, as [`decode_request`] decoded its frame, with what
     /// `access` lets the client see.
     ///
-    /// `Hello`, `Status` and `SettingsSaved` answer every client, because they
-    /// show no name; `Status` also tells the client what it sees. A request
-    /// that reads the index's entries is refused when gozlerd cannot tell who
-    /// sent it, and the Include count answers only a user who sees every file:
-    /// its folder and name rules over the whole index would let any other user
-    /// count hidden entries until the counts spell their names.
+    /// `Hello`, `Status`, `SettingsSaved` and `DiskHealth` answer every
+    /// client, because they show no name; `Status` also tells the client what
+    /// it sees. A request that reads the index's entries is refused when
+    /// gozlerd cannot tell who sent it, and the Include count answers only a
+    /// user who sees every file: its folder and name rules over the whole
+    /// index would let any other user count hidden entries until the counts
+    /// spell their names.
     ///
     /// A request from a newer client may hold parts this daemon cannot read:
     /// the reply names the skipped parts in [`Response::Skipped`] before the
@@ -566,6 +569,7 @@ impl Serving<'_> {
                 include.reload();
                 return self.reply(Response::SettingsApplied);
             }
+            Request::DiskHealth => return self.reply(crate::disks::health()),
             request => request,
         };
         let viewer = match access {
@@ -593,7 +597,10 @@ impl Serving<'_> {
             Request::SortResultSnapshot(sort) => {
                 return self.sort_snapshot(&sort, viewer);
             }
-            Request::Hello { .. } | Request::Status { .. } | Request::SettingsSaved => {
+            Request::Hello { .. }
+            | Request::Status { .. }
+            | Request::SettingsSaved
+            | Request::DiskHealth => {
                 unreachable!("answered before the client's access is taken")
             }
             Request::Wear(_) => {

@@ -82,7 +82,9 @@ pub(crate) enum KeyValue {
     Extension(u32),
     /// The writes of the last hour, `None` while unknown.
     Writes(Option<u64>),
-    /// The bytes those writes put on the disk, `None` while unknown.
+    /// The bytes those writes are known to have put on the disk, `None`
+    /// while unknown or while no byte of them is known
+    /// ([`Written::known`](crate::index::writes::Written::known)).
     Written(Option<u64>),
 }
 

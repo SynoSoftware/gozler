@@ -32,7 +32,7 @@ use crate::fold::fold_accents;
 use crate::index::repeats::RepeatTest;
 use crate::index::store::{NameId, NamePair};
 use crate::index::volume::SubtreeWalk;
-use crate::index::writes::{Low, Values};
+use crate::index::writes::{Low, Values, Written};
 use crate::index::{EntryView, SeenBy, VolumeIndex};
 use crate::links::{Links, Reached};
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
@@ -2871,7 +2871,7 @@ fn key_records(
                 index
                     .writes()
                     .of_entry(index, idx, seen_by)
-                    .map(|values| values.written),
+                    .and_then(|values| Written::of(values.written, values.marks).known()),
             ),
         };
         *record = SortRecord::keyed(primary_key(sort.dir, value), name_key, idx);

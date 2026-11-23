@@ -105,6 +105,12 @@ impl Attributes {
         })
     }
 
+    /// The attributes of `bits`, as Windows reports them, without the bits
+    /// that have no letter.
+    pub fn lettered(bits: u32) -> Self {
+        Attributes(bits & LETTERED)
+    }
+
     /// The `FILE_ATTRIBUTE_*` bits.
     pub fn bits(self) -> u32 {
         self.0

@@ -229,9 +229,11 @@ fn run(
                 Outcome::Status(status, version.to_owned(), programs.clone())
             }),
             Ask::Rows(_, ask) => rows(&mut client, &ask, Some(reply)).map(Outcome::Rows),
-            Ask::Program(ask) | Ask::FolderSizes(_, ask) => {
+            Ask::Program(ask) | Ask::FolderSizes(_, ask) | Ask::Refresh(ask) => {
                 rows(&mut client, &ask, None).map(Outcome::Rows)
             }
+            Ask::Values(ask) => rows(&mut client, &ask.rows, None)
+                .map(|chunk| Outcome::Values(ask.merge(chunk.rows))),
             Ask::Selection(_, ask) => selection(&mut client, ask).map(Outcome::Selection),
             Ask::FolderSize(search) => client
                 .totals(search.request(Returns::Totals))
@@ -420,7 +422,7 @@ fn export(
 
 /// The failure the window shows for the client's error (DESIGN.md: Shared
 /// code); a pipe that cannot be opened or read shows as a lost connection.
-fn failure(error: ClientError, programs: &Programs) -> DaemonFailure {
+pub(super) fn failure(error: ClientError, programs: &Programs) -> DaemonFailure {
     match error {
         ClientError::NotRunning(why) => DaemonFailure::NotRunning(why),
         ClientError::NotReady => DaemonFailure::NotReady,

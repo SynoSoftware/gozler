@@ -28,6 +28,8 @@ pub(super) enum Timer {
     Calculating,
     /// The wear request that failed is sent again.
     WearRetry,
+    /// Search's results sorted by writes refresh (DESIGN.md: Results list).
+    Live,
 }
 
 const IDS: &[(Timer, usize)] = &[
@@ -63,6 +65,7 @@ const IDS: &[(Timer, usize)] = &[
     (Timer::SelectionWait, 32),
     (Timer::Calculating, 33),
     (Timer::WearRetry, 34),
+    (Timer::Live, 35),
 ];
 
 impl Timer {

@@ -4,10 +4,12 @@
 
 use super::calculation::End;
 use super::{
-    Awaited, Entry, FolderChange, Outcome, Place, Row, Totals, changes_sizes, ends_in, last_name,
+    Awaited, Entry, FolderChange, Indexed, Outcome, Place, Row, Totals, changes_sizes, ends_in,
+    last_name,
 };
 use crate::core::selection::push_rows;
 use gozler_core::fold::fold_into;
+use gozler_core::index::writes::Written;
 use gozler_core::types::{SortDir, SortKey, SortSpec};
 use gozler_core::wtf8;
 use gozler_fileops::{OperationId, Taken};
@@ -125,32 +127,56 @@ fn apply_order(entries: &mut [Entry], mut order: Vec<usize>) {
     }
 }
 
-/// Gives each folder of a listing its size from `sizes`, matched by name
-/// as [`super::Panels::accept_sizes`] matches gozlerd's.
-pub(crate) fn give_sizes(entries: &mut [Entry], sizes: &[(Box<[u16]>, u64)]) {
+/// What gozlerd gave an entry of a panel's folder, by its name.
+#[derive(Clone, Debug)]
+pub(crate) struct Given {
+    pub(crate) name: Box<[u16]>,
+    /// A folder's size.
+    pub(crate) size: Option<u64>,
+    pub(crate) indexed: Option<Indexed>,
+}
+
+impl Given {
+    /// What gozlerd gave `entry`.
+    pub(super) fn of(entry: &Entry) -> Given {
+        Given {
+            name: entry.name.clone(),
+            size: entry.folder_size(),
+            indexed: entry.indexed.as_deref().copied(),
+        }
+    }
+}
+
+/// Gives each entry of a listing what `given` holds for it, matched by
+/// name as [`super::Panels::accept_sizes`] matches gozlerd's; an entry that
+/// `given` leaves out has none of it.
+pub(crate) fn give_sizes(entries: &mut [Entry], given: &[Given]) {
     // By the hash of the folded name.
     let mut by_hash = HashMap::<u64, Vec<_>>::new();
-    for named in sizes {
+    for named in given {
         by_hash
-            .entry(name_hash(&name_key(&named.0)))
+            .entry(name_hash(&name_key(&named.name)))
             .or_default()
             .push(named);
     }
-    for entry in entries.iter_mut().filter(|e| e.is_folder()) {
-        let size = (by_hash.get(&entry.hash))
-            .and_then(|named| best_match(named, &entry.name, |(name, _)| name))
-            .map(|(_, size)| *size);
-        entry.set_folder_size(size);
+    for entry in entries.iter_mut() {
+        let found = (by_hash.get(&entry.hash))
+            .and_then(|named| best_match(named, &entry.name, |given| &given.name));
+        entry.set_folder_size(found.and_then(|given| given.size));
+        entry.indexed = found.and_then(|given| given.indexed).map(Box::new);
     }
 }
 
 fn give_indexed_sizes(entries: &mut [Entry], rows: &[gozler_core::proto::ResultItem]) {
-    let sizes: Vec<(Box<[u16]>, u64)> = rows
+    let given: Vec<Given> = rows
         .iter()
-        .filter(|row| row.is_dir)
-        .filter_map(|row| Some((last_name(&row.path).encode_utf16().collect(), row.size?)))
+        .map(|row| Given {
+            name: last_name(&row.path).encode_utf16().collect(),
+            size: row.size.filter(|_| row.is_dir),
+            indexed: Indexed::of(row),
+        })
         .collect();
-    give_sizes(entries, &sizes);
+    give_sizes(entries, &given);
 }
 
 #[derive(Clone, Debug)]
@@ -233,13 +259,37 @@ impl FolderRows {
         }
     }
 
-    pub(super) fn apply_sizes(&mut self, outcome: &Outcome) {
+    /// Gives the entries gozlerd's answer `outcome`: every entry, or only
+    /// the entries `names` when the request asked for them alone, so the
+    /// others keep their values. A failed answer for `names` changes
+    /// nothing, so a live refresh that fails keeps the values shown.
+    pub(super) fn apply_sizes(&mut self, outcome: &Outcome, names: Option<&HashSet<Box<[u16]>>>) {
         let entries = match outcome {
             Outcome::Rows(chunk) => chunk.rows.as_ref(),
             _ => &[],
         };
-        give_indexed_sizes(&mut self.entries, entries);
-        if self.order.key == SortKey::Size {
+        match names {
+            None => give_indexed_sizes(&mut self.entries, entries),
+            Some(_) if !matches!(outcome, Outcome::Rows(_)) => return,
+            Some(names) => {
+                let mut asked: Vec<Entry> = Vec::new();
+                let mut at = Vec::new();
+                for (i, entry) in self.entries.iter().enumerate() {
+                    if names.contains(&entry.name) {
+                        asked.push(entry.clone());
+                        at.push(i);
+                    }
+                }
+                give_indexed_sizes(&mut asked, entries);
+                for (i, entry) in at.into_iter().zip(asked) {
+                    self.entries[i] = entry;
+                }
+            }
+        }
+        if matches!(
+            self.order.key,
+            SortKey::Size | SortKey::Writes | SortKey::Written
+        ) {
             sort_listing(&mut self.entries, self.order);
         }
         self.totals = Totals::of(&self.entries);
@@ -593,7 +643,9 @@ impl FolderRows {
                 }
             }
         }
-        let mut replaced: HashMap<Box<[u16]>, Option<u64>> = HashMap::new();
+        // What gozlerd gave each replaced entry, which its change keeps
+        // until gozlerd answers again.
+        let mut replaced: HashMap<Box<[u16]>, Given> = HashMap::new();
         let mut totals = self.totals;
         // The changed names' hashes, sorted: a binary search for each entry
         // costs less than hashing its name.
@@ -604,7 +656,7 @@ impl FolderRows {
                 return true;
             }
             totals.remove(entry);
-            replaced.insert(entry.name.clone(), entry.folder_size());
+            replaced.insert(entry.name.clone(), Given::of(entry));
             false
         });
         // The names that went or changed and that no entry has exactly,
@@ -617,7 +669,7 @@ impl FolderRows {
             let hash = name_hash(&name_key(name));
             unmatched.entry(hash).or_default().push(name);
         }
-        let mut folded: HashMap<Box<[u16]>, Option<u64>> = HashMap::new();
+        let mut folded: HashMap<Box<[u16]>, Given> = HashMap::new();
         // The stored name of the entry each of them took.
         let mut stored = HashMap::new();
         if !unmatched.is_empty() {
@@ -631,7 +683,7 @@ impl FolderRows {
                     return true;
                 };
                 totals.remove(entry);
-                folded.insert((*name).into(), entry.folder_size());
+                folded.insert((*name).into(), Given::of(entry));
                 stored.insert(Box::<[u16]>::from(*name), entry.name.clone());
                 false
             });
@@ -652,8 +704,9 @@ impl FolderRows {
                         entry
                     }
                 };
-                if let Some(&size) = replaced.get(&name) {
-                    entry.set_folder_size(size);
+                if let Some(given) = replaced.get(&name) {
+                    entry.set_folder_size(given.size);
+                    entry.indexed = given.indexed.map(Box::new);
                 }
                 totals.add(&entry);
                 Some((name_key(&entry.name), entry))
@@ -777,18 +830,33 @@ fn compare(sort: SortSpec, a: &Entry, a_key: &[u8], b: &Entry, b_key: &[u8]) -> 
     b.is_folder()
         .cmp(&a.is_folder())
         .then_with(|| match sort.key {
-            // A panel lists no date created and no writes, so it sorts by
-            // name.
-            SortKey::Name
-            | SortKey::Path
-            | SortKey::DateCreated
-            | SortKey::Writes
-            | SortKey::Written => directed(by_name()),
+            // The entries of one folder differ in path only by name.
+            SortKey::Name | SortKey::Path => directed(by_name()),
             SortKey::Extension => {
                 directed(extension_key(a_key, a).cmp(extension_key(b_key, b))).then_with(by_name)
             }
             SortKey::Size => directed(a.counted_size().cmp(&b.counted_size())).then_with(by_name),
             SortKey::DateModified => directed(a.modified.cmp(&b.modified)).then_with(by_name),
+            SortKey::DateCreated => directed(a.created.cmp(&b.created)).then_with(by_name),
+            // An entry without writes from gozlerd sorts below every count.
+            SortKey::Writes => {
+                let writes = |entry: &Entry| entry.writes().map(|w| w.writes);
+                directed(writes(a).cmp(&writes(b))).then_with(by_name)
+            }
+            // An entry with no known byte sorts last in either direction,
+            // as in Search; the others by their known bytes.
+            SortKey::Written => {
+                let written = |entry: &Entry| {
+                    entry
+                        .writes()
+                        .and_then(|w| Written::of(w.written, w.marks).known())
+                };
+                match (written(a), written(b)) {
+                    (Some(a), Some(b)) => directed(a.cmp(&b)),
+                    (a, b) => a.is_none().cmp(&b.is_none()),
+                }
+                .then_with(by_name)
+            }
         })
 }
 
@@ -821,13 +889,12 @@ mod tests {
             dir: SortDir::Desc,
         };
         let mut entries = vec![folder("a"), folder("b"), file("f", 7, 0)];
-        give_sizes(
-            &mut entries,
-            &[
-                ("a".encode_utf16().collect(), 10),
-                ("b".encode_utf16().collect(), 90),
-            ],
-        );
+        let sized = |name: &str, size| Given {
+            name: name.encode_utf16().collect(),
+            size: Some(size),
+            indexed: None,
+        };
+        give_sizes(&mut entries, &[sized("a", 10), sized("b", 90)]);
         sort_listing(&mut entries, sort);
         let mut rows = FolderRows::empty(sort);
         rows.replace_listing(entries, sort);
@@ -838,7 +905,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(names(&rows), ["b", "a", "f"]);
-        rows.apply_sizes(&Outcome::Rows(Chunk {
+        let answer = Outcome::Rows(Chunk {
             start: 0,
             rows: Arc::from([]),
             total: 0,
@@ -849,7 +916,8 @@ mod tests {
             skipped: Vec::new(),
             rest_follows: false,
             made: None,
-        }));
+        });
+        rows.apply_sizes(&answer, None);
         assert_eq!(names(&rows), ["a", "b", "f"]);
         assert_eq!(
             rows.shown_totals(),
@@ -858,6 +926,34 @@ mod tests {
                 unknown: 2,
             }
         );
+    }
+
+    #[test]
+    fn a_partial_size_answer_keeps_the_sizes_it_did_not_ask_for() {
+        let entries = ["a", "b"].map(|name| {
+            let mut entry = Entry::new(
+                name.encode_utf16().collect(),
+                FILE_ATTRIBUTE_DIRECTORY,
+                0,
+                0,
+            );
+            entry.set_folder_size(Some(7));
+            entry
+        });
+        let names = HashSet::from([entries[0].name.clone()]);
+        let mut answer = crate::core::results::tests::chunk(0, 1, 1);
+        let item = &mut Arc::make_mut(&mut answer.rows)[0];
+        item.path = r"C:\a".into();
+        item.size = Some(13);
+        item.is_dir = true;
+        let sort = SortSpec::default();
+        let mut rows = FolderRows::empty(sort);
+        rows.replace_listing(entries.into(), sort);
+
+        rows.apply_sizes(&Outcome::Rows(answer), Some(&names));
+
+        assert_eq!(rows.entries()[0].folder_size(), Some(13));
+        assert_eq!(rows.entries()[1].folder_size(), Some(7));
     }
 
     /// More changes than go in one by one rebuild the entries, which must

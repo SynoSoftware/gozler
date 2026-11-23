@@ -14,7 +14,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use gozler_core::include::VolumeRules;
-use gozler_core::index::settle::{Batch, settle_batch};
+use gozler_core::index::settle::{Batch, OpenFiles, settle_batch};
 use gozler_core::links::{ReparseTarget, parse_reparse_data};
 use gozler_core::types::Frn;
 use gozler_core::usn::ParsedUsnRecord;
@@ -87,6 +87,9 @@ enum RescanReason {
 const READ_BUFFER_BYTES: usize = 512 * 1024;
 /// Poll interval when the journal is caught up.
 const IDLE_POLL: Duration = Duration::from_millis(50);
+/// How often the sizes of the files that programs hold open are read again
+/// ([`OpenFiles`]).
+const OPEN_REFRESH: Duration = Duration::from_secs(3);
 
 /// How long journal reads may keep failing before the volume stops claiming to
 /// be `Live`. One failure is not news (a drive spinning up answers
@@ -342,11 +345,30 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
     };
     let mut buf = vec![0u8; READ_BUFFER_BYTES];
     let mut disk = Disk::new(handle, state.mount_prefix());
+    let mut open = OpenFiles::default();
+    let mut refreshed = Instant::now();
+    // The settle and the read of open files ask before each folder and file
+    // they read. Teardown must not wait behind them: each read is a
+    // blocking open, and dozens on a slow disk outlast the teardown
+    // deadline. And that progress is liveness: without the stamp, a long
+    // batch on a slow disk reads as a stale beat, which delays the
+    // supervisor's budget refund and inches toward a spurious stall verdict.
+    let cancelled = || {
+        pulse.beat();
+        stop.load(Ordering::Relaxed)
+    };
 
     'tail: while !stop.load(Ordering::Relaxed) {
         // Liveness stamp for the supervisor: as long as this loop is turning,
         // however unhealthily, no one cancels our I/O.
         pulse.beat();
+        // Not while journal reads fail: the disk may not answer.
+        if pos.failures.is_none() && refreshed.elapsed() >= OPEN_REFRESH {
+            refreshed = Instant::now();
+            let sizes = open.read(state, &mut disk, cancelled);
+            let limits = crate::wear::watched();
+            wake_on_warning(|| sizes.add(state, &limits, gozler_winfs::system_time()));
+        }
         // Here, between batches, so a change of the rules never races one.
         // Not a journal fault, so it costs nothing of the rescan budget.
         let owed = match state.take_owed() {
@@ -363,6 +385,7 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                 return;
             };
             pos = fresh;
+            store_open_sizes(state, &mut disk, &mut open, cancelled);
             continue 'tail;
         }
         // A path that can no longer prove the index is in sync breaks out
@@ -399,7 +422,8 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     // hold keeps the write hold to once a step.
                     let now = gozler_winfs::system_time();
                     if state.index().writes().needs_move(now) {
-                        state.index_mut().writes_mut().move_to(now);
+                        let limits = crate::wear::watched();
+                        state.index_mut().move_hour(now, &limits);
                     }
                     if walk.records.is_empty() {
                         // Caught up (or only filtered-out records): advance and idle.
@@ -416,28 +440,12 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                     let batch = Batch {
                         replaying_walk: pos.replaying_walk(),
                         detects_repeats: !pos.replaying_build(),
+                        limits: crate::wear::watched(),
                         ..Batch::of(&walk.records)
                     };
-                    // The settle asks before each folder and file it reads.
-                    // Teardown must not wait behind a long batch: each read is
-                    // a blocking open, and dozens on a slow disk outlast the
-                    // teardown deadline. And that progress is liveness: without
-                    // the stamp, a long batch on a slow disk reads as a stale
-                    // beat, which delays the supervisor's budget refund and
-                    // inches toward a spurious stall verdict.
-                    let cancelled = || {
-                        pulse.beat();
-                        stop.load(Ordering::Relaxed)
-                    };
-                    let numbered = crate::wear::NUMBERS.load(Ordering::Acquire);
-                    let settled = settle_batch(state, &mut disk, batch, cancelled);
-                    // A changed counter means that a batch made or updated a
-                    // folder copied into itself: this one, also when the
-                    // settle failed, or another volume's, which costs the
-                    // held requests one more read for nothing.
-                    if crate::wear::NUMBERS.load(Ordering::Acquire) != numbered {
-                        crate::wear::wake();
-                    }
+                    open.note(&batch);
+                    let settled =
+                        wake_on_warning(|| settle_batch(state, &mut disk, batch, cancelled));
                     let settled = match settled {
                         Ok(settled) => settled,
                         Err(e) => break 'rescan (RescanReason::WalkFailed, e.to_string()),
@@ -529,7 +537,36 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
             return;
         };
         pos = fresh;
+        store_open_sizes(state, &mut disk, &mut open, cancelled);
     }
+}
+
+/// Right after a rebuild, before any batch, reads the sizes of the files
+/// that programs hold open and stores them, marking those that changed
+/// "at least" ([`OpenSizes::store`](gozler_core::index::settle::OpenSizes::store)).
+fn store_open_sizes(
+    state: &VolumeState,
+    disk: &mut Disk<'_>,
+    open: &mut OpenFiles,
+    cancelled: impl FnMut() -> bool,
+) {
+    let sizes = open.read(state, disk, cancelled);
+    let limits = crate::wear::watched();
+    sizes.store(state, &limits, gozler_winfs::system_time());
+}
+
+/// Runs `work`, which may number a warning, and wakes the held `Wear`
+/// requests when the counter changed: a batch or a refresh made or updated
+/// a folder copied into itself, or a file or folder crossed a limit. That
+/// is this work, also when it failed, or another volume's, which costs the
+/// held requests one more read for nothing.
+fn wake_on_warning<T>(work: impl FnOnce() -> T) -> T {
+    let numbered = crate::wear::NUMBERS.load(Ordering::Acquire);
+    let done = work();
+    if crate::wear::NUMBERS.load(Ordering::Acquire) != numbered {
+        crate::wear::wake();
+    }
+    done
 }
 
 /// Rescan with a storm guard: rebuilds the index, capping consecutive attempts

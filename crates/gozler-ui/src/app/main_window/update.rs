@@ -412,7 +412,7 @@ impl MainWindow {
                 let accepted = self.model.borrow_mut().observe_saved_state();
                 self.apply_at(hwnd, revision, accepted);
             }
-            Effect::SaveSoon => hwnd.set_timer(Timer::Save.id(), SAVE_DELAY_MS),
+            Effect::SaveSoon => self.save_later(hwnd),
             Effect::ListPasses => self.start_list_passes(),
         }
     }

@@ -17,12 +17,13 @@ pub mod volume;
 
 mod descriptors;
 
+pub mod alarms;
 pub mod repeats;
 pub mod settle;
 pub mod writes;
 
 pub use descriptors::{DescriptorId, Listable, SeenBy};
-pub use store::{ComponentBytes, Counts, IdWidth};
+pub use store::{CREATED_ENTRY_BYTES, ComponentBytes, Counts, IdWidth};
 pub use volume::{
     Anomaly, ApplyOutcome, EntryView, IndexMemory, IndexStats, LinkTarget, NTFS_ROOT_FRN,
     PathStatus, VolumeIndex,

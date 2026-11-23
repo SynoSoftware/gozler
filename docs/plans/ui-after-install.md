@@ -13,6 +13,10 @@ owner has run it, and file an issue for each item that fails.
 - The setup's last page offers "Launch Gozler". The window it starts runs
   without administrator rights: Task Manager's Details page shows it with
   Elevated "No".
+- On an upgrade, the last page also offers "View what's new", unchecked.
+  With Launch cleared, selecting it opens the installed release notes even
+  offline. A fresh installation offers only Launch, and a silent installation
+  opens neither.
 - Against the installed `gozlerd`, `gozler ext:cs -n 3`,
   `gozler -get-result-count ext:cs`, `gozler --status` and
   `gozler -path X:\no-such-folder x` exit with the codes they gave before, and
@@ -24,6 +28,18 @@ owner has run it, and file an issue for each item that fails.
 - After uninstall, neither `gozler` value under the current user's `Run` and
   `Explorer\StartupApproved\Run` keys is left, and File Explorer's menu on a
   folder no longer shows "Search with Gozler".
+
+## SSD wear and live values
+
+- The SSD wear window's four columns fit without a horizontal scroll bar.
+- Settings > SSD wear aligns the five limits and fits six disk rows below
+  the Disk, Used and Written headers.
+- Commander offers all eleven column choices. Name stays on and Path is
+  disabled in a folder panel.
+- Search and folder panels refresh visible values without flashing or
+  moving the focus or scroll position. Append a few bytes at a time to an
+  open file and watch Written grow. The release window leaves the frame log
+  alone.
 
 ## The service
 
@@ -233,7 +249,19 @@ environment checks passed.
   with the drive asleep or offline.
 - Check focus after Enter, Esc, Tab and a mode switch, including while work is
   pending. A cancelled folder recovery stays on Retry when another operation ends.
-- Use the build normally for a day, then inspect `ui-slow.log`. File one issue
+- Sort Search by Writes while a program writes files, with two rows selected
+  and a third focused: every 3 seconds the rows take their new order with no
+  flash, no "Searching…" and no jump of the scroll position, and the
+  selection and the focus stay on the same files. A right-click menu held open
+  over the list sees no change until it closes.
+- In each panel, choose Writes, Written, Files, Folders, Date created and
+  Attributes from View > Columns and from a right-click on the header: the
+  columns appear in one redraw, fill with values on an indexed drive, stay
+  empty on a USB drive, and come back after Exit and start. Sort a folder
+  panel by Writes while a file in it is written: its row keeps its value
+  while the watch reports the write.
+- Use a debug build normally for a day, then inspect `ui-slow.log`, which a
+  release build does not write. File one issue
   per distinct message and cause, adding repeats to the existing issue. A sent
   message acknowledgment alone does not prove posted input was processed.
 - Leave a search, selection or folder read waiting on an unavailable source.

@@ -199,8 +199,6 @@
 #define IDC_GENERAL_SELECTION 1521
 #define IDC_GENERAL_SELECT_FILES 1522
 #define IDC_GENERAL_SELECT_FOLDERS 1523
-#define IDC_GENERAL_WARN_REPEATS 1524
-#define IDC_GENERAL_WARN_NOTE 1525
 
 #define IDD_SETTINGS_SEARCH 106
 #define IDC_SEARCH_HEADING 1601
@@ -478,12 +476,39 @@
 #define IDC_RESULT_LIST_TEXT 4191
 #define IDC_RESULT_LIST_COPY 4192
 
-// SSD wear: the folders that the service saw copied into themselves, with
-// Show and Close.
+// SSD wear: the folders that the service saw copied into themselves and the
+// limits of the wear alarm crossed, with Show and Close.
 #define IDD_WEAR 134
 #define IDC_WEAR_TEXT 4201
 #define IDC_WEAR_LIST 4202
 #define IDC_WEAR_SHOW 4203
+
+// Settings > SSD wear: the wear alarm's lines, each a check box, a number
+// box and a unit; the warning about a folder copied into itself; and each
+// disk's health.
+#define IDD_SETTINGS_SSD_WEAR 135
+#define IDC_SSD_WEAR_HEADING 4301
+#define IDC_SSD_WEAR_WARN 4302
+#define IDC_SSD_WEAR_NOTE 4303
+#define IDC_SSD_WEAR_RESTORE 4304
+#define IDC_SSD_WEAR_DISKS_GROUP_ICON 4305
+#define IDC_SSD_WEAR_DISKS_GROUP 4306
+#define IDC_SSD_WEAR_DISKS 4307
+#define IDC_SSD_WEAR_FILE_WRITES 4308
+#define IDC_SSD_WEAR_FILE_WRITES_NUMBER 4309
+#define IDC_SSD_WEAR_FILE_WRITES_UNIT 4310
+#define IDC_SSD_WEAR_FILE_WRITTEN 4311
+#define IDC_SSD_WEAR_FILE_WRITTEN_NUMBER 4312
+#define IDC_SSD_WEAR_FILE_WRITTEN_UNIT 4313
+#define IDC_SSD_WEAR_FOLDER_WRITTEN 4314
+#define IDC_SSD_WEAR_FOLDER_WRITTEN_NUMBER 4315
+#define IDC_SSD_WEAR_FOLDER_WRITTEN_UNIT 4316
+#define IDC_SSD_WEAR_PROGRAM_WRITTEN 4317
+#define IDC_SSD_WEAR_PROGRAM_WRITTEN_NUMBER 4318
+#define IDC_SSD_WEAR_PROGRAM_WRITTEN_UNIT 4319
+#define IDC_SSD_WEAR_DISK_WEEK 4320
+#define IDC_SSD_WEAR_DISK_WEEK_NUMBER 4321
+#define IDC_SSD_WEAR_DISK_WEEK_UNIT 4322
 
 // Settings > File operations: the speed settings of copies, moves and
 // deletes.

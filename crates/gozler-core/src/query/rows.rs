@@ -46,7 +46,7 @@ use super::order::{OrderFields, SortRecord, compare, compare_paths};
 use super::paths::{FolderCopy, FolderId, ResultNames, root_name};
 use crate::attributes::Attributes;
 use crate::fold::fold_accents;
-use crate::index::writes::Values;
+use crate::index::writes::{Values, Written};
 use crate::index::{Counts, SeenBy, VolumeIndex};
 use crate::links::Reached;
 use crate::scope::{Scope, VolumeMounts};
@@ -772,7 +772,7 @@ impl OrderFields for Live<'_> {
         Live::writes(self).map(|values| values.writes.into())
     }
     fn written(&self) -> Option<u64> {
-        Live::writes(self).map(|values| values.written)
+        Live::writes(self).and_then(|values| Written::of(values.written, values.marks).known())
     }
     fn volume(&self) -> &[u8] {
         self.volume

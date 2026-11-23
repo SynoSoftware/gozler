@@ -70,7 +70,7 @@ use crate::core::query::{
     AttributeChoice, DateModified, Filters, Kind, MatchMode, Matching, RangeItem, SizeFilter,
     date_items, size_items,
 };
-use crate::core::results::{Fix, ListButton};
+use crate::core::results::{CHUNK_ROWS, Fix, ListButton, Remapped};
 use crate::core::search_list::Deselect;
 use crate::core::selection::{DRAG_LIMIT, RowSelection, SELECTION_LIMIT, Selection, wide_path};
 use crate::core::settings::{Choices, Mode, SettingsPage, SettingsValues};
@@ -160,12 +160,19 @@ const SEARCHING_NAMED_MS: u32 = crate::core::work::BUSY.as_millis() as u32;
 /// Inspector pane).
 const CALCULATING_MS: u32 = crate::core::work::BUSY.as_millis() as u32;
 const STATUS_POLL_MS: u32 = 2_000;
+/// The owner's choice: often enough to watch writes change, while each
+/// refresh scans the search's matches again (DESIGN.md: Results list).
+const LIVE_MS: u32 = 3_000;
 const SELECTION_DELAY_MS: u32 = 150;
 const AGE_REFRESH_MS: u32 = 60_000;
 /// A row each tenth of a second, as the transfer queue
 /// scrolls while a row is dragged past its edge.
 const DROP_SCROLL_MS: u32 = 100;
-const SAVE_DELAY_MS: u32 = 1_000;
+/// How long after the first unsaved change of the window's state `ui.json`
+/// is written: the most navigation a crash loses, and the least time
+/// between two writes while the person keeps navigating (DESIGN.md: Where
+/// settings are saved).
+const SAVE_DELAY_MS: u32 = 60_000;
 /// Twice a second, as the engine's counters expect to be read.
 const OPERATIONS_POLL_MS: u32 = 500;
 
@@ -445,6 +452,8 @@ pub(crate) struct MainWindow {
     icons: Icons,
     /// Whether the status timer runs.
     polling: Cell<bool>,
+    /// Whether the live refresh's timer runs ([`Model::refreshes_live`]).
+    refreshing: Cell<bool>,
     update_revision: Cell<u64>,
     pending_refresh: Cell<Areas>,
     pending_effects: RefCell<VecDeque<Effect>>,
@@ -453,6 +462,7 @@ pub(crate) struct MainWindow {
     told: [RefCell<selection::NativeSelection>; 3],
     selection_timer: Cell<bool>,
     operation_timer: Cell<bool>,
+    save_timer: Cell<bool>,
     /// What the status bar's entries of Export, Fix and Operation showed,
     /// which an entry keeps while a new job of its kind waits.
     kept_jobs: RefCell<[crate::core::status_bar::Kept; 3]>,
@@ -649,12 +659,14 @@ impl MainWindow {
             reveal: RefCell::new(None),
             icons: Icons::new(),
             polling: Cell::new(false),
+            refreshing: Cell::new(false),
             update_revision: Cell::new(0),
             pending_refresh: Cell::new(Areas::NONE),
             pending_effects: RefCell::new(VecDeque::new()),
             told: Default::default(),
             selection_timer: Cell::new(false),
             operation_timer: Cell::new(false),
+            save_timer: Cell::new(false),
             kept_jobs: RefCell::default(),
             ending: Cell::new(Ending::Running),
             ending_after_saves: Cell::new(Ending::Running),
@@ -2246,6 +2258,9 @@ impl MainWindow {
                     return;
                 }
             },
+            MenuItem::Column(column) if mode == Mode::Commander => {
+                (self.model.borrow_mut()).toggle_panel_column(active, column)
+            }
             MenuItem::Column(column) => self.model.borrow_mut().toggle_column(column),
             MenuItem::FitColumn(column) => {
                 let index = self
@@ -2574,6 +2589,14 @@ impl MainWindow {
             model.saved_state_changed()
         };
         if changed {
+            self.save_later(hwnd);
+        }
+    }
+
+    /// Starts the save timer unless it already runs, so a later change
+    /// waits for the same save instead of putting it off.
+    fn save_later(&self, hwnd: Hwnd) {
+        if !self.save_timer.replace(true) {
             hwnd.set_timer(Timer::Save.id(), SAVE_DELAY_MS);
         }
     }
@@ -2900,6 +2923,98 @@ impl MainWindow {
                 hwnd.kill_timer(Timer::Status.id());
             }
         }
+        let refreshes = self.model.borrow().refreshes_live(on_screen);
+        if refreshes != self.refreshing.replace(refreshes) {
+            if refreshes {
+                hwnd.set_timer(Timer::Live.id(), LIVE_MS);
+            } else {
+                hwnd.kill_timer(Timer::Live.id());
+            }
+        }
+    }
+
+    /// The live refresh's tick: gives the model each shown list's rows on
+    /// screen, whose values it reads again ([`Model::read_visible`]), and
+    /// reads each folder panel's free space again. Nothing while the
+    /// person's own work with the lists comes first: an open menu, dialog
+    /// or drag, whose rows must not move under it. A list whose command
+    /// waits for its selection is left out. A search again, which holds the
+    /// list's place, also waits while rows past the first chunk show, which
+    /// its rows do not reach, so they would show empty until read again, or
+    /// while the selection is still being written.
+    fn refresh_live(&self, hwnd: Hwnd) {
+        if win::present::in_modal_loop() {
+            return;
+        }
+        let mode = self.model.borrow().mode();
+        let lists = match mode {
+            Mode::Search => vec![List::Search],
+            Mode::Commander => Side::BOTH.map(List::Panel).to_vec(),
+        };
+        for list in lists {
+            if self.selection_command_pending(list) {
+                continue;
+            }
+            let control = self.list_control(list);
+            let visible = control.visible_rows();
+            let place = (list == List::Search && visible.end <= CHUNK_ROWS)
+                .then(|| self.selected_rows(list))
+                .flatten()
+                .map(|selected| (self.native_key(list), selected, control.focused()));
+            let accepted = (self.model.borrow_mut()).read_visible(list, visible, place);
+            self.apply(hwnd, accepted);
+            if let List::Panel(side) = list {
+                let folder = {
+                    let model = self.model.borrow();
+                    let panel = model.panels().panel(side);
+                    matches!(panel.view(), crate::core::panel::View::Folder)
+                        .then(|| panel.folder().to_owned())
+                };
+                if let Some(folder) = folder {
+                    (self.created().work.borrow_mut().folders).read_free(side, &folder);
+                }
+            }
+        }
+    }
+
+    /// Shows a live refresh's rows with the place the pass found on them,
+    /// unless the person changed the selection or the focus, scrolled past
+    /// the first chunk, or opened a menu, a dialog or a drag meanwhile: the
+    /// next refresh then holds the new place.
+    fn show_refresh(&self, hwnd: Hwnd, answer: Remapped) {
+        let control = self.controls().search.list;
+        let holds = self.native_key(List::Search) == answer.held.key
+            && control.focused() == answer.held.focused
+            && control.visible_rows().end <= CHUNK_ROWS
+            && !win::present::in_modal_loop()
+            && !self.selection_command_pending(List::Search)
+            && self.selected_rows(List::Search).is_some();
+        if !holds {
+            self.model.borrow_mut().drop_refresh();
+            return;
+        }
+        let accepted = self.model.borrow_mut().accept_refresh(&answer);
+        let Some(accepted) = accepted else {
+            return;
+        };
+        self.apply(hwnd, accepted);
+        let before = panel::Place {
+            focused: answer.held.focused,
+            selected: Arc::clone(&answer.held.positions),
+        };
+        let place = panel::Place {
+            focused: answer.focused,
+            selected: Arc::clone(&answer.selected),
+        };
+        self.show_native_place(
+            List::Search,
+            &before,
+            &place,
+            selection::Origin::Remap {
+                keep_action: false,
+                scroll: selection::Scroll::Keep,
+            },
+        );
     }
 
     /// The window was shown, hidden, minimized or restored, which starts or
@@ -3161,6 +3276,13 @@ impl MainWindow {
         if !self.update_live() {
             return;
         }
+        let remapped = self.created().work.borrow_mut().lists.take_remapped();
+        if let Some(answer) = remapped {
+            self.show_refresh(hwnd, answer);
+            if !self.update_live() {
+                return;
+            }
+        }
         let restored = self.created().work.borrow_mut().queue.take();
         if let Some(restored) = restored {
             self.adopt_queue(hwnd, restored);
@@ -3188,6 +3310,10 @@ impl MainWindow {
             .take_account_names();
         if let Some(names) = names {
             self.settings.accept_account_names(names);
+        }
+        let disks = self.created().work.borrow_mut().settings.take_disks();
+        if let Some(disks) = disks {
+            self.settings.accept_disks(disks);
         }
         let copied = self.created().work.borrow_mut().clipboard.take();
         match copied {
@@ -4355,6 +4481,10 @@ impl MainWindow {
                 self.created().work.borrow_mut().panels.find(side, input);
             }
         }
+        let remap = self.model.borrow_mut().take_refresh();
+        if let Some(input) = remap {
+            self.created().work.borrow_mut().lists.remap(input);
+        }
         for list in List::ALL {
             let keep = self.model.borrow_mut().take_keep(list);
             if let Some(input) = keep {
@@ -4559,9 +4689,11 @@ impl MainWindow {
         );
     }
 
-    fn remember_copy_policy(&self, hwnd: Hwnd, policy: gozler_fileops::Policy) {
+    /// A setting, so it is saved at once, as Settings' are; nothing is
+    /// written when the person kept the choice.
+    fn remember_copy_policy(&self, policy: gozler_fileops::Policy) {
         self.model.borrow_mut().set_copy_policy(policy);
-        self.note_saved_state(hwnd);
+        self.save_settings(true);
     }
 
     fn prepare_selected(&self, list: List, action: PathAction) {
@@ -4644,7 +4776,7 @@ impl MainWindow {
             }
             _ => None,
         };
-        let id = self.start_transfer(hwnd, moves, sources, destination, action);
+        let id = self.start_transfer(moves, sources, destination, action);
         let follows = {
             let model = self.model.borrow();
             model.mode() == Mode::Commander && model.panels().place_is_current(place)
@@ -4668,7 +4800,6 @@ impl MainWindow {
 
     fn start_transfer(
         &self,
-        hwnd: Hwnd,
         moves: bool,
         mut sources: Vec<PathBuf>,
         destination: Destination,
@@ -4697,7 +4828,7 @@ impl MainWindow {
                 destination,
             },
         };
-        self.remember_copy_policy(hwnd, policy);
+        self.remember_copy_policy(policy);
         self.start_operation(request, None)
     }
 
@@ -4776,7 +4907,7 @@ impl MainWindow {
                 .set_destination_folder(folder.to_string_lossy().into_owned());
             self.apply(hwnd, accepted);
         }
-        self.start_transfer(hwnd, moves, sources, destination, action);
+        self.start_transfer(moves, sources, destination, action);
     }
 
     /// Delete, and the list's `Delete` and `Shift+Delete`: the Delete
@@ -5303,6 +5434,7 @@ impl MainWindow {
             Timer::Searching(list) => self.name_search(hwnd, list),
             Timer::Calculating => self.show_calculating(hwnd),
             Timer::WearRetry => self.retry_wear(hwnd),
+            Timer::Live => self.refresh_live(hwnd),
             Timer::Selection(list) => self.fetch_selection(hwnd, list),
             Timer::ColumnFill(list) => self.fill_after_wait(hwnd, list),
             Timer::PanelSettle(side) => self.controls().panels.on_panel_settled(self, hwnd, side),
@@ -5332,6 +5464,7 @@ impl MainWindow {
             Timer::DropScroll => self.drop_scroll(hwnd),
             Timer::Save => {
                 hwnd.kill_timer(timer.id());
+                self.save_timer.set(false);
                 self.save_settings(true);
             }
             Timer::Work => self.poll_work(hwnd),
@@ -5676,6 +5809,23 @@ impl WindowProc for MainWindow {
                 );
                 Some(LRESULT(0))
             }
+            Message::ContextMenu {
+                point: Some(point), ..
+            } if self.controls().panels.header_at(point).is_some() => {
+                let side =
+                    (self.controls().panels.header_at(point)).expect("the guard found the header");
+                // The menu's columns are the active panel's, so the panel
+                // becomes active, as a click in it makes it.
+                self.controls().panels.activate_panel(self, side, true);
+                self.context_menu(
+                    hwnd,
+                    &commands::panel_header_menu(),
+                    point,
+                    None,
+                    self.command_context(),
+                );
+                Some(LRESULT(0))
+            }
             Message::ContextMenu { from, point } if from == self.controls().search.list.hwnd() => {
                 self.row_menu(hwnd, point);
                 Some(LRESULT(0))
@@ -5924,7 +6074,7 @@ impl WindowProc for MainWindow {
                 None
             }
             Message::Other(win::window::WEAR_SHOW) => {
-                self.show_repeat(hwnd);
+                self.show_warning(hwnd);
                 Some(LRESULT(0))
             }
             Message::Other(msg) if msg == self.show_message => {

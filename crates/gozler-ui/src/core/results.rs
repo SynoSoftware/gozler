@@ -7,15 +7,16 @@
 
 use super::fetch::{
     CachedRows, Chunk, ChunkAsk, DaemonFailure, FromSnapshot, Generation, Local, LocalService,
-    SelectionAsk,
+    Needs, SelectionAsk, ValuesAsk,
 };
+use super::selection::{CaptureKey, Sums, push_rows};
 use super::work::{INLINE_ITEMS, Retirement};
 use gozler_client::Repair;
 use gozler_core::links::Links;
 use gozler_core::proto::{ResultItem, ResultSnapshotId, Want, typed_parts};
 use gozler_core::query::{MatchSums, MatchedParts, ParsedQuery, QueryError};
 use gozler_core::search::Search;
-use gozler_core::types::SortSpec;
+use gozler_core::types::{SortKey, SortSpec};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -313,8 +314,123 @@ enum InFlight {
     /// and whether it has run long enough to be named
     /// ([`Results::search_named`]).
     Search(Generation, ChunkAsk, bool),
+    /// The shown search run again for a live refresh ([`Results::start_refresh`]).
+    Refresh(Generation, ChunkAsk, Held),
+    /// The rows on screen read again for their values, from the cached
+    /// chunks that the request copies ([`Results::start_values`]), and the
+    /// rows it reads.
+    Values(Generation, Vec<CachedRows>, Range<u64>),
     /// The chunk that starts at the position.
     Chunk(Generation, u64),
+}
+
+/// The list's place when a live refresh started: its new rows show only
+/// with the selection and the focus on the same files, and only while the
+/// person has changed neither (DESIGN.md: Results list).
+#[derive(Debug)]
+pub(crate) struct Held {
+    /// The native selection's key, which a person's change moves on.
+    pub(crate) key: CaptureKey,
+    /// The rows the list selects, which the person has not changed while
+    /// the key holds.
+    pub(crate) positions: Arc<Vec<Range<u64>>>,
+    pub(crate) focused: Option<u64>,
+    focused_path: Option<String>,
+    /// The selected files; none when the focused row alone is the
+    /// selection, which selects no row.
+    selected: Arc<[ResultItem]>,
+}
+
+impl Held {
+    pub(crate) fn new(
+        key: CaptureKey,
+        positions: Arc<Vec<Range<u64>>>,
+        focused: Option<(u64, String)>,
+        selected: Arc<[ResultItem]>,
+    ) -> Held {
+        let (focused, focused_path) = focused.unzip();
+        Held {
+            key,
+            positions,
+            focused,
+            focused_path,
+            selected,
+        }
+    }
+}
+
+/// A refresh's whole first chunk, held until [`Remap`] finds the place on it.
+#[derive(Debug)]
+struct Refreshed {
+    generation: Generation,
+    ask: ChunkAsk,
+    chunk: Chunk,
+}
+
+/// Finds the held selection and focus among a refresh's rows, by path, on a
+/// work thread, because the chunk holds up to [`CHUNK_ROWS`] rows.
+#[derive(Debug)]
+pub(crate) struct Remap {
+    generation: Generation,
+    rows: Arc<[ResultItem]>,
+    held: Held,
+}
+
+/// Where the held files are among the refresh's rows. A file that left the
+/// first chunk leaves the selection; a focused file that left it leaves the
+/// focus on the same row, or on the last.
+#[derive(Debug)]
+pub(crate) struct Remapped {
+    generation: Generation,
+    pub(crate) held: Held,
+    pub(crate) focused: Option<u64>,
+    pub(crate) selected: Arc<Vec<Range<u64>>>,
+    /// The selected files, in row order, as the refresh's rows have them.
+    pub(crate) files: Arc<[ResultItem]>,
+    pub(crate) sums: Sums,
+}
+
+impl Remap {
+    pub(crate) fn items(&self) -> usize {
+        self.rows.len().saturating_add(self.held.selected.len())
+    }
+
+    pub(crate) fn run(self) -> Remapped {
+        let selected: std::collections::HashSet<&str> = (self.held.selected.iter())
+            .map(|file| file.path.as_str())
+            .collect();
+        let mut positions = Vec::new();
+        let mut files = Vec::new();
+        let mut focused = None;
+        for (at, row) in (0u64..).zip(self.rows.iter()) {
+            if selected.contains(row.path.as_str()) {
+                push_rows(&mut positions, at..at + 1);
+                files.push(row.clone());
+            }
+            if self.held.focused_path.as_deref() == Some(row.path.as_str()) {
+                focused = Some(at);
+            }
+        }
+        let last = (self.rows.len() as u64).checked_sub(1);
+        let focused = focused.or_else(|| Some(self.held.focused?.min(last?)));
+        Remapped {
+            generation: self.generation,
+            held: self.held,
+            focused,
+            selected: Arc::new(positions),
+            sums: Sums::of(&files),
+            files: files.into(),
+        }
+    }
+}
+
+/// How a live refresh reads a list's rows on screen ([`Results::refresh_kind`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefreshKind {
+    /// Their values again, from the list's result snapshot, in place.
+    Values,
+    /// The search again, which holds the list's place ([`Remap`]).
+    Search,
 }
 
 /// What accepting a chunk changed.
@@ -326,6 +442,8 @@ pub(crate) enum RowsChange {
     NewSearch {
         count: u64,
     },
+    /// A live refresh's rows arrived; they show once [`Remap`] has run.
+    Refreshed,
     /// Rows of the shown search arrived; the count changed when the total
     /// did.
     Rows {
@@ -341,7 +459,26 @@ pub(crate) struct Results {
     /// The latest result snapshot the list made, which the next one it
     /// makes replaces, so the service drops it at once.
     last_snapshot: Option<ResultSnapshotId>,
+    refreshed: Option<Refreshed>,
     retired: Retirement,
+}
+
+/// Forgets a refresh's rows that wait for their place, retiring them. The
+/// result snapshot the refresh made becomes `last_snapshot`, because the
+/// service dropped the one it replaced; the next snapshot the list makes
+/// then replaces it, so the service does not keep it.
+fn retire_refresh(
+    refreshed: &mut Option<Refreshed>,
+    last_snapshot: &mut Option<ResultSnapshotId>,
+    retired: &mut Retirement,
+) {
+    if let Some(refreshed) = refreshed.take() {
+        if refreshed.chunk.made.is_some() {
+            *last_snapshot = refreshed.chunk.made;
+        }
+        let items = refreshed.chunk.rows.len();
+        retired.push(refreshed, items);
+    }
 }
 
 impl Results {
@@ -350,6 +487,7 @@ impl Results {
             shown: Shown::Nothing,
             in_flight: None,
             last_snapshot: None,
+            refreshed: None,
             retired: Retirement::default(),
         }
     }
@@ -374,10 +512,13 @@ impl Results {
         }
     }
 
+    /// Shows `shown`, which a refresh's rows held for the shown rows no
+    /// longer replace.
     fn set_shown(&mut self, shown: Shown) {
         let items = self.items();
         let previous = std::mem::replace(&mut self.shown, shown);
         self.retired.push(previous, items);
+        self.drop_refresh();
     }
 
     pub(crate) fn clear(&mut self) {
@@ -583,14 +724,14 @@ impl Results {
     /// asks for with the returned ask; the shown rows stay until it arrives.
     /// When only the sort changed and the list reads a result snapshot, the
     /// ask sorts that one again instead of searching, so the rows are of
-    /// the search's moment until `F5` (DESIGN.md: Result snapshots). `writes`
-    /// says whether the rows carry their writes ([`ChunkAsk::writes`]).
+    /// the search's moment until `F5` (DESIGN.md: Result snapshots). `needs`
+    /// says which optional values the rows carry ([`ChunkAsk::needs`]).
     pub(crate) fn start_search(
         &mut self,
         generation: Generation,
         search: Search,
         sort: SortSpec,
-        writes: bool,
+        needs: Needs,
     ) -> ChunkAsk {
         let snapshot = match &self.shown {
             Shown::Rows(shown) if shown.ask.search == search && shown.ask.sort != sort => {
@@ -604,10 +745,239 @@ impl Results {
             start: 0,
             len: CHUNK_ROWS,
             snapshot,
-            writes,
+            needs,
         };
         self.in_flight = Some(InFlight::Search(generation, ask.clone(), false));
+        self.drop_refresh();
         ask
+    }
+
+    /// How a live refresh reads the rows on screen (DESIGN.md: Results
+    /// list): `None` while the list shows no rows; the values of the rows
+    /// alone, from the list's result snapshot, while it has one; otherwise
+    /// the search again. A sort by Writes or Written always searches again
+    /// (**Owner decision**), because the order is what that sort shows: a
+    /// new writer rises only in a new search.
+    pub(crate) fn refresh_kind(&self) -> Option<RefreshKind> {
+        let Shown::Rows(shown) = &self.shown else {
+            return None;
+        };
+        let writes = matches!(shown.ask.sort.key, SortKey::Writes | SortKey::Written);
+        Some(match shown.snapshot {
+            Some(_) if !writes => RefreshKind::Values,
+            _ => RefreshKind::Search,
+        })
+    }
+
+    /// Runs the shown search again for its first chunk as it is now, which
+    /// `generation` asks for with the returned ask, while the shown rows
+    /// stay. A sort by Writes or Written asks for the first chunk alone,
+    /// which the service selects without sorting every match, because it
+    /// searches again at each refresh; any other sort makes the result
+    /// snapshot whose rows the next refreshes read ([`Results::start_values`]).
+    /// `None` while another request is in flight, whose rows or search are
+    /// the person's, or the list shows no rows.
+    pub(crate) fn start_refresh(&mut self, generation: Generation, held: Held) -> Option<ChunkAsk> {
+        let Shown::Rows(shown) = &self.shown else {
+            return None;
+        };
+        if self.in_flight.is_some() || self.refreshed.is_some() {
+            return None;
+        }
+        let snapshot = match shown.ask.sort.key {
+            SortKey::Writes | SortKey::Written => FromSnapshot::No,
+            _ => FromSnapshot::Make {
+                replaces: self.last_snapshot,
+            },
+        };
+        let ask = ChunkAsk {
+            start: 0,
+            len: CHUNK_ROWS,
+            snapshot,
+            ..shown.ask.clone()
+        };
+        self.in_flight = Some(InFlight::Refresh(generation, ask.clone(), held));
+        Some(ask)
+    }
+
+    /// Reads the values of the rows `visible` again from the list's result
+    /// snapshot, which `generation` asks for with the returned ask; the
+    /// order and the rows stay. Only the rows of cached chunks are read,
+    /// because a row the cache lacks is asked for as scrolling asks.
+    /// `None` while another request is in flight, the list has no result
+    /// snapshot, or no row on screen is cached.
+    pub(crate) fn start_values(
+        &mut self,
+        generation: Generation,
+        visible: Range<u64>,
+    ) -> Option<ValuesAsk> {
+        let Shown::Rows(shown) = &self.shown else {
+            return None;
+        };
+        let id = shown.snapshot?;
+        if self.in_flight.is_some() || self.refreshed.is_some() {
+            return None;
+        }
+        let visible = visible.start..visible.end.min(shown.total);
+        let mut cached: Vec<CachedRows> = (shown.chunks.iter())
+            .filter(|chunk| !chunk.first_page)
+            .map(|chunk| CachedRows {
+                range: chunk.start..chunk.start + chunk.rows.len() as u64,
+                rows: Arc::clone(&chunk.rows),
+            })
+            .filter(|chunk| chunk.range.start < visible.end && visible.start < chunk.range.end)
+            .collect();
+        cached.sort_by_key(|chunk| chunk.range.start);
+        let start = visible.start.max(cached.first()?.range.start);
+        let end = visible.end.min(cached.last()?.range.end);
+        if start >= end {
+            return None;
+        }
+        let ask = ValuesAsk {
+            rows: ChunkAsk {
+                start,
+                len: end - start,
+                snapshot: FromSnapshot::Read(id),
+                ..shown.ask.clone()
+            },
+            cached,
+        };
+        self.in_flight = Some(InFlight::Values(generation, ask.cached.clone(), start..end));
+        Some(ask)
+    }
+
+    /// Gives each cached chunk that a values read copied its copy with the
+    /// rows read again, and returns the positions it replaced and the rows
+    /// it read; `None` when the list no longer waits for `generation`. A
+    /// chunk that scrolling or a selection reply replaced meanwhile keeps
+    /// its newer rows.
+    pub(crate) fn accept_values(
+        &mut self,
+        generation: Generation,
+        copies: Vec<CachedRows>,
+    ) -> Option<(Range<u64>, Range<u64>)> {
+        let Some(InFlight::Values(_, bases, read)) = self
+            .in_flight
+            .take_if(|in_flight| matches!(in_flight, InFlight::Values(g, ..) if *g == generation))
+        else {
+            let items = copies.iter().map(|chunk| chunk.rows.len()).sum();
+            self.retired.push(copies, items);
+            return None;
+        };
+        let (current, stale): (Vec<CachedRows>, Vec<CachedRows>) =
+            copies.into_iter().partition(|copy| {
+                let Shown::Rows(shown) = &self.shown else {
+                    return false;
+                };
+                let base = bases.iter().find(|base| base.range == copy.range);
+                shown.chunks.iter().any(|chunk| {
+                    chunk.start == copy.range.start
+                        && base.is_some_and(|base| Arc::ptr_eq(&chunk.rows, &base.rows))
+                })
+            });
+        let items = (stale.iter().chain(&bases))
+            .map(|chunk| chunk.rows.len())
+            .sum();
+        self.retired.push((stale, bases), items);
+        let replaced = self.replace_cached(current);
+        (!replaced.is_empty()).then_some((replaced, read))
+    }
+
+    /// The pass that finds the held place among the refresh's rows, once
+    /// they have all arrived.
+    pub(crate) fn take_remap(&mut self) -> Option<Remap> {
+        let refreshed = self.refreshed.as_ref()?;
+        match self.in_flight.take() {
+            Some(InFlight::Refresh(generation, _, held)) if generation == refreshed.generation => {
+                Some(Remap {
+                    generation,
+                    rows: Arc::clone(&refreshed.chunk.rows),
+                    held,
+                })
+            }
+            other => {
+                self.in_flight = other;
+                None
+            }
+        }
+    }
+
+    /// Shows the refresh's rows in place of the shown ones, which `answer`
+    /// found the held place on. The search's bold parts carry over, because
+    /// the search is the same. Returns the new count; `None` when a newer
+    /// search or refresh replaced it.
+    pub(crate) fn install_refresh(&mut self, answer: &Remapped) -> Option<u64> {
+        let refreshed = self.refreshed.take()?;
+        let Shown::Rows(old) = &mut self.shown else {
+            let items = refreshed.chunk.rows.len();
+            self.retired.push(refreshed, items);
+            return None;
+        };
+        if refreshed.generation != answer.generation {
+            let items = refreshed.chunk.rows.len();
+            self.retired.push(refreshed, items);
+            return None;
+        }
+        let Refreshed {
+            generation,
+            ask,
+            chunk,
+        } = refreshed;
+        let mut shown = ShownRows {
+            generation,
+            ask,
+            total: chunk.total,
+            sums: chunk.sums,
+            skipped: Vec::new(),
+            writes_partial: chunk.writes_partial,
+            chunks: Vec::new(),
+            matched: old.matched.take(),
+            coverage_scope: old.coverage_scope.take(),
+            clock: 0,
+            snapshot: chunk.made,
+        };
+        if chunk.made.is_some() {
+            self.last_snapshot = chunk.made;
+        }
+        shown.add_skipped(chunk.skipped);
+        shown.insert(chunk.start, chunk.rows, false, &mut self.retired);
+        self.set_shown(Shown::Rows(shown));
+        Some(self.count())
+    }
+
+    /// Forgets a refresh's rows that wait for their place.
+    pub(crate) fn drop_refresh(&mut self) {
+        retire_refresh(
+            &mut self.refreshed,
+            &mut self.last_snapshot,
+            &mut self.retired,
+        );
+    }
+
+    /// Takes the result snapshot `made` of a refresh whose reply came too
+    /// late to be read as the one the next snapshot replaces, as
+    /// `retire_refresh` does. A list that reads a snapshot of its own
+    /// keeps that one as the one to replace.
+    pub(crate) fn keep_made(&mut self, made: Option<ResultSnapshotId>) {
+        let reads_own = matches!(&self.shown, Shown::Rows(shown) if shown.snapshot.is_some());
+        if made.is_some() && !reads_own {
+            self.last_snapshot = made;
+        }
+    }
+
+    /// Ends the live refresh `generation`, or any for `None`: its request
+    /// failed or ran too long, or the person scrolled past its rows.
+    pub(crate) fn end_refresh(&mut self, generation: Option<Generation>) {
+        let ends = |refresh: Generation| generation.is_none_or(|ended| ended == refresh);
+        if matches!(
+            &self.in_flight,
+            Some(InFlight::Refresh(g, ..) | InFlight::Values(g, ..)) if ends(*g)
+        ) {
+            self.in_flight = None;
+        }
+        if self.refreshed.as_ref().is_some_and(|r| ends(r.generation)) {
+            self.drop_refresh();
+        }
     }
 
     /// Replaces whatever the list shows with `message`, and drops the
@@ -619,7 +989,15 @@ impl Results {
 
     /// Whether `generation` is the request the results wait for.
     pub(crate) fn awaits(&self, generation: Generation) -> bool {
-        matches!(&self.in_flight, Some(InFlight::Search(g, ..) | InFlight::Chunk(g, _)) if *g == generation)
+        matches!(
+            &self.in_flight,
+            Some(
+                InFlight::Search(g, ..)
+                    | InFlight::Refresh(g, ..)
+                    | InFlight::Values(g, ..)
+                    | InFlight::Chunk(g, _)
+            ) if *g == generation
+        )
     }
 
     pub(crate) fn cancel(&mut self) {
@@ -642,10 +1020,16 @@ impl Results {
         generation: Generation,
     ) -> Option<ChunkAsk> {
         let count = self.count();
+        let visible = visible.start..visible.end.min(count);
+        // A refresh's rows are only the first chunk, so showing them would
+        // empty the rows the person scrolled to past it. A values read keeps
+        // every row's place, so it goes on.
+        if visible.end > CHUNK_ROWS && !matches!(self.in_flight, Some(InFlight::Values(..))) {
+            self.end_refresh(None);
+        }
         let Shown::Rows(shown) = &mut self.shown else {
             return None;
         };
-        let visible = visible.start..visible.end.min(count);
         shown.clock += 1;
         let mut missing = None;
         let mut start = visible.start - visible.start % CHUNK_ROWS;
@@ -667,6 +1051,14 @@ impl Results {
             start += CHUNK_ROWS;
         }
         let start = missing?;
+        // Rows the person scrolls to win over a live refresh, whose rows
+        // would replace the cache and the chunk with it. The fields are
+        // named apart, because `shown` still borrows the list's rows.
+        retire_refresh(
+            &mut self.refreshed,
+            &mut self.last_snapshot,
+            &mut self.retired,
+        );
         match self.in_flight {
             Some(InFlight::Search(..)) => return None,
             Some(InFlight::Chunk(_, asked))
@@ -682,7 +1074,7 @@ impl Results {
             {
                 return None;
             }
-            Some(InFlight::Chunk(..)) | None => {}
+            Some(InFlight::Chunk(..) | InFlight::Refresh(..) | InFlight::Values(..)) | None => {}
         }
         self.in_flight = Some(InFlight::Chunk(generation, start));
         Some(ChunkAsk {
@@ -765,6 +1157,23 @@ impl Results {
             self.retired.push(chunk, items);
             return RowsChange::Stale;
         }
+        if let Some(InFlight::Refresh(_, ask, _)) = &self.in_flight {
+            // A refresh's rows show only whole, on the place found on them,
+            // so a first page waits for the rest.
+            if chunk.rest_follows {
+                let items = chunk.rows.len();
+                self.retired.push(chunk, items);
+                return RowsChange::Stale;
+            }
+            let ask = ask.clone();
+            self.drop_refresh();
+            self.refreshed = Some(Refreshed {
+                generation,
+                ask,
+                chunk,
+            });
+            return RowsChange::Refreshed;
+        }
         let first_page = chunk.rest_follows;
         let in_flight = self.in_flight.take();
         if first_page {
@@ -825,7 +1234,7 @@ impl Results {
                     count: self.count(),
                 }
             }
-            None => RowsChange::Stale,
+            Some(InFlight::Refresh(..) | InFlight::Values(..)) | None => RowsChange::Stale,
         }
     }
 }
@@ -967,10 +1376,53 @@ pub(crate) mod tests {
     /// Results that show the first chunk of a search with `total` matches.
     fn showing(total: u64) -> Results {
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default(), false);
+        results.start_search(
+            Generation(1),
+            search(),
+            SortSpec::default(),
+            Needs::default(),
+        );
         let first = chunk(0, CHUNK_ROWS.min(total), total);
         results.accept(Generation(1), first);
         results
+    }
+
+    #[test]
+    fn refreshing_across_a_chunk_boundary_updates_only_the_rows_read() {
+        let total = 2 * CHUNK_ROWS;
+        let mut results = showing(total);
+        let visible = CHUNK_ROWS - 1..CHUNK_ROWS + 1;
+        let ask = results
+            .next_chunk(visible.clone(), Generation(2))
+            .expect("the second chunk is outside the cache");
+        results.accept(
+            Generation(2),
+            Chunk {
+                made: Some(ResultSnapshotId(7)),
+                ..chunk(ask.start, CHUNK_ROWS, total)
+            },
+        );
+        let ask = results
+            .next_chunk(visible.clone(), Generation(3))
+            .expect("making a snapshot displaced the first chunk");
+        results.accept(Generation(3), chunk(ask.start, CHUNK_ROWS, total));
+
+        let ask = results
+            .start_values(Generation(4), visible.clone())
+            .expect("both chunks are cached from the snapshot");
+        let mut reply = chunk(visible.start, 2, total);
+        let rows = Arc::make_mut(&mut reply.rows);
+        rows[0].size = Some(12);
+        rows[1].size = Some(34);
+        results
+            .accept_values(Generation(4), ask.merge(reply.rows))
+            .expect("the list still shows the refreshed chunks");
+
+        let size = |row| results.row(row).expect("the row is cached").size;
+        assert_eq!(size(CHUNK_ROWS - 2), None);
+        assert_eq!(size(CHUNK_ROWS - 1), Some(12));
+        assert_eq!(size(CHUNK_ROWS), Some(34));
+        assert_eq!(size(CHUNK_ROWS + 1), None);
     }
 
     #[test]
@@ -979,7 +1431,12 @@ pub(crate) mod tests {
         let first = chunk(0, count, count);
         let replaced = Arc::clone(&first.rows);
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default(), false);
+        results.start_search(
+            Generation(1),
+            search(),
+            SortSpec::default(),
+            Needs::default(),
+        );
         results.accept(Generation(1), first);
         results.show_message(ListMessage::TypeToSearch);
         assert_eq!(Arc::strong_count(&replaced), 2);
@@ -1016,7 +1473,12 @@ pub(crate) mod tests {
         assert_eq!(results.accept(Generation(2), replaced), RowsChange::Stale);
 
         let mut results = showing(50_000);
-        results.start_search(Generation(2), search(), SortSpec::default(), false);
+        results.start_search(
+            Generation(2),
+            search(),
+            SortSpec::default(),
+            Needs::default(),
+        );
         assert_eq!(results.next_chunk(far..far + 40, Generation(3)), None);
     }
 
@@ -1047,7 +1509,12 @@ pub(crate) mod tests {
         let asked = results.next_chunk(0..40, Generation(3));
         assert_eq!(asked.map(|a| a.snapshot), Some(FromSnapshot::Read(id)));
 
-        results.start_search(Generation(4), search(), SortSpec::default(), false);
+        results.start_search(
+            Generation(4),
+            search(),
+            SortSpec::default(),
+            Needs::default(),
+        );
         results.accept(Generation(4), chunk(0, CHUNK_ROWS, 200_000));
         let asked = results.next_chunk(150_000..150_040, Generation(5));
         assert_eq!(
@@ -1094,7 +1561,12 @@ pub(crate) mod tests {
     #[test]
     fn a_sort_change_sorts_the_result_snapshot_again() {
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default(), false);
+        results.start_search(
+            Generation(1),
+            search(),
+            SortSpec::default(),
+            Needs::default(),
+        );
         let sums = MatchSums {
             files: 200_000,
             ..MatchSums::default()
@@ -1113,7 +1585,7 @@ pub(crate) mod tests {
         results.accept(Generation(2), made);
 
         let by_size = SortSpec::default_for(SortKey::Size);
-        let asked = results.start_search(Generation(3), search(), by_size, false);
+        let asked = results.start_search(Generation(3), search(), by_size, Needs::default());
         assert_eq!(asked.snapshot, FromSnapshot::Sort(id));
         let sorted = ResultSnapshotId(8);
         let made = Chunk {
@@ -1125,7 +1597,7 @@ pub(crate) mod tests {
         let asked = results.next_chunk(150_000..150_040, Generation(4));
         assert_eq!(asked.map(|a| a.snapshot), Some(FromSnapshot::Read(sorted)));
 
-        let again = results.start_search(Generation(5), search(), by_size, false);
+        let again = results.start_search(Generation(5), search(), by_size, Needs::default());
         assert_eq!(again.snapshot, FromSnapshot::No, "F5");
     }
 
@@ -1180,7 +1652,12 @@ pub(crate) mod tests {
     fn a_first_page_shows_while_its_chunk_arrives() {
         let total = 3 * CHUNK_ROWS;
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default(), false);
+        results.start_search(
+            Generation(1),
+            search(),
+            SortSpec::default(),
+            Needs::default(),
+        );
         let first = Chunk {
             rest_follows: true,
             ..chunk(0, 4_096, total)
@@ -1207,7 +1684,12 @@ pub(crate) mod tests {
     fn a_selection_read_leaves_out_a_first_page() {
         let total = 3 * CHUNK_ROWS;
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default(), false);
+        results.start_search(
+            Generation(1),
+            search(),
+            SortSpec::default(),
+            Needs::default(),
+        );
         let first = Chunk {
             rest_follows: true,
             ..chunk(0, 4_096, total)

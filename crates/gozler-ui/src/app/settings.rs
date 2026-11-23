@@ -25,7 +25,8 @@ use crate::core::model::Model;
 use crate::core::open::{browse_command, browse_compare_command};
 use crate::core::results::Fix;
 use crate::core::settings::{
-    ContextItem, ItemVisibility, Mode, ServiceChanges, SettingsDraft, SettingsPage, SettingsValues,
+    ContextItem, ItemVisibility, Mode, NumberBox, ServiceChanges, SettingsDraft, SettingsPage,
+    SettingsValues, WearAlarm, WearLine,
 };
 use crate::core::shortcuts::{
     CommandRow, CommandShortcuts, ShowShortcut, command_place, command_rows,
@@ -41,7 +42,9 @@ use crate::win::dialog::{self, DialogEnd, DialogMessage, DialogProc, Opened};
 use crate::win::gdi::{Font, TextMeter};
 use crate::win::shortcut::{self, Capture};
 use crate::win::{self, Hwnd};
+use gozler_core::alarm::{TYPICAL_DAY, week_allowance};
 use gozler_core::include::IndexSettings;
+use gozler_core::index::repeats::EVENT_COPIES;
 use gozler_core::proto::CallerSees;
 use gozler_fileops::{DeleteWorkers, Engine, RingBlock, SpeedSettings};
 use std::cell::{Cell, OnceCell, RefCell};
@@ -56,6 +59,9 @@ const PREVIEW_TIMER: usize = 2;
 const PREVIEW_DELAY_MS: u32 = 300;
 const WAIT_TIMER: usize = 3;
 const WAIT_POLL_MS: u32 = 250;
+/// The SSD wear page's timer, which shows the disk list with "Waiting…"
+/// once the service's answer takes [`work::BUSY`].
+const DISKS_TIMER: usize = 4;
 
 /// What the dialog does once its accepted changes are saved.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,6 +105,7 @@ fn heading(page: SettingsPage) -> ControlId {
         SettingsPage::FileOperations => ControlId::FileOperationsSettingsHeading,
         SettingsPage::Performance => ControlId::SpeedHeading,
         SettingsPage::Index => ControlId::IndexHeading,
+        SettingsPage::SsdWear => ControlId::SsdWearHeading,
         SettingsPage::Include => ControlId::IncludeHeading,
         SettingsPage::Visibility => ControlId::VisibilityHeading,
     }
@@ -121,7 +128,7 @@ const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 11] = [
     (SettingsPage::General, ControlId::GeneralOneWindow, |v| {
         &mut v.choices.one_window
     }),
-    (SettingsPage::General, ControlId::GeneralWarnRepeats, |v| {
+    (SettingsPage::SsdWear, ControlId::SsdWearWarn, |v| {
         &mut v.choices.warn_repeats
     }),
     (SettingsPage::General, ControlId::GeneralShowIcons, |v| {
@@ -285,8 +292,43 @@ const SPEED_BLOCKS: [(ControlId, SpeedField<RingBlock>); 2] = [
     }),
 ];
 
+/// Each line of the SSD wear page's alarm: its check box, its number box
+/// and the catalogue key of the tooltip that both show.
+const WEAR_LINES: [(WearLine, ControlId, ControlId, &str); 5] = [
+    (
+        WearLine::FileWrites,
+        ControlId::SsdWearFileWrites,
+        ControlId::SsdWearFileWritesNumber,
+        "settings_ssd_wear.file_writes_tip",
+    ),
+    (
+        WearLine::FileWritten,
+        ControlId::SsdWearFileWritten,
+        ControlId::SsdWearFileWrittenNumber,
+        "settings_ssd_wear.file_written_tip",
+    ),
+    (
+        WearLine::FolderWritten,
+        ControlId::SsdWearFolderWritten,
+        ControlId::SsdWearFolderWrittenNumber,
+        "settings_ssd_wear.folder_written_tip",
+    ),
+    (
+        WearLine::ProgramWritten,
+        ControlId::SsdWearProgramWritten,
+        ControlId::SsdWearProgramWrittenNumber,
+        "settings_ssd_wear.program_written_tip",
+    ),
+    (
+        WearLine::DiskWeek,
+        ControlId::SsdWearDiskWeek,
+        ControlId::SsdWearDiskWeekNumber,
+        "settings_ssd_wear.disk_week_tip",
+    ),
+];
+
 /// Each page's Reset.
-const RESTORE: [(SettingsPage, ControlId); 7] = [
+const RESTORE: [(SettingsPage, ControlId); 8] = [
     (SettingsPage::General, ControlId::GeneralRestore),
     (SettingsPage::Search, ControlId::SearchRestore),
     (SettingsPage::ContextMenu, ControlId::ContextMenuRestore),
@@ -296,6 +338,7 @@ const RESTORE: [(SettingsPage, ControlId); 7] = [
         ControlId::FileOperationsRestore,
     ),
     (SettingsPage::Performance, ControlId::SpeedRestore),
+    (SettingsPage::SsdWear, ControlId::SsdWearRestore),
     (SettingsPage::Include, ControlId::IncludeRestore),
 ];
 
@@ -543,7 +586,7 @@ impl<'a> SettingsDialog<'a> {
         }
         let mut values = self.draft.borrow().edited.clone();
         self.filling(|| match page {
-            SettingsPage::General | SettingsPage::Search => {
+            SettingsPage::General | SettingsPage::Search | SettingsPage::SsdWear => {
                 for (on, control, value) in CHECK_BOXES {
                     if on == page
                         && let Some(check_box) = self.check_box(page, control)
@@ -582,6 +625,9 @@ impl<'a> SettingsDialog<'a> {
                     if let (Some(list), Some(place)) = (self.date_list(), place) {
                         list.select(place);
                     }
+                }
+                if page == SettingsPage::SsdWear {
+                    self.fill_wear(&values.choices.wear_alarm);
                     self.show_wear_note();
                 }
             }
@@ -643,6 +689,23 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
+    /// Sets the SSD wear page's alarm lines from `alarm`: each check box, and
+    /// its number box, which is disabled while the check box is off.
+    fn fill_wear(&self, alarm: &WearAlarm) {
+        self.draft.borrow_mut().wear_shown();
+        let page = SettingsPage::SsdWear;
+        for (line, check, number, _) in WEAR_LINES {
+            let limit = alarm.line(line);
+            if let Some(check_box) = self.check_box(page, check) {
+                check_box.set_checked(limit.on);
+            }
+            if let Some(edit) = self.control(page, number) {
+                edit.set_text(&limit.value.to_string());
+                edit.set_enabled(limit.on);
+            }
+        }
+    }
+
     /// Selects `preset` in the Speed settings list, with the sentence under
     /// it that says what it does.
     fn show_preset(&self, preset: SpeedPreset) {
@@ -674,22 +737,32 @@ impl<'a> SettingsDialog<'a> {
         self.show_preset(preset);
     }
 
-    /// The first number box of the File operations page whose text its
-    /// range refuses, with the message that says the range; such a box is
-    /// refused when OK or Apply is pressed (DESIGN.md: Dialogs).
-    fn read_speed(&self) -> Result<(), (ControlId, String)> {
+    /// The first number box whose text its range refuses, with its page and
+    /// the message that says the range; such a box is refused when OK or
+    /// Apply is pressed (DESIGN.md: Dialogs).
+    fn read_numbers(&self) -> Result<(), (SettingsPage, ControlId, String)> {
         let Some((number, range)) = self.draft.borrow().refused() else {
             return Ok(());
         };
-        let control = SPEED_NUMBERS
-            .into_iter()
-            .find_map(|(control, each)| (each == number).then_some(control))
-            .expect("every speed number has its box");
+        let (page, control) = match number {
+            NumberBox::Speed(number) => {
+                let control = (SPEED_NUMBERS.into_iter())
+                    .find_map(|(control, each)| (each == number).then_some(control))
+                    .expect("every speed number has its box");
+                (SettingsPage::Performance, control)
+            }
+            NumberBox::Wear(line) => {
+                let control = (WEAR_LINES.into_iter())
+                    .find_map(|(each, _, control, _)| (each == line).then_some(control))
+                    .expect("every wear line has its box");
+                (SettingsPage::SsdWear, control)
+            }
+        };
         let message = self.strings.format(
             "settings_file_operations.out_of_range",
             &[&range.min.to_string(), &range.max.to_string()],
         );
-        Err((control, message))
+        Err((page, control, message))
     }
 
     /// The item that the Context menu page's list selects.
@@ -977,15 +1050,40 @@ impl<'a> SettingsDialog<'a> {
         }
     }
 
-    /// Shows "Needs a newer service" under the copy warning's check box
-    /// while the service refuses the watch. Its caption is not in the
-    /// page's caption table, because a hidden note would make Settings'
-    /// search list the page.
+    fn disk_list(&self) -> Option<ReportList> {
+        ReportList::of_dialog(
+            self.page(SettingsPage::SsdWear)?,
+            ControlId::SsdWearDisks.id(),
+        )
+    }
+
+    /// Shows the SSD wear page's disk list (DESIGN.md: The SSD wear page):
+    /// the rows once the service answered, or the list's empty text. The
+    /// template makes it as tall as its header and 6 rows. The list is hidden until the
+    /// answer or [`DISKS_TIMER`], so a quick answer shows only itself.
+    fn show_disks(&self, dialog: Hwnd) {
+        dialog.kill_timer(DISKS_TIMER);
+        let (Some(list), Some(control)) = (
+            self.disk_list(),
+            self.control(SettingsPage::SsdWear, ControlId::SsdWearDisks),
+        ) else {
+            return;
+        };
+        let rows = self.main.settings.disk_rows(self.main, &self.strings);
+        // Replacing the rows makes the list ask for its empty text again.
+        list.set_rows(&rows, None);
+        control.set_visible(true);
+    }
+
+    /// Shows under the page's heading that the warnings need a newer
+    /// service while the service refuses the watch, which stops them all.
+    /// Its caption is not in the page's caption table, because a hidden
+    /// note would make Settings' search list the page.
     fn show_wear_note(&self) {
-        if let Some(note) = self.control(SettingsPage::General, ControlId::GeneralWarnNote) {
+        if let Some(note) = self.control(SettingsPage::SsdWear, ControlId::SsdWearNote) {
             let refused = self.main.wear.refused();
             if refused {
-                note.set_text(self.strings.text("settings_general.needs_newer"));
+                note.set_text(self.strings.text("settings_ssd_wear.warnings_need_newer"));
             }
             note.set_visible(refused);
         }
@@ -1638,6 +1736,10 @@ impl<'a> SettingsDialog<'a> {
         {
             rebuild.set_icon(Some(ButtonIcon::Shield));
         }
+        if page == SettingsPage::SsdWear {
+            self.main.settings.read_disks(self.main);
+            dialog.set_timer(DISKS_TIMER, work::BUSY.as_millis() as u32);
+        }
         self.fill(page);
         let search = dialog::item(dialog, ControlId::SettingsSearch.id())
             .map(Hwnd::text)
@@ -1680,6 +1782,15 @@ impl<'a> SettingsDialog<'a> {
                 }
             }
             SettingsPage::Search => {}
+            SettingsPage::SsdWear => {
+                if let Some(list) = self.disk_list() {
+                    list.set_columns(&[
+                        (text("settings_ssd_wear.disk_column"), 52, false),
+                        (text("settings_ssd_wear.used_column"), 20, true),
+                        (text("settings_ssd_wear.written_column"), 28, true),
+                    ]);
+                }
+            }
             SettingsPage::ContextMenu => {
                 let Some(page) = self.page(SettingsPage::ContextMenu) else {
                     return;
@@ -1805,7 +1916,9 @@ impl<'a> SettingsDialog<'a> {
     }
 
     /// Gives `page`, whose window is `hwnd`, its tooltip: its Reset says
-    /// which settings it restores, the Use Total Commander link says what it
+    /// which settings it restores, the copy warning's check box says what it
+    /// warns about, each alarm line's check box and number box say what the
+    /// line counts, the Use Total Commander link says what it
     /// does, the Service group's fix buttons say what their fix does, Clear
     /// says its name, because it can show only its icon, and the shortcut
     /// boxes say when their shortcut works.
@@ -1816,7 +1929,27 @@ impl<'a> SettingsDialog<'a> {
             .into_iter()
             .find(|(restored, _)| *restored == page)
             .map(|(_, reset)| (reset, text("settings.reset_tooltip")));
+        let warn_tip = self
+            .strings
+            .format("settings_ssd_wear.tooltip", &[&EVENT_COPIES.to_string()]);
+        // A typical user's figures, as the service compares with them.
+        let gb = |bytes: u64| (bytes >> 30).to_string();
+        let figures = [gb(TYPICAL_DAY), gb(week_allowance(1))];
+        let typical = [figures[0].as_str(), figures[1].as_str()];
+        let mut wear_tips: Vec<(ControlId, String)> = Vec::new();
+        if page == SettingsPage::SsdWear {
+            for (_, check, number, key) in WEAR_LINES {
+                let tip = self.strings.format(key, &typical);
+                wear_tips.push((check, tip.clone()));
+                wear_tips.push((number, tip));
+            }
+            wear_tips.push((ControlId::SsdWearWarn, warn_tip));
+        }
+        let wear: Vec<(ControlId, &str)> = (wear_tips.iter())
+            .map(|(control, tip)| (*control, tip.as_str()))
+            .collect();
         let others: &[(ControlId, &str)] = match page {
+            SettingsPage::SsdWear => &wear,
             SettingsPage::ContextMenu => &[(
                 ControlId::ContextMenuTotalCommander,
                 text("settings_context_menu.total_commander_tooltip"),
@@ -2026,7 +2159,7 @@ impl<'a> SettingsDialog<'a> {
         }
         // The paths end in an ellipsis, so their tooltips show them whole.
         type Text = fn(&IndexCaptions) -> &str;
-        let texts: [(ControlId, Text, bool); 6] = [
+        let texts: [(ControlId, Text, bool); 7] = [
             (ControlId::IndexService, |c| c.service.as_str(), false),
             (
                 ControlId::IndexServiceProgramPath,
@@ -2045,6 +2178,11 @@ impl<'a> SettingsDialog<'a> {
                 false,
             ),
             (ControlId::IndexNote, |c| c.note.as_str(), false),
+            (
+                ControlId::IndexDatesCreatedNote,
+                |c| c.dates_created_note.as_str(),
+                false,
+            ),
         ];
         for (control, text, tipped) in texts {
             let Some(hwnd) = self
@@ -2167,8 +2305,8 @@ impl<'a> SettingsDialog<'a> {
     /// service settings are applied once they are saved, and `after` says
     /// what the dialog does then.
     fn apply(&self, dialog: Hwnd, after: AfterSave) -> bool {
-        if let Err((control, message)) = self.read_speed() {
-            self.refuse(dialog, SettingsPage::Performance, control, &message);
+        if let Err((page, control, message)) = self.read_numbers() {
+            self.refuse(dialog, page, control, &message);
             return false;
         }
         let (mut edited, last) = {
@@ -2178,11 +2316,10 @@ impl<'a> SettingsDialog<'a> {
         if edited == last {
             return true;
         }
-        // The warning comes only while Gozler runs, so turning it on asks
+        // The warnings come only while Gozler runs, so turning one on asks
         // to turn on what keeps Gozler running.
         let (sign_in, keep_running) = (edited.start_at_sign_in, edited.choices.keep_running);
-        if edited.choices.warn_repeats
-            && !last.choices.warn_repeats
+        if edited.choices.turns_on_wear(&last.choices)
             && !(sign_in && keep_running)
             && dialog::ask(
                 dialog,
@@ -2549,6 +2686,16 @@ impl<'a> SettingsDialog<'a> {
                 draft.edited.choices.speed.preset
             };
             self.show_preset(preset);
+        } else if let Some((line, _, control, _)) =
+            WEAR_LINES.into_iter().find(|(_, _, c, _)| is(id, *c))
+        {
+            let text = self
+                .control(SettingsPage::SsdWear, control)
+                .map(Hwnd::text)
+                .unwrap_or_default();
+            // A number out of its range is refused when OK or Apply is
+            // pressed.
+            self.draft.borrow_mut().type_limit(line, &text);
         } else if let Some((control, _, engine)) =
             SPEED_ENGINES.into_iter().find(|(c, ..)| is(id, *c))
         {
@@ -2594,6 +2741,23 @@ impl<'a> SettingsDialog<'a> {
                 .check_box(page, control)
                 .is_some_and(CheckBox::is_checked);
             *value(&mut self.draft.borrow_mut().edited) = checked;
+        } else if let Some((line, check, number, _)) =
+            WEAR_LINES.into_iter().find(|(_, c, ..)| is(id, *c))
+        {
+            let page = SettingsPage::SsdWear;
+            let checked = self
+                .check_box(page, check)
+                .is_some_and(CheckBox::is_checked);
+            self.draft
+                .borrow_mut()
+                .edited
+                .choices
+                .wear_alarm
+                .line_mut(line)
+                .on = checked;
+            if let Some(edit) = self.control(page, number) {
+                edit.set_enabled(checked);
+            }
         } else if let Some((_, shown)) = VISIBILITY_BUTTONS.into_iter().find(|(c, _)| is(id, *c)) {
             if let Some(item) = self.selected_context_item() {
                 *self
@@ -2875,6 +3039,10 @@ impl DialogProc for SettingsDialog<'_> {
                 self.update_apply(dialog);
                 return true;
             }
+            DialogMessage::Timer { id: DISKS_TIMER } => {
+                self.show_disks(dialog);
+                return true;
+            }
             DialogMessage::Reply => {
                 self.total_commander_found(dialog);
                 if self.main.settings.take_account_names_changed()
@@ -2885,6 +3053,9 @@ impl DialogProc for SettingsDialog<'_> {
                 }
                 self.show_seen();
                 self.show_wear_note();
+                if self.main.settings.take_disks_changed() {
+                    self.show_disks(dialog);
+                }
                 if self.main.settings.take_include_summary_changed()
                     && self.include_folders().is_some()
                 {
@@ -2999,6 +3170,9 @@ impl DialogProc for SettingsDialog<'_> {
     }
 
     fn empty_text(&self, id: u16) -> Option<String> {
+        if is(id, ControlId::SsdWearDisks) {
+            return Some(self.main.settings.disks_empty_text(&self.strings));
+        }
         if is(id, ControlId::VisibilityList) {
             return Some(match &self.draft.borrow().edited.see_every_file {
                 Ok(_) => self.strings.text("settings_visibility.empty").to_owned(),

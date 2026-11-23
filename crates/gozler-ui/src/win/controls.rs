@@ -1811,7 +1811,8 @@ impl ReportList {
 
     /// Gives the list File Explorer's look and `columns`, each a header,
     /// its share of the list's width in percent, and whether its cells are
-    /// right-aligned, as numbers are.
+    /// right-aligned, as numbers are. The widths are set as
+    /// [`ReportList::fit_columns`] sets them.
     pub(crate) fn set_columns(self, columns: &[(&str, i32, bool)]) {
         let extended = LVS_EX_DOUBLEBUFFER | LVS_EX_FULLROWSELECT | LVS_EX_LABELTIP;
         send(
@@ -1822,19 +1823,15 @@ impl ReportList {
         );
         // SAFETY: plain values; a missing theme leaves the classic look.
         let _ = unsafe { SetWindowTheme(self.0.0, w!("Explorer"), PCWSTR::null()) };
-        // The vertical scroll bar takes its width when the rows fill the
-        // list.
-        let width = (self.0.client_size().width - scroll_bar_width(self.0.dpi())).0;
-        for (index, (header, share, right_aligned)) in columns.iter().enumerate() {
+        for (index, (header, _, right_aligned)) in columns.iter().enumerate() {
             let mut header = wide(header);
             let column = LVCOLUMNW {
-                mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
+                mask: LVCF_TEXT | LVCF_FMT,
                 fmt: if *right_aligned {
                     LVCFMT_RIGHT
                 } else {
                     LVCFMT_LEFT
                 },
-                cx: width * share / 100,
                 pszText: PWSTR(header.as_mut_ptr()),
                 ..Default::default()
             };
@@ -1842,6 +1839,23 @@ impl ReportList {
             // them.
             unsafe { send_pointer(self.0, LVM_INSERTCOLUMNW, index, &raw const column) };
         }
+        self.fit_columns(columns.iter().map(|&(_, share, _)| share));
+    }
+
+    /// Gives each column after the first its share of the list's width now,
+    /// in percent, and the first what the others leave, so the columns fill
+    /// the list without a horizontal scroll bar.
+    pub(crate) fn fit_columns(self, shares: impl IntoIterator<Item = i32>) {
+        // The vertical scroll bar takes its width when the rows fill the
+        // list.
+        let width = (self.0.client_size().width - scroll_bar_width(self.0.dpi())).0;
+        let mut left = width;
+        for (index, share) in shares.into_iter().enumerate().skip(1) {
+            let column = width * share / 100;
+            left -= column;
+            send(self.0, LVM_SETCOLUMNWIDTH, index, column as isize);
+        }
+        send(self.0, LVM_SETCOLUMNWIDTH, 0, left.max(0) as isize);
     }
 
     /// Sets the header of the column `index` and keeps its width.

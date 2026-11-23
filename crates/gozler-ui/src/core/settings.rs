@@ -17,6 +17,7 @@ use super::shortcuts::{CommandShortcuts, ShowShortcut};
 use super::speed::{OutOfRange, Speed, SpeedNumber};
 use super::text::{LanguageChoice, SizeFormat};
 use gozler_core::include::IndexSettings;
+use gozler_core::proto::WearLimits;
 use gozler_core::types::SortSpec;
 use gozler_fileops::{DeleteWorkers, Policy, TransferLimit};
 use serde::de::DeserializeOwned;
@@ -62,6 +63,10 @@ pub(crate) struct Choices {
     /// itself.
     #[serde(default, deserialize_with = "or_default")]
     pub(crate) warn_repeats: bool,
+    /// The wear alarm's limits, which the first window watches too
+    /// (DESIGN.md: The SSD wear page).
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) wear_alarm: WearAlarm,
     /// Icons before the text of menu items, buttons, list items, group
     /// captions and the status bar's totals (DESIGN.md: Look).
     #[serde(default = "on", deserialize_with = "on_or_default")]
@@ -143,6 +148,153 @@ impl Choices {
             Mode::Commander => self.commander_shortcut,
         }
     }
+
+    /// Whether the first window holds a wear request: a warning of the SSD
+    /// wear page is on.
+    pub(crate) fn watches_wear(&self) -> bool {
+        self.warn_repeats
+            || WearLine::ALL
+                .iter()
+                .any(|&line| self.wear_alarm.line(line).on)
+    }
+
+    /// Whether a warning of the SSD wear page is on here and off in
+    /// `before`, which asks to keep Gozler running.
+    pub(crate) fn turns_on_wear(&self, before: &Choices) -> bool {
+        (self.warn_repeats && !before.warn_repeats)
+            || WearLine::ALL
+                .iter()
+                .any(|&line| self.wear_alarm.line(line).on && !before.wear_alarm.line(line).on)
+    }
+}
+
+/// A line of the wear alarm on the SSD wear page, in the page's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WearLine {
+    FileWrites,
+    FileWritten,
+    FolderWritten,
+    ProgramWritten,
+    DiskWeek,
+}
+
+impl WearLine {
+    pub(crate) const ALL: [WearLine; 5] = [
+        WearLine::FileWrites,
+        WearLine::FileWritten,
+        WearLine::FolderWritten,
+        WearLine::ProgramWritten,
+        WearLine::DiskWeek,
+    ];
+
+    /// The line's name in `ui.json`.
+    fn key(self) -> &'static str {
+        match self {
+            WearLine::FileWrites => "file_writes",
+            WearLine::FileWritten => "file_written",
+            WearLine::FolderWritten => "folder_written",
+            WearLine::ProgramWritten => "program_written",
+            WearLine::DiskWeek => "disk_week",
+        }
+    }
+
+    /// The numbers its box takes: writes an hour, GB of 2^30 bytes an
+    /// hour, or times a typical user's week.
+    pub(crate) fn range(self) -> OutOfRange {
+        let max = match self {
+            WearLine::FileWrites => WearLimits::MOST_WRITES,
+            WearLine::FileWritten | WearLine::FolderWritten | WearLine::ProgramWritten => {
+                WearLimits::MOST_GB
+            }
+            WearLine::DiskWeek => WearLimits::MOST_FACTOR,
+        };
+        OutOfRange { min: 1, max }
+    }
+}
+
+/// One line of the wear alarm: whether it is on, and its number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WearLimit {
+    pub(crate) on: bool,
+    pub(crate) value: u32,
+}
+
+/// The wear alarm's lines (DESIGN.md: The SSD wear page), in the order of
+/// [`WearLine::ALL`]. `ui.json` saves each line under [`WearLine::key`],
+/// and each line loads on its own: a line that is missing or damaged gets
+/// its default, and the others keep theirs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WearAlarm {
+    lines: [WearLimit; WearLine::ALL.len()],
+}
+
+impl Default for WearAlarm {
+    /// The owner's defaults: well above the busiest file, folder and
+    /// program of a heavy PC's normal hour, and the program line off,
+    /// because its counter also counts pipes (DESIGN.md: Wear alarm).
+    fn default() -> WearAlarm {
+        let limit = |on, value| WearLimit { on, value };
+        WearAlarm {
+            lines: WearLine::ALL.map(|line| match line {
+                WearLine::FileWrites => limit(true, 3_600),
+                WearLine::FileWritten => limit(true, 2),
+                WearLine::FolderWritten => limit(true, 10),
+                WearLine::ProgramWritten => limit(false, 8),
+                WearLine::DiskWeek => limit(true, 10),
+            }),
+        }
+    }
+}
+
+impl Serialize for WearAlarm {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let lines = WearLine::ALL.map(|line| (line.key(), self.lines[line as usize]));
+        serializer.collect_map(lines)
+    }
+}
+
+impl<'de> Deserialize<'de> for WearAlarm {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<WearAlarm, D::Error> {
+        let saved: Map<String, Value> = or_default(deserializer)?;
+        let mut alarm = WearAlarm::default();
+        for line in WearLine::ALL {
+            let limit = saved.get(line.key()).map(WearLimit::deserialize);
+            if let Some(Ok(limit)) = limit {
+                *alarm.line_mut(line) = limit;
+            }
+        }
+        Ok(alarm)
+    }
+}
+
+impl WearAlarm {
+    /// The line, with its number within its range: a hand-edited file can
+    /// hold any number.
+    pub(crate) fn line(&self, line: WearLine) -> WearLimit {
+        let mut limit = self.lines[line as usize];
+        let range = line.range();
+        limit.value = limit.value.clamp(range.min, range.max);
+        limit
+    }
+
+    pub(crate) fn line_mut(&mut self, line: WearLine) -> &mut WearLimit {
+        &mut self.lines[line as usize]
+    }
+
+    /// The limits the wear request sends: each line that is on, in the
+    /// service's units.
+    pub(crate) fn limits(&self) -> WearLimits {
+        const GB: u64 = 1 << 30;
+        let on = |line| Some(self.line(line)).filter(|limit| limit.on);
+        let gb = |line| on(line).map(|limit| u64::from(limit.value) * GB);
+        WearLimits {
+            file_writes: on(WearLine::FileWrites).map(|limit| limit.value),
+            file_written: gb(WearLine::FileWritten),
+            folder_written: gb(WearLine::FolderWritten),
+            program_written: gb(WearLine::ProgramWritten),
+            disk_week: on(WearLine::DiskWeek).map(|limit| limit.value),
+        }
+    }
 }
 
 impl Default for Choices {
@@ -153,6 +305,7 @@ impl Default for Choices {
             keep_running: on(),
             one_window: on(),
             warn_repeats: false,
+            wear_alarm: WearAlarm::default(),
             show_icons: on(),
             show_memory: false,
             select_folders: on(),
@@ -287,6 +440,10 @@ pub(crate) enum SettingsPage {
     /// The service's index, which the page shows and does not change yet
     /// (DESIGN.md: Settings dialog).
     Index,
+    /// The wear alarm's limits, the warning about a folder copied into
+    /// itself again and again, and each disk's health (DESIGN.md: The SSD
+    /// wear page).
+    SsdWear,
     /// What the service indexes (DESIGN.md: The Include page).
     Include,
     /// Who sees every file (DESIGN.md: The Visibility page).
@@ -294,7 +451,7 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) const ALL: [SettingsPage; 9] = [
+    pub(crate) const ALL: [SettingsPage; 10] = [
         SettingsPage::General,
         SettingsPage::Search,
         SettingsPage::ContextMenu,
@@ -302,6 +459,7 @@ impl SettingsPage {
         SettingsPage::FileOperations,
         SettingsPage::Performance,
         SettingsPage::Index,
+        SettingsPage::SsdWear,
         SettingsPage::Include,
         SettingsPage::Visibility,
     ];
@@ -316,6 +474,7 @@ impl SettingsPage {
             SettingsPage::FileOperations => DialogId::SettingsFileOperations,
             SettingsPage::Performance => DialogId::SettingsPerformance,
             SettingsPage::Index => DialogId::SettingsIndex,
+            SettingsPage::SsdWear => DialogId::SettingsSsdWear,
             SettingsPage::Include => DialogId::SettingsInclude,
             SettingsPage::Visibility => DialogId::SettingsVisibility,
         }
@@ -331,6 +490,7 @@ impl SettingsPage {
             SettingsPage::FileOperations => "settings.file_operations",
             SettingsPage::Performance => "settings.performance",
             SettingsPage::Index => "settings.index",
+            SettingsPage::SsdWear => "settings.ssd_wear",
             SettingsPage::Include => "settings.include",
             SettingsPage::Visibility => "settings.visibility",
         }
@@ -346,6 +506,7 @@ impl SettingsPage {
             SettingsPage::FileOperations => Glyph::Copy,
             SettingsPage::Performance => Glyph::SpeedHigh,
             SettingsPage::Index => Glyph::HardDrive,
+            SettingsPage::SsdWear => Glyph::Sync,
             SettingsPage::Include => Glyph::CheckList,
             SettingsPage::Visibility => Glyph::People,
         }
@@ -380,7 +541,6 @@ impl SettingsValues {
                 choices.check_for_updates = defaults.check_for_updates;
                 choices.keep_running = defaults.keep_running;
                 choices.one_window = defaults.one_window;
-                choices.warn_repeats = defaults.warn_repeats;
                 choices.show_icons = defaults.show_icons;
                 choices.show_memory = defaults.show_memory;
                 choices.select_folders = defaults.select_folders;
@@ -413,6 +573,10 @@ impl SettingsValues {
             }
             SettingsPage::Performance => {
                 choices.speed = defaults.speed;
+            }
+            SettingsPage::SsdWear => {
+                choices.warn_repeats = defaults.warn_repeats;
+                choices.wear_alarm = defaults.wear_alarm;
             }
             SettingsPage::Index | SettingsPage::Visibility => {}
             SettingsPage::Include => {
@@ -589,14 +753,23 @@ impl ContextMenu {
     }
 }
 
+/// A number box of the Settings dialog whose text its range can refuse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NumberBox {
+    /// On the Performance page.
+    Speed(SpeedNumber),
+    /// On the SSD wear page.
+    Wear(WearLine),
+}
+
 /// The values the dialog shows and the values Apply last applied, so Apply
 /// is enabled exactly while they differ (DESIGN.md: Dialogs).
 pub(crate) struct SettingsDraft {
     applied: SettingsValues,
     pub(crate) edited: SettingsValues,
-    /// The File operations page's number boxes whose text their range
-    /// refuses, with that text, which the edited values cannot hold.
-    refused: Vec<(SpeedNumber, String)>,
+    /// The number boxes whose text their range refuses, with that text,
+    /// which the edited values cannot hold.
+    refused: Vec<(NumberBox, String)>,
 }
 
 impl SettingsDraft {
@@ -660,32 +833,69 @@ impl SettingsDraft {
         self.edited.choices.speed.change(|settings| {
             taken = number.set_text(settings, text).is_ok();
         });
+        self.typed(NumberBox::Speed(number), text, taken);
+    }
+
+    /// Records the text typed in the number box of `line`: a number in its
+    /// range becomes the line's limit, and any other text is kept for Apply
+    /// to refuse.
+    pub(crate) fn type_limit(&mut self, line: WearLine, text: &str) {
+        let range = line.range();
+        let number = text
+            .trim()
+            .parse()
+            .ok()
+            .filter(|n| (range.min..=range.max).contains(n));
+        if let Some(number) = number {
+            self.edited.choices.wear_alarm.line_mut(line).value = number;
+        }
+        self.typed(NumberBox::Wear(line), text, number.is_some());
+    }
+
+    fn typed(&mut self, number: NumberBox, text: &str, taken: bool) {
         self.refused.retain(|(refused, _)| *refused != number);
         if !taken {
             self.refused.push((number, text.to_owned()));
         }
     }
 
-    /// The first number box, in the page's order, whose text its range
-    /// refuses, with that range. The delete workers' box is off while one
-    /// per logical processor is on, so its text is not checked then.
-    pub(crate) fn refused(&self) -> Option<(SpeedNumber, OutOfRange)> {
+    /// The first number box, in the pages' order, whose text its range
+    /// refuses, with that range. A box that is off is not checked: the
+    /// delete workers' box while one per logical processor is on, and a
+    /// wear line's while its check box is off.
+    pub(crate) fn refused(&self) -> Option<(NumberBox, OutOfRange)> {
         let settings = self.edited.choices.speed.settings();
         let per_processor = settings.delete_workers == DeleteWorkers::PerProcessor;
-        SpeedNumber::ALL
-            .into_iter()
+        let text = |number: NumberBox| {
+            let (_, text) = self.refused.iter().find(|(r, _)| *r == number)?;
+            Some(text)
+        };
+        let speed = (SpeedNumber::ALL.into_iter())
             .filter(|number| !(per_processor && *number == SpeedNumber::DeleteWorkers))
             .find_map(|number| {
-                let (_, text) = self.refused.iter().find(|(r, _)| *r == number)?;
+                let text = text(NumberBox::Speed(number))?;
                 let range = number.set_text(&mut settings.clone(), text).err()?;
-                Some((number, range))
-            })
+                Some((NumberBox::Speed(number), range))
+            });
+        let alarm = &self.edited.choices.wear_alarm;
+        speed.or_else(|| {
+            (WearLine::ALL.into_iter())
+                .filter(|&line| alarm.line(line).on)
+                .find(|&line| text(NumberBox::Wear(line)).is_some())
+                .map(|line| (NumberBox::Wear(line), line.range()))
+        })
     }
 
-    /// The File operations page shows the edited values again, so no box
-    /// holds refused text.
+    /// The File operations page shows the edited values again, so none of
+    /// its boxes holds refused text.
     pub(crate) fn speed_shown(&mut self) {
-        self.refused.clear();
+        (self.refused).retain(|(number, _)| !matches!(number, NumberBox::Speed(_)));
+    }
+
+    /// The SSD wear page shows the edited values again, so none of its
+    /// boxes holds refused text.
+    pub(crate) fn wear_shown(&mut self) {
+        (self.refused).retain(|(number, _)| !matches!(number, NumberBox::Wear(_)));
     }
 
     /// The Use Total Commander link: both open commands open Total Commander
@@ -1178,7 +1388,7 @@ fn is_windows_default(choice: &LanguageChoice) -> bool {
 mod tests {
     use super::*;
     use crate::core::commands::{CommandId, Key, Keystroke};
-    use crate::core::panel::{SavedPanel, Side};
+    use crate::core::panel::{PanelColumn, SavedPanel, Side};
     use crate::core::query::{DateModified, DateRange, Day, Kind, SizeFilter, SizeWord};
     use crate::core::speed;
     use gozler_fileops::Count;
@@ -1230,14 +1440,15 @@ mod tests {
         assert!(!draft.last_applied().choices.show_memory);
         assert_eq!(
             draft.refused().map(|(number, _)| number),
-            Some(SpeedNumber::DeleteWorkers)
+            Some(NumberBox::Speed(SpeedNumber::DeleteWorkers))
         );
         assert!(draft.can_apply());
     }
 
     /// A number box's text out of its range enables Apply, which refuses
     /// it, until the box is turned off: delete workers' while one per
-    /// logical processor is on.
+    /// logical processor is on, and a wear line's while its check box is
+    /// off, as the program line is by default.
     #[test]
     fn a_turned_off_box_is_not_checked() {
         let mut draft = SettingsDraft::new(values());
@@ -1248,13 +1459,22 @@ mod tests {
         draft.type_number(SpeedNumber::DeleteWorkers, "0");
         assert_eq!(
             draft.refused().map(|(number, _)| number),
-            Some(SpeedNumber::DeleteWorkers)
+            Some(NumberBox::Speed(SpeedNumber::DeleteWorkers))
         );
         assert!(draft.can_apply());
         draft.edited.choices.speed.change(|settings| {
             speed::set_per_processor(settings, true);
         });
         assert_eq!(draft.refused(), None);
+
+        draft.type_limit(WearLine::ProgramWritten, "0");
+        assert_eq!(draft.refused(), None);
+        let program = WearLine::ProgramWritten;
+        draft.edited.choices.wear_alarm.line_mut(program).on = true;
+        assert_eq!(
+            draft.refused().map(|(number, _)| number),
+            Some(NumberBox::Wear(program))
+        );
     }
 
     /// The Use Total Commander link sets both open commands, and says when
@@ -1544,6 +1764,8 @@ mod tests {
                         folder: Some(r"D:\work".into()),
                         sort: SortSpec::default_for(gozler_core::types::SortKey::DateModified),
                         history: vec![r"D:\work".into(), r"C:\".into()],
+                        columns: vec![PanelColumn::Writes, PanelColumn::Files],
+                        hidden: vec![PanelColumn::Size],
                     },
                     right: SavedPanel::default(),
                     active: Side::Right,

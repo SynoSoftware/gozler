@@ -25,8 +25,9 @@ pub(crate) use panels::{
 };
 pub(crate) use search::{ListCaption, header, list_message};
 pub(crate) use settings::{
-    IndexCaptions, SETTINGS_GROUPS, service_report, settings_job, settings_page_hits,
-    settings_pages_matching, settings_status_view, settings_status_widest,
+    IndexCaptions, SETTINGS_GROUPS, disk_rows, disks_empty_text, service_report, settings_job,
+    settings_page_hits, settings_pages_matching, settings_status_view, settings_status_widest,
+    with_mounts,
 };
 pub(crate) use status::{
     IndexingCaption, JobCaption, JobProgress, MemoryCaptions, MemoryWidest, StatusCaptions,
@@ -492,10 +493,6 @@ impl CaptionTable {
                         "settings_general.keep_running",
                     ),
                     (Control(C::GeneralOneWindow), "settings_general.one_window"),
-                    (
-                        Control(C::GeneralWarnRepeats),
-                        "settings_general.warn_repeats",
-                    ),
                     (Control(C::GeneralShowIcons), "settings_general.show_icons"),
                     (
                         Control(C::GeneralShowMemory),
@@ -700,6 +697,54 @@ impl CaptionTable {
                     (Control(C::IncludeNamesHint), "settings_include.names_hint"),
                 ],
             },
+            DialogId::SettingsSsdWear => CaptionTable {
+                title: "settings.ssd_wear",
+                keyed: &[
+                    (
+                        Control(C::SsdWearFileWrites),
+                        "settings_ssd_wear.file_writes",
+                    ),
+                    (
+                        Control(C::SsdWearFileWritten),
+                        "settings_ssd_wear.file_written",
+                    ),
+                    (
+                        Control(C::SsdWearFolderWritten),
+                        "settings_ssd_wear.folder_written",
+                    ),
+                    (
+                        Control(C::SsdWearProgramWritten),
+                        "settings_ssd_wear.program_written",
+                    ),
+                    (Control(C::SsdWearDiskWeek), "settings_ssd_wear.disk_week"),
+                    (Control(C::SsdWearWarn), "settings_ssd_wear.warn"),
+                    (Control(C::SsdWearRestore), "settings.reset"),
+                ],
+                plain: &[
+                    (Control(C::SsdWearHeading), "settings.ssd_wear"),
+                    (
+                        Control(C::SsdWearFileWritesUnit),
+                        "settings_ssd_wear.per_hour",
+                    ),
+                    (
+                        Control(C::SsdWearFileWrittenUnit),
+                        "settings_ssd_wear.gb_per_hour",
+                    ),
+                    (
+                        Control(C::SsdWearFolderWrittenUnit),
+                        "settings_ssd_wear.gb_per_hour",
+                    ),
+                    (
+                        Control(C::SsdWearProgramWrittenUnit),
+                        "settings_ssd_wear.gb_per_hour",
+                    ),
+                    (
+                        Control(C::SsdWearDiskWeekUnit),
+                        "settings_ssd_wear.typical_users",
+                    ),
+                    (Control(C::SsdWearDisksGroup), "settings_ssd_wear.disks"),
+                ],
+            },
             DialogId::SettingsVisibility => CaptionTable {
                 title: "settings.visibility",
                 keyed: &[
@@ -882,6 +927,7 @@ impl CaptionTable {
             | DialogId::SettingsContextMenu
             | DialogId::SettingsKeyboard
             | DialogId::SettingsIndex
+            | DialogId::SettingsSsdWear
             | DialogId::SettingsInclude
             | DialogId::SettingsVisibility
             | DialogId::SettingsFileOperations
@@ -1296,7 +1342,7 @@ pub(crate) fn keep_running_question(
     .collect();
     Question {
         title: text::without_access_key(strings.text("settings.apply")),
-        instruction: strings.text("settings_general.warn_question").to_owned(),
+        instruction: strings.text("settings_ssd_wear.question").to_owned(),
         body: QuestionBody::Text(off.join("\n")),
         footer: None,
         confirm: strings.text("button.yes").to_owned(),

@@ -25,6 +25,7 @@
 //!   folder whose permissions changed has none until it is read again, so no
 //!   user sees its entries by another folder's rights.
 
+use super::alarms::FileAlarms;
 use super::descriptors::{DescriptorTable, Listable, SeenBy};
 use super::repeats::RepeatEvents;
 use super::settle::{Batch, SharedIndex};
@@ -34,6 +35,7 @@ use super::store::{
     moved, shrink_vec,
 };
 use super::writes::{PendingWrite, Writes};
+use crate::alarm::Watched;
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::fold::{fold, fold_accents};
 use crate::include::VolumeRules;
@@ -492,6 +494,10 @@ pub struct VolumeIndex {
     /// The writes of the last hour, which journal batches count. A rebuild
     /// moves them into the new index.
     writes: Writes,
+    /// The wear alarm's limits that files and folders crossed, which the
+    /// checks of journal batches find in [`Self::writes`]. A rebuild moves
+    /// them into the new index.
+    alarms: FileAlarms,
 }
 
 impl VolumeIndex {
@@ -562,6 +568,7 @@ impl VolumeIndex {
             folder_links: FxHashMap::default(),
             repeats: RepeatEvents::allocate(),
             writes: Writes::none(),
+            alarms: FileAlarms::allocate(),
         };
         this.link_same_name(root_idx, root_name);
         this.link_same_name(lost_found, lf_name);
@@ -830,6 +837,13 @@ impl VolumeIndex {
             }
         }
         self.writes.add_writes(&outcome.writes);
+        // Once a batch, before its checks: the size step only adds bytes,
+        // so nothing it checks falls under a limit.
+        self.alarms.rearm(&self.writes, &batch.limits);
+        if !batch.limits.file_writes.is_off() {
+            let limits = &batch.limits.file_writes;
+            (self.alarms).check_writes(&self.writes, &outcome.writes, limits, batch.time());
+        }
         // Reason bits accumulate, so one change reaches a batch in several
         // records, and each FRN reported costs the daemon a link walk.
         outcome.needs_link_reconcile.sort_unstable();
@@ -866,18 +880,37 @@ impl VolumeIndex {
         &self.writes
     }
 
-    /// The table of [`Self::writes`], to install it when a build ends, to
-    /// move the hour while the journal is quiet, and to mark a batch's
-    /// writes "at least".
+    /// The table of [`Self::writes`], to install it when a build ends and
+    /// to mark a batch's writes "at least".
     pub fn writes_mut(&mut self) -> &mut Writes {
         &mut self.writes
     }
 
-    /// Adds the bytes of a batch's `writes` to [`Self::writes`] by rule 4,
-    /// from the size each file has in the index, before the size step
-    /// stores the size it `read`. A file in `walked`, sorted, has no size
-    /// before: a walk of its folder stored the size it has now, so its
-    /// Written reads "up to".
+    /// Moves the hour of [`Self::writes`] to end in the step of `time`, a
+    /// FILETIME, while the journal is quiet, and lets each file and folder
+    /// that the move took under the limits of `limits` it crossed warn
+    /// again.
+    pub fn move_hour(&mut self, time: i64, limits: &Watched) {
+        self.writes.move_to(time);
+        self.alarms.rearm(&self.writes, limits);
+    }
+
+    /// The wear alarm's limits that files and folders crossed.
+    pub fn alarms(&self) -> &FileAlarms {
+        &self.alarms
+    }
+
+    /// The list of [`Self::alarms`], to give it the service's counter, or
+    /// to move it into a rebuilt index.
+    pub fn alarms_mut(&mut self) -> &mut FileAlarms {
+        &mut self.alarms
+    }
+
+    /// Adds the bytes of `writes` to [`Self::writes`] by rule 4, from the
+    /// size each file has in the index, before the caller stores the size it
+    /// `read`. A file in `walked`, sorted, has no size before: a walk of its
+    /// folder stored the size it has now, so its bytes are unknown.
+    /// [`Self::check_written`] then checks the rows against the limits.
     pub fn add_write_sizes(
         &mut self,
         writes: &[PendingWrite],
@@ -892,6 +925,13 @@ impl VolumeIndex {
                 .filter(|&size| size != SIZE_UNKNOWN);
             (before, read(frn))
         });
+    }
+
+    /// Checks the rows that [`Self::add_write_sizes`] added the bytes of
+    /// `writes` to against `limits`, at `time`, a FILETIME.
+    pub fn check_written(&mut self, writes: &[PendingWrite], limits: &Watched, time: i64) {
+        self.alarms
+            .check_written(&self.writes, writes, limits, time);
     }
 
     /// Records that `n` hard-link walks could not complete and so were not
@@ -952,6 +992,41 @@ impl VolumeIndex {
                 idx == self.root || (parent != NIL && self.sees_into(parent, seen_by))
             }
         }
+    }
+
+    /// What a request sees from `may_list`, a filtered user's answer for a
+    /// folder's descriptor; `None` sees every entry.
+    pub(crate) fn seen_by(&self, may_list: Option<&(impl Fn(&[u8]) -> bool + ?Sized)>) -> SeenBy {
+        match may_list {
+            None => SeenBy::Everything,
+            Some(may_list) => SeenBy::Filtered(self.listable(&|descriptor| may_list(descriptor))),
+        }
+    }
+
+    /// The full path under `mount_prefix` that the file or folder `frn` has
+    /// now, built in `buf`; `None` when it is gone, has no full path, or is
+    /// in a folder that `seen_by` may not list. The root's path is
+    /// `mount_prefix` with one backslash at its end, given when `seen_by`
+    /// may list the root.
+    pub(crate) fn seen_path(
+        &self,
+        frn: Frn,
+        mount_prefix: &str,
+        seen_by: &SeenBy,
+        buf: &mut Vec<u8>,
+    ) -> Option<String> {
+        let head = self.head_of(frn)?;
+        let root = mount_prefix.trim_end_matches('\\');
+        if head == self.root {
+            return self.sees_into(head, seen_by).then(|| format!("{root}\\"));
+        }
+        let parent = self.entry(head).parent();
+        if parent == NIL || !self.sees_into(parent, seen_by) {
+            return None;
+        }
+        buf.clear();
+        (self.path_of(head, buf) == PathStatus::Ok)
+            .then(|| format!("{root}\\{}", crate::wtf8::to_string_lossy(buf)))
     }
 
     /// Whether `seen_by` sees the entries of folder `folder`: it may list the

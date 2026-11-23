@@ -246,6 +246,22 @@ pub(crate) fn ioctl_out_bytes(
     }
 }
 
+/// One byte buffer that holds the input and receives the output, as the
+/// protocol queries of `IOCTL_STORAGE_QUERY_PROPERTY` take it.
+pub(crate) fn ioctl_in_place(
+    handle: HANDLE,
+    control_code: u32,
+    buffer: &mut [u8],
+) -> Result<u32, u32> {
+    let size = buffer.len() as u32;
+    let bytes = buffer.as_mut_ptr().cast::<c_void>();
+    // SAFETY: `bytes` points to a live slice of `size` bytes, readable and
+    // writable; the same region as input and output is what Microsoft's
+    // samples pass, because the I/O manager copies a buffered input before
+    // the driver writes the output. `handle` is caller-owned.
+    unsafe { device_io_control(handle, control_code, bytes.cast_const(), size, bytes, size) }
+}
+
 /// No input, a typed output struct (e.g. `FSCTL_QUERY_USN_JOURNAL`).
 pub(crate) fn ioctl_out<Out>(handle: HANDLE, control_code: u32, out: &mut Out) -> Result<u32, u32> {
     // SAFETY: `out` points to a live `Out` of size_of::<Out>() bytes; there is

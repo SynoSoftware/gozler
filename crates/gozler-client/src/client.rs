@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use gozler_core::include::IndexSettings;
 use gozler_core::proto::{
-    DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PROTO_VERSION, ProtoError, QueryResults,
+    DaemonStatus, Disk, FrameDecoder, MAX_SERVER_FRAME, PROTO_VERSION, ProtoError, QueryResults,
     QueryTotals, Request, Response, ResultSnapshotId, SERVICE_NAME, SearchRequest, WearReply,
     WearRequest, decode_response_frame, encode_request,
 };
@@ -306,6 +306,23 @@ impl Client {
             Response::Error { code, message } => Err(ClientError::Refused { code, message }),
             _ => Err(ClientError::Communication(
                 "unexpected reply to count included".into(),
+            )),
+        }
+    }
+
+    /// The lifetime health of each disk under a fixed volume
+    /// ([`Request::DiskHealth`]).
+    ///
+    /// Fails with [`ClientError::Refused`] when the service cannot list the
+    /// volumes, and with [`ProtoError::UnknownRequest`] in it from a service
+    /// older than this request.
+    pub fn disk_health(&mut self) -> Result<Vec<Disk>, ClientError> {
+        self.send(&Request::DiskHealth)?;
+        match self.next_response()? {
+            Response::DiskHealth { disks } => Ok(disks),
+            Response::Error { code, message } => Err(ClientError::Refused { code, message }),
+            _ => Err(ClientError::Communication(
+                "unexpected reply to disk health".into(),
             )),
         }
     }
@@ -608,6 +625,7 @@ mod tests {
             client.wear(WearRequest {
                 after: RepeatsAfter { run: 0, number: 0 },
                 copies: 4,
+                limits: Default::default(),
             })
         });
         let thread = handle.recv().expect("the waiting thread sends its handle");

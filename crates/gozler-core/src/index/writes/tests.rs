@@ -1,10 +1,10 @@
-use super::{Marks, PendingWrite, STEP_TICKS, Writes};
+use super::{PendingWrite, STEP_TICKS, Writes, Written};
 use crate::types::Frn;
 use crate::usn::ParsedUsnRecord;
 use crate::usn::record::{
     USN_REASON_BASIC_INFO_CHANGE, USN_REASON_CLOSE, USN_REASON_DATA_EXTEND,
-    USN_REASON_DATA_OVERWRITE, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
-    USN_REASON_RENAME_NEW_NAME,
+    USN_REASON_DATA_OVERWRITE, USN_REASON_DATA_TRUNCATION, USN_REASON_FILE_CREATE,
+    USN_REASON_FILE_DELETE, USN_REASON_RENAME_NEW_NAME,
 };
 
 /// The start of a step.
@@ -127,40 +127,97 @@ fn only_a_closed_write_of_data_or_a_create_counts() {
     );
 }
 
-/// Written comes from the sizes. It watches a return to writes times
-/// size for data added to the end, and a loss of the growth that a long
-/// write moves before its close.
-#[test]
-fn written_is_the_growth_or_the_size_after_a_replace() {
-    let mut w = table();
-    let written = |w: &Writes, folder: u128, name: Option<&str>| {
-        let values = match name {
-            Some(name) => w.of_name(Frn(folder), name.as_bytes()),
-            None => w.of_folder(Frn(folder)),
-        };
-        values.map(|v| (v.writes, v.written, v.marks.contains(Marks::UP_TO)))
+fn written(w: &Writes, folder: u128, name: Option<&str>) -> Option<(u32, Written)> {
+    let values = match name {
+        Some(name) => w.of_name(Frn(folder), name.as_bytes()),
+        None => w.of_folder(Frn(folder)),
     };
+    values.map(|v| (v.writes, Written::of(v.written, v.marks)))
+}
 
+/// Written counts only the bytes gozler knows. It watches a write inside
+/// a file reported as the file's size, which once showed 2.7 GB for two
+/// writes inside a 1.36 GB database; a cut taken as a whole-file save,
+/// which reads a 500 MB file's size for an append of a few bytes; a cut
+/// and an append shown as an exact 0; a return to writes times size for
+/// data added to the end; and a loss of the growth that a long write moves
+/// before its close.
+#[test]
+fn written_counts_only_the_bytes_it_knows() {
+    let mut w = table();
     let p = apply(&mut w, &[record(200, 100, "log.txt", WRITE)]);
     w.add_sizes(&p, |_| (Some(10 * MB), Some(12 * MB)));
-    assert_eq!(written(&w, 100, Some("log.txt")), Some((1, 2 * MB, false)));
-    assert_eq!(written(&w, 100, None), Some((1, 2 * MB, false)));
+    assert_eq!(
+        written(&w, 100, Some("log.txt")),
+        Some((1, Written::Exact(2 * MB)))
+    );
+    assert_eq!(written(&w, 100, None), Some((1, Written::Exact(2 * MB))));
 
     let overwrite = USN_REASON_DATA_OVERWRITE | USN_REASON_CLOSE;
     let p = apply(&mut w, &[record(201, 101, "data.bin", overwrite)]);
     w.add_sizes(&p, |_| (Some(30 * MB), Some(30 * MB)));
-    assert_eq!(written(&w, 101, Some("data.bin")), Some((1, 30 * MB, true)));
+    assert_eq!(
+        written(&w, 101, Some("data.bin")),
+        Some((1, Written::Unknown))
+    );
+    assert_eq!(written(&w, 101, None), Some((1, Written::Unknown)));
+
+    // The folder keeps the known bytes of its other file as a minimum.
+    let p = apply(&mut w, &[record(209, 101, "data.log", WRITE)]);
+    w.add_sizes(&p, |_| (Some(MB), Some(3 * MB)));
+    assert_eq!(written(&w, 101, None), Some((2, Written::AtLeast(2 * MB))));
+
+    // A save, as NTFS writes it: the cut, then the data, then the close.
+    // A cut is no proof that the whole file was written again, so only the
+    // growth is known, and once counted, not with the size too.
+    let cut = USN_REASON_DATA_TRUNCATION;
+    let p = apply(
+        &mut w,
+        &[
+            record(205, 105, "doc.txt", cut),
+            record(205, 105, "doc.txt", cut | USN_REASON_DATA_EXTEND),
+            record(205, 105, "doc.txt", cut | WRITE),
+        ],
+    );
+    w.add_sizes(&p, |_| (Some(10 * MB), Some(12 * MB)));
+    assert_eq!(
+        written(&w, 105, Some("doc.txt")),
+        Some((1, Written::AtLeast(2 * MB)))
+    );
+
+    // A cut and then an append by another open in one batch, 10 MB to 0
+    // to 3 MB: no growth from the size before, so nothing is known, not
+    // an exact 0.
+    let p = apply(
+        &mut w,
+        &[
+            record(206, 106, "list.json", cut | USN_REASON_CLOSE),
+            record(206, 106, "list.json", WRITE),
+        ],
+    );
+    w.add_sizes(&p, |_| (Some(10 * MB), Some(3 * MB)));
+    assert_eq!(
+        written(&w, 106, Some("list.json")),
+        Some((2, Written::Unknown))
+    );
+
+    // A cut of a 500 MB file's last bytes and an append, as a program that
+    // cuts a JSON array's `]` does: the growth, not 500 MB.
+    let p = apply(&mut w, &[record(207, 107, "big.json", cut | WRITE)]);
+    w.add_sizes(&p, |_| (Some(500 * MB), Some(500 * MB + 100)));
+    assert_eq!(
+        written(&w, 107, Some("big.json")),
+        Some((1, Written::AtLeast(1024)))
+    );
 
     let p = apply(&mut w, &[record(202, 102, "new.bin", CREATE | WRITE)]);
     w.add_sizes(&p, |_| (None, Some(5 * MB)));
-    assert_eq!(written(&w, 102, None), Some((1, 5 * MB, false)));
+    assert_eq!(written(&w, 102, None), Some((1, Written::Exact(5 * MB))));
     assert_eq!(written(&w, 102, Some("new.bin")), None);
 
     let p = apply(&mut w, &[record(203, 103, "gone.tmp", CREATE)]);
     w.add_sizes(&p, |_| (None, None));
-    let gone = w.of_folder(Frn(103)).expect("the create counted");
-    assert_eq!(gone.written, 0);
-    assert!(gone.marks.contains(Marks::AT_LEAST));
+    assert_eq!(written(&w, 103, None), Some((1, Written::Unknown)));
 
     // No CLOSE yet: Written grows, the writes do not.
     let p = apply(
@@ -168,8 +225,68 @@ fn written_is_the_growth_or_the_size_after_a_replace() {
         &[record(204, 104, "big.log", USN_REASON_DATA_EXTEND)],
     );
     w.add_sizes(&p, |_| (Some(MB), Some(3 * MB)));
-    assert_eq!(written(&w, 104, Some("big.log")), Some((0, 2 * MB, false)));
-    assert_eq!(written(&w, 104, None), Some((0, 2 * MB, false)));
+    assert_eq!(
+        written(&w, 104, Some("big.log")),
+        Some((0, Written::Exact(2 * MB)))
+    );
+    assert_eq!(written(&w, 104, None), Some((0, Written::Exact(2 * MB))));
+}
+
+/// A file created and appended to in one batch has the bytes of both writes
+/// in its folder, and its name's share of them is unknown.
+#[test]
+fn a_file_created_and_appended_in_one_batch_counts_its_bytes() {
+    let mut w = table();
+    let p = apply(
+        &mut w,
+        &[
+            record(
+                250,
+                100,
+                "new.log",
+                USN_REASON_FILE_CREATE | USN_REASON_DATA_EXTEND | USN_REASON_CLOSE,
+            ),
+            record(250, 100, "new.log", WRITE),
+        ],
+    );
+    w.add_sizes(&p, |_| (None, Some(1024)));
+    assert_eq!(
+        written(&w, 100, Some("new.log")),
+        Some((1, Written::Unknown))
+    );
+    assert_eq!(written(&w, 100, None), Some((2, Written::Exact(1024))));
+}
+
+/// A rename over a name moves no data. It watches the size of a file that
+/// was only moved, as `move /y big.iso x.iso`, counted as bytes written,
+/// while a save through a temporary file still gives the name the bytes
+/// that the batch wrote.
+#[test]
+fn a_rename_over_a_name_counts_only_bytes_written_in_its_batch() {
+    let mut w = table();
+    let p = apply(
+        &mut w,
+        &[
+            record(300, 100, "x.iso", DELETE),
+            record(301, 100, "x.iso", RENAME),
+        ],
+    );
+    w.add_sizes(&p, |_| (Some(4096 * MB), Some(4096 * MB)));
+    assert_eq!(written(&w, 100, Some("x.iso")), Some((1, Written::Unknown)));
+
+    let p = apply(
+        &mut w,
+        &[
+            record(311, 100, "doc.tmp", CREATE | WRITE),
+            record(310, 100, "doc", DELETE),
+            record(311, 100, "doc", RENAME),
+        ],
+    );
+    w.add_sizes(&p, |_| (None, Some(5 * MB)));
+    assert_eq!(
+        written(&w, 100, Some("doc")),
+        Some((1, Written::Exact(5 * MB)))
+    );
 }
 
 /// Fills `w` with `count` names in folder 100, each written `times` times,

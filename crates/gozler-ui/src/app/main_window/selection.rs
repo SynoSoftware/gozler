@@ -586,7 +586,7 @@ impl MainWindow {
         self.created().work.borrow_mut().retire(retired);
     }
 
-    fn native_key(&self, list: List) -> CaptureKey {
+    pub(super) fn native_key(&self, list: List) -> CaptureKey {
         let count = self.list_control(list).count();
         self.native_selection(list).borrow().capture.key(count)
     }
@@ -1345,6 +1345,10 @@ impl MainWindow {
                 self.panel(side).changed.set(panels::ListChanged::Selection);
                 hwnd.post_deferred();
             }
+            // A live refresh, whose selection the model holds already, so
+            // the files and the folder's counted contents are not read
+            // again (`Model::accept_refresh`).
+            (List::Search, Origin::Remap { .. }) if !update.superseded => {}
             (List::Search, _) => {
                 self.controls().search.selection_pending.set(true);
                 hwnd.post_deferred();

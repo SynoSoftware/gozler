@@ -11,7 +11,7 @@
 //! differ from English, shows its dotted key, so the gap is visible.
 
 use super::model::Column;
-use gozler_core::index::writes::Bound;
+use gozler_core::index::writes::{Marks, Written};
 use gozler_core::proto::{ItemWrites, ResultItem};
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
@@ -452,7 +452,9 @@ pub(crate) fn path_part(column: Column, path: &str) -> Option<Range<usize>> {
         | Column::Extension
         | Column::Attributes
         | Column::Writes
-        | Column::Written => None,
+        | Column::Written
+        | Column::Files
+        | Column::Folders => None,
     }
 }
 
@@ -581,26 +583,73 @@ pub(crate) fn cell(
         Column::Writes => any_writes(row.writes)
             .map(|w| numbers.integer(w.writes.into()))
             .unwrap_or_default(),
+        Column::Files => count_cell(numbers, row.counts.map(|c| c.files)),
+        Column::Folders => count_cell(numbers, row.counts.map(|c| c.folders)),
         Column::Written => any_writes(row.writes)
-            .map(|w| written(strings, w, sizes.text(strings, numbers, w.written)))
+            .map(|w| written_cell(w, |bytes| sizes.text(strings, numbers, bytes)))
             .unwrap_or_default(),
     }
     .into()
 }
 
-/// `writes` when its entry had a write or bytes written in the last hour;
-/// `None` for none or unknown, which the list and the inspector leave empty.
-pub(crate) fn any_writes(writes: Option<ItemWrites>) -> Option<ItemWrites> {
-    writes.filter(|w| w.writes != 0 || w.written != 0)
+/// A folder's count, empty for a file and for an unknown count.
+pub(crate) fn count_cell(numbers: &dyn Numbers, count: Option<u32>) -> String {
+    count.map(|n| numbers.integer(n.into())).unwrap_or_default()
 }
 
-/// `bytes`, the Written of `writes`, with "up to" or "at least" before it
-/// when it is a bound.
-pub(crate) fn written(strings: &Strings, writes: ItemWrites, bytes: String) -> String {
-    match writes.marks.bound() {
-        Bound::Exact => bytes,
-        Bound::UpTo => strings.format("cell.up_to", &[&bytes]),
-        Bound::AtLeast => strings.format("cell.at_least", &[&bytes]),
+/// `writes` when its entry had a write, bytes written or a write whose bytes
+/// are unknown in the last hour; `None` for none or unknown values, which
+/// the list and the inspector leave empty.
+pub(crate) fn any_writes(writes: Option<ItemWrites>) -> Option<ItemWrites> {
+    writes.filter(|w| w.writes != 0 || w.written != 0 || w.marks.contains(Marks::AT_LEAST))
+}
+
+/// The list's cell for the Written of `writes`, its bytes as `size` writes
+/// them: [`at_least`] for a value that is only the least the writes put on
+/// the disk, and empty when no byte is known.
+pub(crate) fn written_cell(writes: ItemWrites, size: impl Fn(u64) -> String) -> String {
+    match Written::of(writes.written, writes.marks) {
+        Written::Exact(bytes) => size(bytes),
+        Written::AtLeast(bytes) => at_least(&size(bytes)),
+        Written::Unknown => String::new(),
+    }
+}
+
+/// A cell's `amount` that is only the least that was counted: `≥` before
+/// it, the same in every language.
+pub(crate) fn at_least(amount: &str) -> String {
+    format!("≥ {amount}")
+}
+
+/// The inspector's Writes line for `writes`: the count and the bytes in
+/// words, "at least" before a value that is only the least the writes put
+/// on the disk, and why when no byte is known.
+pub(crate) fn writes_in_words(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    writes: ItemWrites,
+) -> String {
+    let count = writes.writes.into();
+    let bytes = |n| self::bytes(strings, numbers, n);
+    match Written::of(writes.written, writes.marks) {
+        Written::Exact(n) => strings.count("inspector.written", count, numbers, &[&bytes(n)]),
+        Written::AtLeast(n) => {
+            let written = strings.format("cell.at_least", &[&bytes(n)]);
+            strings.count("inspector.written", count, numbers, &[&written])
+        }
+        Written::Unknown => {
+            let why = if writes.marks.contains(Marks::WRITTEN_OVER) {
+                "inspector.written_inside"
+            } else {
+                "inspector.bytes_unknown"
+            };
+            strings.count(
+                "inspector.written_unknown",
+                count,
+                numbers,
+                &[strings.text(why)],
+            )
+        }
     }
 }
 

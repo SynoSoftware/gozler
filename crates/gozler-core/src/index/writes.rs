@@ -9,7 +9,8 @@
 //! keeps 12 steps of 5 minutes, so "the last hour" is between 55 and 60
 //! minutes. A count belongs to a write only when the record has `CLOSE`, so
 //! one open counts once; the bytes come from the size the tail reads after
-//! the batch (`Writes::add_sizes`).
+//! the batch (`Writes::add_sizes`). A Written counts only bytes that gozler
+//! knows, and says when some are unknown ([`Written`]).
 //!
 //! Every time comes in as an argument; the table has no clock of its own.
 
@@ -41,10 +42,11 @@ const MOST_ROWS: usize = 65536;
 /// Each list of a rename that replaced a name holds this many keys.
 const PAIRS: usize = 16;
 
-const DATA: u32 = USN_REASON_DATA_EXTEND | USN_REASON_DATA_OVERWRITE | USN_REASON_DATA_TRUNCATION;
+pub(crate) const DATA: u32 =
+    USN_REASON_DATA_EXTEND | USN_REASON_DATA_OVERWRITE | USN_REASON_DATA_TRUNCATION;
 
 /// What a step of a row says of how its file was written, and whether its
-/// Written is exact: the kinds of write and the two marks, as bits.
+/// Written is complete: the kinds of write and a mark, as bits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Marks(pub u8);
 
@@ -55,14 +57,13 @@ impl Marks {
     pub const REPLACED: Marks = Marks(2);
     /// Data written over in place (`USN_REASON_DATA_OVERWRITE`).
     pub const WRITTEN_OVER: Marks = Marks(4);
-    /// Written holds the size after a write that replaced data or wrote over
-    /// part of it, the most that write can have put on the disk.
-    pub const UP_TO: Marks = Marks(8);
-    /// Written misses the bytes of a file whose size could not be read.
+    /// Written misses the bytes of a write: a cut or one inside the file,
+    /// whose bytes the journal does not give, or one whose size before or
+    /// after it is unknown.
     pub const AT_LEAST: Marks = Marks(16);
 
     /// The kinds of write that a record's reason bits say.
-    fn of(reason: u32) -> Marks {
+    pub(crate) fn of(reason: u32) -> Marks {
         let mut marks = Marks::default();
         for (bit, kind) in [
             (USN_REASON_DATA_EXTEND, Marks::ADDED),
@@ -80,35 +81,42 @@ impl Marks {
         self.0 & other.0 == other.0
     }
 
-    /// Which bound a Written with these marks shows; "at least" wins when
-    /// it has both (rule 4).
-    pub fn bound(self) -> Bound {
-        if self.contains(Marks::AT_LEAST) {
-            Bound::AtLeast
-        } else if self.contains(Marks::UP_TO) {
-            Bound::UpTo
-        } else {
-            Bound::Exact
-        }
-    }
-
-    fn holds_any(self, other: Marks) -> bool {
-        self.0 & other.0 != 0
-    }
-
     fn with(self, other: Marks) -> Marks {
         Marks(self.0 | other.0)
     }
 }
 
-/// How a Written relates to the bytes that the writes put on the disk.
+/// What a Written is known to be. Every output shows it from this, so a
+/// value is never shown as more certain than it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Bound {
-    Exact,
-    /// The most the writes can have put on the disk.
-    UpTo,
-    /// Some of the writes' bytes are missing.
-    AtLeast,
+pub enum Written {
+    /// Every byte of the writes is known.
+    Exact(u64),
+    /// Some writes' bytes are unknown, and these bytes are known, so the
+    /// writes put at least this many on the disk.
+    AtLeast(u64),
+    /// No byte of the writes is known.
+    Unknown,
+}
+
+impl Written {
+    /// The Written of `known` bytes with `marks`.
+    pub fn of(known: u64, marks: Marks) -> Written {
+        match (marks.contains(Marks::AT_LEAST), known) {
+            (false, known) => Written::Exact(known),
+            (true, 0) => Written::Unknown,
+            (true, known) => Written::AtLeast(known),
+        }
+    }
+
+    /// The known bytes, which a sort orders by; `None` when none is known,
+    /// which sorts last.
+    pub fn known(self) -> Option<u64> {
+        match self {
+            Written::Exact(bytes) | Written::AtLeast(bytes) => Some(bytes),
+            Written::Unknown => None,
+        }
+    }
 }
 
 /// The values of one row over the last hour.
@@ -117,7 +125,8 @@ pub struct Values {
     /// The file last counted under the name, or the folder's own file ID.
     pub frn: Frn,
     pub writes: u32,
-    /// In bytes, each write's rounded up to a whole KiB.
+    /// The bytes known to be written, each write's rounded up to a whole
+    /// KiB; [`Written::of`] reads it with `marks`.
     pub written: u64,
     /// In how many of the hour's steps the row had a write: 0 to 12.
     pub steps: u8,
@@ -166,7 +175,8 @@ impl Low {
         }
     }
 
-    /// The most the Written of `values` may be; `u64::MAX` for no bound.
+    /// The most the Written of `values` may be; `u64::MAX` for no bound,
+    /// as for one whose bytes are partly or wholly unknown.
     pub fn most_written(&self, values: &Values) -> u64 {
         if self.open || values.marks.contains(Marks::AT_LEAST) {
             u64::MAX
@@ -247,8 +257,12 @@ impl Row {
         }
     }
 
+    /// Holds no write, no bytes and no mark, such as "at least" for a write
+    /// whose bytes are unknown and whose close is still to come.
     fn is_empty(&self) -> bool {
-        self.counts.iter().all(|&n| n == 0) && self.written.iter().all(|&n| n == 0)
+        self.counts.iter().all(|&n| n == 0)
+            && self.written.iter().all(|&n| n == 0)
+            && self.marks.iter().all(|&m| m == 0)
     }
 
     /// The order a drop pass drops rows in: the least Written first, then
@@ -573,7 +587,8 @@ impl Writes {
     /// file: `sizes` answers the size the index holds before this batch's
     /// size step and the size the step read, `None` for one that is unknown
     /// or was not read. `pending` is sorted by file ID, each file's values in
-    /// the order of their records.
+    /// the order of their records. A write whose bytes are unknown adds none
+    /// and marks its rows "at least", never the file's size as a bound.
     pub(crate) fn add_sizes(
         &mut self,
         pending: &[PendingWrite],
@@ -583,7 +598,6 @@ impl Writes {
             let (before, read) = sizes(file[0].frn);
             let writes = || file.iter().filter(|p| !p.renamed);
             if let Some(last) = writes().next_back() {
-                let created = writes().any(|p| p.created);
                 match read {
                     // Gone, or the read failed: its bytes are missing.
                     None => {
@@ -594,30 +608,61 @@ impl Writes {
                             }
                         }
                     }
-                    Some(size) => {
-                        // The growth once, to the rows of the file's last value.
-                        let (growth, marks) = match before {
-                            Some(before) => (size.saturating_sub(before), last.marks),
-                            None if created => (size, last.marks),
-                            None => (size, last.marks.with(Marks::UP_TO)),
-                        };
-                        if growth > 0 {
-                            self.add_file_bytes(last, created, growth, marks);
-                        }
-                        for p in writes().filter(|p| p.closed) {
-                            if p.marks.holds_any(Marks::REPLACED.with(Marks::WRITTEN_OVER)) {
-                                let marks = p.marks.with(Marks::UP_TO);
-                                self.add_file_bytes(p, p.created, size, marks);
-                            }
-                        }
-                    }
+                    Some(size) => self.add_size(file, before, size, last),
                 }
             }
+            // A rename moves no data. A file that this batch created, as a
+            // save through a temporary file, was written whole in it, so the
+            // name gets its size; another file's writes, as `move /y`'s,
+            // were none or before the batch, so the name's bytes are unknown.
+            let created = writes().any(|p| p.created);
             for p in file.iter().filter(|p| p.renamed) {
-                match read.or(before) {
-                    Some(size) => self.add_bytes(p, Of::Name, size, Marks::UP_TO),
+                match read.filter(|_| created) {
+                    Some(size) => self.add_bytes(p, Of::Name, size, Marks::default()),
                     None => self.mark(p.name, p.step, Marks::AT_LEAST),
                 }
+            }
+        }
+    }
+
+    /// Adds the bytes of the writes of `file`, one file's pending writes,
+    /// whose last write is `last`, from its size `before` the batch and its
+    /// `size` after it.
+    fn add_size(
+        &mut self,
+        file: &[PendingWrite],
+        before: Option<u64>,
+        size: u64,
+        last: &PendingWrite,
+    ) {
+        let writes = || file.iter().filter(|p| !p.renamed);
+        let created = writes().any(|p| p.created);
+        let unknown = |p: &PendingWrite| p.marks.with(Marks::AT_LEAST);
+        // The growth once, to the rows of the file's last value: all of the
+        // bytes when the file only grew, and a part of them when a cut or a
+        // write inside it marks them "at least" below.
+        let growth = match before {
+            Some(before) => Some(size.saturating_sub(before)),
+            None if created => Some(size),
+            None => None,
+        };
+        match growth {
+            Some(0) => {}
+            Some(growth) => self.add_file_bytes(last, created, growth, last.marks),
+            None => self.add_file_bytes(last, created, 0, unknown(last)),
+        }
+        // A later write that did not create the file grew it too, so the
+        // name's share of the growth is unknown.
+        if created && writes().any(|p| !p.created) {
+            self.add_bytes(last, Of::Name, 0, unknown(last));
+        }
+        // A cut is no proof of a whole-file save: it may cut only the last
+        // bytes, and another open may cut or write the file again before
+        // the size is read. So a cut, like a write over data, leaves bytes
+        // unknown, closed or not.
+        for p in writes() {
+            if p.marks.contains(Marks::REPLACED) || p.marks.contains(Marks::WRITTEN_OVER) {
+                self.add_file_bytes(p, p.created, 0, unknown(p));
             }
         }
     }
@@ -631,8 +676,9 @@ impl Writes {
         }
     }
 
-    /// Marks the rows of `pending` "at least": a walk of a missed folder
-    /// failed before the size step, so their bytes are missing.
+    /// Marks the rows of `pending` "at least", because their bytes are
+    /// missing: a walk of a missed folder failed before the size step, or
+    /// a rebuild replaced the sizes of files that programs hold open.
     pub(crate) fn mark_at_least(&mut self, pending: &[PendingWrite]) {
         for p in pending {
             if !p.renamed {
@@ -819,6 +865,12 @@ impl Writes {
             .map(|at| self.rows[at].values())
     }
 
+    /// The values of the name whose key is `name`, as
+    /// [`PendingWrite::name`] holds it; `None` when it has no row.
+    pub(crate) fn of_name_key(&self, name: u64) -> Option<Values> {
+        self.find(name).map(|at| self.rows[at].values())
+    }
+
     /// The values of folder `folder`: the writes of the files directly in
     /// it; `None` when it has no row.
     pub fn of_folder(&self, folder: Frn) -> Option<Values> {
@@ -928,7 +980,7 @@ fn folder_key(folder: Frn) -> u64 {
 
 /// The key of entry `idx`'s row: a folder's own, or a file's name in the
 /// folder that holds it, as the index stores the name.
-fn key_of(index: &VolumeIndex, idx: EntryIdx) -> u64 {
+pub(crate) fn key_of(index: &VolumeIndex, idx: EntryIdx) -> u64 {
     let entry = index.entry(idx);
     if entry.is_dir() {
         folder_key(entry.frn())

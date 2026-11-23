@@ -9,6 +9,7 @@ use crate::core::panel::{
 use crate::core::results::{ListMessage, Shown};
 use crate::core::selection::Selection;
 use crate::core::text::{self, Numbers, SizeFormat, Strings};
+use gozler_core::attributes::Attributes;
 
 /// What a panel shows besides its rows (DESIGN.md: A panel).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -255,6 +256,16 @@ pub(crate) fn panel_cell(
             (false, None) => sizes.text(strings, numbers, entry.size),
         },
         PanelColumn::DateModified => return dates.text(strings, numbers, entry.modified),
+        PanelColumn::DateCreated => return dates.text(strings, numbers, entry.created),
+        PanelColumn::Attributes => Attributes::lettered(entry.attributes).letters(),
+        PanelColumn::Writes => text::any_writes(entry.writes())
+            .map(|w| numbers.integer(w.writes.into()))
+            .unwrap_or_default(),
+        PanelColumn::Written => text::any_writes(entry.writes())
+            .map(|w| text::written_cell(w, |bytes| sizes.text(strings, numbers, bytes)))
+            .unwrap_or_default(),
+        PanelColumn::Files => text::count_cell(numbers, entry.counts().map(|c| c.files)),
+        PanelColumn::Folders => text::count_cell(numbers, entry.counts().map(|c| c.folders)),
     }
     .into()
 }

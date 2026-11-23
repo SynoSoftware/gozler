@@ -12,9 +12,9 @@
 //! update starts and ends; [`enter`] runs it for each message of the window
 //! procedures of this thread.
 //!
-//! Each update that marked a window goes to `ui-frames.log` through the
-//! watchdog's thread ([`log_frames`]), so the window's thread never writes
-//! the file.
+//! In a debug build, each update that marked a window goes to
+//! `ui-frames.log` through the watchdog's thread ([`log_frames`]), so the
+//! window's thread never writes the file. A release build never calls it.
 
 use super::window::DEFERRED;
 use super::{Hwnd, from_rect};
@@ -209,7 +209,7 @@ fn set_flag(window: Hwnd, attribute: DWMWINDOWATTRIBUTE, on: bool) -> Option<()>
 }
 
 /// Sends a record of each update that marked a window to `frames`, whose
-/// receiver writes `ui-frames.log`. A send never waits: a full channel
+/// receiver writes `ui-frames.log` in a debug build. A send never waits: a full channel
 /// counts the record as dropped, and the next record carries the count.
 pub(crate) fn log_frames(frames: SyncSender<Frame>) {
     FRAMES.set(Some(FrameLog { frames, dropped: 0 }));
@@ -368,6 +368,12 @@ pub(crate) struct ModalLoop {
 pub(crate) fn modal_loop() -> ModalLoop {
     finish(UPDATES.with_borrow_mut(|updates| updates.own_loop_started(false)));
     ModalLoop { menu: false }
+}
+
+/// Whether a modal loop runs on the window's thread
+/// ([`Updates::in_loop`]).
+pub(crate) fn in_modal_loop() -> bool {
+    UPDATES.with_borrow(Updates::in_loop)
 }
 
 /// [`modal_loop`] for a popup menu, whose `WM_ENTERMENULOOP` then adds no

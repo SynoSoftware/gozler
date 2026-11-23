@@ -2,12 +2,13 @@
 //! while this group retains only their submitted prefixes and execution state.
 
 use super::{Surface, local_service};
-use crate::core::fetch::LocalService;
+use crate::core::fetch::{DaemonFailure, LocalService, Programs};
 use crate::core::settings::{Changes, SeeEveryFile, Settings};
 use crate::core::work::{Id, Replacement, Retirement, Waiting};
 use crate::win::wake::OpenWaker;
 use crate::win::work::{OffThread, Task};
-use gozler_client::CancelToken;
+use gozler_client::{CancelToken, Client};
+use gozler_core::proto::{Disk, PIPE_NAME};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -77,6 +78,9 @@ pub(in crate::app) struct Work {
     /// The account names of SID strings, which can wait on a domain
     /// controller.
     account_names: Task<Vec<String>, Vec<(String, Option<String>)>>,
+    /// Each disk's health, which Settings > SSD wear shows; the service's
+    /// answer can wait on a disk.
+    disks: Task<(), Result<Vec<Disk>, Box<DaemonFailure>>>,
     registry: Option<Task<Registry, RegistryAnswer>>,
     registry_write: Option<Id>,
     retired: Retirement,
@@ -92,6 +96,7 @@ impl Work {
             label_prefixes: Vec::new(),
             account_names: Task::new(waker.clone(), Replacement::Cancel, read_account_names)
                 .background(),
+            disks: Task::new(waker.clone(), Replacement::Cancel, read_disks),
             registry: Some(Task::new(waker, Replacement::Finish, registry)),
             registry_write: None,
             retired: Retirement::default(),
@@ -225,6 +230,16 @@ impl Work {
         self.account_names.take().map(|(_, names)| names)
     }
 
+    /// Asks the service for each disk's health, replacing a read that has
+    /// not answered.
+    pub(in crate::app) fn read_disks(&mut self) {
+        self.disks.replace(());
+    }
+
+    pub(in crate::app) fn take_disks(&mut self) -> Option<Result<Vec<Disk>, Box<DaemonFailure>>> {
+        self.disks.take().map(|(_, disks)| disks)
+    }
+
     pub(super) fn pairing_waiting(&self, surface: Surface, now: Instant) -> Option<Waiting> {
         (self.pairing_surface == surface)
             .then(|| self.pairing.waiting(now))
@@ -251,6 +266,7 @@ impl Work {
         let mut active = self.pairing.tick(now).is_some();
         active |= self.labels.tick(now).is_some();
         active |= self.account_names.tick(now).is_some();
+        active |= self.disks.tick(now).is_some();
         if let Some(task) = &mut self.saving {
             active |= task.tick(now).is_some();
         }
@@ -264,6 +280,7 @@ impl Work {
         self.retired.append(self.pairing.take_retired());
         self.retired.append(self.labels.take_retired());
         self.retired.append(self.account_names.take_retired());
+        self.retired.append(self.disks.take_retired());
         if let Some(task) = &mut self.saving {
             self.retired.append(task.take_retired());
         }
@@ -279,9 +296,11 @@ impl Work {
         self.pairing.cancel();
         self.labels.cancel();
         self.account_names.cancel();
+        self.disks.cancel();
         self.retired.append(self.pairing.close_delivery());
         self.retired.append(self.labels.close_delivery());
         self.retired.append(self.account_names.close_delivery());
+        self.retired.append(self.disks.close_delivery());
         let prefixes = std::mem::take(&mut self.label_prefixes);
         let items = prefixes.len();
         self.retired.push(prefixes, items);
@@ -395,6 +414,16 @@ fn read_account_names(
             (sid, name)
         })
         .collect()
+}
+
+fn read_disks(
+    (): (),
+    _worker: &OffThread,
+    cancel: &CancelToken,
+) -> Result<Vec<Disk>, Box<DaemonFailure>> {
+    Client::connect(PIPE_NAME, true, cancel.clone())
+        .and_then(|mut client| client.disk_health())
+        .map_err(|error| Box::new(super::requests::failure(error, &Programs::UNKNOWN)))
 }
 
 fn read_labels(

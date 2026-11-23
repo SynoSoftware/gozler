@@ -279,6 +279,7 @@ fn read_folder(
                                 e.size,
                                 e.last_write,
                             )
+                            .created(e.created)
                             .linked(e.reparse_tag.is_some_and(super::is_link_tag))
                         }),
                 ),
@@ -334,6 +335,7 @@ fn stat(folder: &str, name: &[u16]) -> Option<Entry> {
     let size = if is_folder { 0 } else { stat.size };
     Some(
         Entry::new(name, tag.attributes, size, stat.last_write)
+            .created(stat.created)
             .linked(super::is_link_tag(tag.reparse_tag)),
     )
 }

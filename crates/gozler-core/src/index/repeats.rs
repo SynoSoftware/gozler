@@ -14,7 +14,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::volume::MAX_PATH_HOPS;
-use super::{ComponentBytes, PathStatus, SeenBy, VolumeIndex};
+use super::{ComponentBytes, VolumeIndex};
 use crate::proto::RepeatingFolder;
 use crate::types::{EntryIdx, Frn, NIL};
 
@@ -315,22 +315,9 @@ impl RepeatEvents {
         if kept.peek().is_none() {
             return Vec::new();
         }
-        let seen_by = match may_list {
-            None => SeenBy::Everything,
-            Some(may_list) => SeenBy::Filtered(index.listable(&|descriptor| may_list(descriptor))),
-        };
-        let root = mount_prefix.trim_end_matches('\\');
+        let seen_by = index.seen_by(may_list);
         let mut path = Vec::new();
-        let mut path_of = |frn: Frn| -> Option<String> {
-            let head = index.head_of(frn)?;
-            let parent = index.entry(head).parent();
-            if parent == NIL || !index.sees_into(parent, &seen_by) {
-                return None;
-            }
-            path.clear();
-            (index.path_of(head, &mut path) == PathStatus::Ok)
-                .then(|| format!("{root}\\{}", crate::wtf8::to_string_lossy(&path)))
-        };
+        let mut path_of = |frn: Frn| index.seen_path(frn, mount_prefix, &seen_by, &mut path);
         kept.filter_map(|event| {
             Some(RepeatingFolder {
                 number: event.number,

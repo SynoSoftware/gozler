@@ -7,7 +7,7 @@ use super::fetch::List;
 use super::glyph::Glyph;
 use super::ids::ControlId;
 use super::model::{Column, Model};
-use super::panel::{Side, View};
+use super::panel::{PanelColumn, Side, View};
 use super::query::{SORT_DIRECTIONS, SORT_KEYS, sort_direction_label, sort_key_label};
 use super::selection::{Change, Kinds, KindsChoice, Matches, Movement, Rule};
 use super::selection::{OPEN_LIMIT, Selection};
@@ -330,7 +330,7 @@ impl CommandId {
                 None,
                 SEARCH,
             ),
-            C::Columns => ("command.columns", &[], always, None, None, SEARCH),
+            C::Columns => ("command.columns", &[], always, None, None, Both),
             C::Language => ("menu.language", &[], always, None, None, Both),
             C::Refresh => (
                 "command.refresh",
@@ -1985,21 +1985,32 @@ impl MenuItem {
         }
     }
 
-    /// Whether the item shows while `mode` shows: Sort by > Path, Writes and
-    /// Written have no column in Commander mode.
+    /// Whether the item shows while `mode` shows: in Commander mode, Sort
+    /// by Path has no column, and the fits are Search's header menu's,
+    /// because a panel's columns always fill its list.
     fn belongs_to(self, mode: Mode) -> bool {
         match self {
             MenuItem::Mode(destination) => destination != mode,
-            MenuItem::SortKey(SortKey::Path | SortKey::Writes | SortKey::Written) => {
-                mode == Mode::Search
-            }
+            MenuItem::SortKey(SortKey::Path)
+            | MenuItem::FitColumn(_)
+            | MenuItem::FitColumns
+            | MenuItem::AutoFit => mode == Mode::Search,
             _ => self.command().row().modes.contains(mode),
         }
     }
 
+    /// Whether the person can choose the item. In Commander mode, Path is
+    /// disabled in a folder panel, which cannot show it.
     pub(crate) fn enabled(self, state: &State) -> bool {
+        let model = state.model;
         let shown = match self {
-            MenuItem::Column(column) => column.row().can_hide,
+            MenuItem::Column(column) => {
+                column.row().can_hide
+                    && (model.mode() == Mode::Search || {
+                        let panels = model.panels();
+                        (panels.panel(panels.active())).can_show(PanelColumn::of(column))
+                    })
+            }
             _ => true,
         };
         (self.command().row().enabled)(state) && shown
@@ -2044,7 +2055,13 @@ impl MenuItem {
         match self {
             MenuItem::Run(command) => command.row().checked.is_some_and(|checked| checked(state)),
             MenuItem::Mode(_) => false,
-            MenuItem::Column(column) => model.columns.contains(&column),
+            MenuItem::Column(column) => match model.mode() {
+                Mode::Search => model.columns.contains(&column),
+                Mode::Commander => {
+                    let panels = model.panels();
+                    (panels.panel(panels.active())).shows(PanelColumn::of(column))
+                }
+            },
             MenuItem::AutoFit => model.settings.window.auto_fit,
             MenuItem::FitColumn(_) | MenuItem::FitColumns | MenuItem::Panel(_) => false,
             MenuItem::SortKey(key) => model.shown_sort().key == key,
@@ -2313,6 +2330,12 @@ pub(crate) fn header_menu(column: Option<Column>) -> Vec<Vec<MenuItem>> {
     .into_iter()
     .filter(|group| !group.is_empty())
     .collect()
+}
+
+/// A panel's header menu: View > Columns' items, without Search's fits,
+/// because a panel's columns always fill its list (DESIGN.md: A panel).
+pub(crate) fn panel_header_menu() -> Vec<Vec<MenuItem>> {
+    vec![Column::ALL.into_iter().map(MenuItem::Column).collect()]
 }
 
 /// A row's context menu (DESIGN.md: Menus). Its first item, Open, is the

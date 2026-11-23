@@ -48,6 +48,12 @@ mount folder. A volume can have several; its full paths print with the first,
 or with its GUID path when it has none.
 _Avoid_: drive (for a volume mounted in a folder)
 
+**Disk**:
+A physical storage device, such as an SSD, that holds one or more volumes.
+Windows numbers it, as in `\\.\PhysicalDrive0`. Its health is the wear and
+the bytes written over its life that the disk reports itself.
+_Avoid_: drive (a drive is a mount such as `C:\`)
+
 **Full path**:
 The mount prefix followed by every folder and the entry's name, as gozler prints
 it: `C:\repo\docs\testing.md`.

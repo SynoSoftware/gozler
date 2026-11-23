@@ -182,10 +182,7 @@ fn entry(
     // Empty for none or unknown, as in the first hour after the service
     // starts; the row stays, so the rows and buttons below it never move.
     let writes = text::any_writes(entry.writes)
-        .map(|w| {
-            let written = text::written(strings, w, text::bytes(strings, numbers, w.written));
-            strings.count("inspector.written", w.writes.into(), numbers, &[&written])
-        })
+        .map(|w| text::writes_in_words(strings, numbers, w))
         .unwrap_or_default();
     let values = [
         gozler_core::winpath::parent_of(&entry.path),

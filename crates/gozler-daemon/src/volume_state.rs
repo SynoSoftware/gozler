@@ -165,7 +165,8 @@ impl Building<'_> {
 
     /// Installs `built` with its build facts, then sets the phase that
     /// `journal` leads to. The new index takes the old one's folders copied
-    /// into themselves, and numbers its own from the service's counter.
+    /// into themselves and limits crossed, and numbers its own from the
+    /// service's counter.
     /// With a journal, it also takes the old one's writes, counted from
     /// `since`, when the build took its journal cursor; without one, it
     /// counts none.
@@ -181,6 +182,8 @@ impl Building<'_> {
         let mut indexed = self.state.indexed.write();
         std::mem::swap(index.repeats_mut(), indexed.index.repeats_mut());
         index.repeats_mut().number_from(&crate::wear::NUMBERS);
+        std::mem::swap(index.alarms_mut(), indexed.index.alarms_mut());
+        index.alarms_mut().number_from(&crate::wear::NUMBERS);
         if let Some(mut writes) = writes {
             writes.keep(indexed.index.writes_mut(), since);
             *index.writes_mut() = writes;

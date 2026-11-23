@@ -73,7 +73,8 @@ without adding folders a second time. Check the exit code for completeness.
 | `generation` | Always 0; kept so scripts that read it still parse |
 
 Each item contains `path` and `is_dir`. Optional fields are omitted when
-unknown or not requested; absence is different from zero.
+unknown or not requested; absence is different from zero. `written` is the
+exception: with `writes`, it is always there, and `null` when unknown.
 
 | Item field | Meaning |
 | --- | --- |
@@ -84,7 +85,7 @@ unknown or not requested; absence is different from zero.
 | `mtime_ft`, `created_ft` | Integer Windows FILETIME ticks: 100 ns since 1601-01-01 UTC |
 | `attributes` | Windows attribute bits, requested with `-attributes` |
 | `files`, `folders` | For a folder, how many files and folders are below it, each name of a hard-linked file counted; requested with `--files` or `--folders` |
-| `writes`, `written` | How often the file's name or the folder was written in the last hour, and how many bytes those writes put on the disk; requested with `--writes`, and omitted for a folder the caller may not list |
+| `writes`, `written`, `written_at_least` | How often the file's name or the folder was written in the last hour, and how many bytes those writes are known to have put on the disk; requested with `--writes`, and omitted for a folder the caller may not list. `written` is `null` when no byte is known, as for a write inside a file, whose bytes the journal does not give; `written_at_least` is `true` when `written` is a number and other bytes are unknown, so it is only the least the writes put on the disk |
 | `volume` | The volume's GUID path, requested with `--file-id` |
 | `file_id` | The file ID on that volume as 32 hexadecimal digits, requested with `--file-id` |
 | `path_u16` | Exact UTF-16 code units when `path` had to replace an unpaired surrogate |

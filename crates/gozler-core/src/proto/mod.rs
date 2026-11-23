@@ -27,9 +27,10 @@ pub use frame::{
     encode_response_frame,
 };
 pub use types::{
-    CallerSees, DaemonStatus, FileIdentity, ItemWrites, LeftOutVolume, MAX_CLIENT_FRAME,
-    MAX_SERVER_FRAME, MemPair, OLDEST_PROTO_VERSION, PAGE_ROWS, PIPE_NAME, PROTO_VERSION,
-    ProtoError, QueryResults, QueryTotals, RepeatingFolder, RepeatsAfter, Request, Response,
-    ResultItem, ResultSnapshotId, Returns, Rows, SERVICE_NAME, SearchRequest, SnapshotRowsRequest,
-    SortSnapshotRequest, VolumeMemory, VolumeStatus, Want, WearReply, WearRequest, WritesStatus,
+    Alarm, Alarmed, CallerSees, DaemonStatus, Disk, FileIdentity, ItemWrites, LeftOutVolume,
+    MAX_CLIENT_FRAME, MAX_SERVER_FRAME, MemPair, OLDEST_PROTO_VERSION, PAGE_ROWS, PIPE_NAME,
+    PROTO_VERSION, ProtoError, QueryResults, QueryTotals, RepeatingFolder, RepeatsAfter, Request,
+    Response, ResultItem, ResultSnapshotId, Returns, Rows, SERVICE_NAME, SearchRequest,
+    SnapshotRowsRequest, SortSnapshotRequest, Unread, VolumeMemory, VolumeStatus, Want, WearLimits,
+    WearReply, WearRequest, WritesStatus,
 };

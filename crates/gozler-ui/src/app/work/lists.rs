@@ -3,7 +3,7 @@
 
 use crate::core::fetch::List;
 use crate::core::model::ScopeCheck;
-use crate::core::results::{Mark, Marked};
+use crate::core::results::{Mark, Marked, Remap, Remapped};
 use crate::core::search_list::{Keep, Kept};
 use crate::core::selection::{Filter, Filtered, Telling, Told};
 use crate::core::work::{INLINE_ITEMS, Replacement, Retirement, Waiting};
@@ -22,6 +22,8 @@ struct Slot {
 
 pub(in crate::app) struct Work {
     slots: Vec<Slot>,
+    /// Search's live refresh, which only Search's list has.
+    remapping: Task<Remap, Remapped>,
     location: Task<String, (String, ScopeCheck)>,
     folder: Option<String>,
     retired: Retirement,
@@ -59,6 +61,12 @@ impl Work {
                     .background(),
                 })
                 .collect(),
+            remapping: Task::pass(
+                waker.clone(),
+                Replacement::Cancel,
+                Remap::items,
+                |input, _| input.run(),
+            ),
             location: Task::new(waker, Replacement::Cancel, check_location).background(),
             folder: None,
             retired: Retirement::default(),
@@ -149,6 +157,18 @@ impl Work {
         self.retired.append(retired);
     }
 
+    pub(in crate::app) fn remap(&mut self, input: Remap) {
+        self.remapping.replace(input);
+        let retired = self.remapping.take_retired();
+        self.retired.append(retired);
+    }
+
+    pub(in crate::app) fn take_remapped(&mut self) -> Option<Remapped> {
+        let answer = self.remapping.take().map(|(_, answer)| answer);
+        self.retired.append(self.remapping.take_retired());
+        answer
+    }
+
     pub(in crate::app) fn take_kept(&mut self) -> Vec<(List, Kept)> {
         let mut retired = Retirement::default();
         let answers = self
@@ -199,6 +219,7 @@ impl Work {
 
     pub(super) fn tick(&mut self, now: Instant) -> bool {
         let mut active = self.location.tick(now).is_some();
+        active |= self.remapping.tick(now).is_some();
         for work in &mut self.slots {
             active |= work.marking.tick(now).is_some();
             active |= work.telling.tick(now).is_some();
@@ -210,6 +231,7 @@ impl Work {
 
     pub(super) fn take_retired(&mut self) -> Retirement {
         self.retired.append(self.location.take_retired());
+        self.retired.append(self.remapping.take_retired());
         for work in &mut self.slots {
             self.retired.append(work.marking.take_retired());
             self.retired.append(work.telling.take_retired());
@@ -222,6 +244,8 @@ impl Work {
     pub(super) fn close(&mut self) -> Retirement {
         self.location.cancel();
         self.retired.append(self.location.close_delivery());
+        self.remapping.cancel();
+        self.retired.append(self.remapping.close_delivery());
         for work in &mut self.slots {
             work.marking.cancel();
             self.retired.append(work.marking.close_delivery());

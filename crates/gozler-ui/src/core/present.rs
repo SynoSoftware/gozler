@@ -93,6 +93,12 @@ impl Updates {
         self.open.is_some()
     }
 
+    /// Whether a modal loop runs: a dialog, a message box, a popup menu, a
+    /// drag, or a move or resize of a window.
+    pub(crate) fn in_loop(&self) -> bool {
+        !self.levels.is_empty()
+    }
+
     fn is_outermost(&self) -> bool {
         self.depth == self.levels.last().copied().unwrap_or(0) + 1
     }

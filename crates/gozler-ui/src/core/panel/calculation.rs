@@ -41,7 +41,11 @@ pub(super) enum Change {
     },
     Watch(Vec<FolderChange>),
     Filter,
-    Sizes(Box<Outcome>),
+    /// gozlerd's answer for the entries `names`, or for the whole folder.
+    Sizes {
+        outcome: Box<Outcome>,
+        names: Option<Arc<HashSet<Box<[u16]>>>>,
+    },
     Ended,
     Await,
 }
@@ -51,7 +55,7 @@ impl Change {
         match self {
             Self::Listed { entries, .. } => entries.len(),
             Self::Watch(changes) => changes.len(),
-            Self::Sizes(outcome) => outcome.items(),
+            Self::Sizes { outcome, .. } => outcome.items(),
             Self::Filter | Self::Ended | Self::Await => 0,
         }
     }
@@ -225,9 +229,9 @@ impl Calculation {
                         mapping.read_again = rows.merge(changes);
                     }
                     Change::Filter => {}
-                    Change::Sizes(outcome) => {
+                    Change::Sizes { outcome, names } => {
                         mapping.kind = UpdatedKind::Sizes;
-                        rows.apply_sizes(&outcome);
+                        rows.apply_sizes(&outcome, names.as_deref());
                     }
                     Change::Ended => mapping.kind = UpdatedKind::Ended,
                     Change::Await => mapping.kind = UpdatedKind::Await,

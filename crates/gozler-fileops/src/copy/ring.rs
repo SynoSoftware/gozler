@@ -1047,9 +1047,7 @@ mod tests {
     #[test]
     fn a_resume_keeps_only_the_start_that_equals_the_source() {
         const BLOCK: usize = 256 * 1024;
-        let folder =
-            std::env::temp_dir().join(format!("gozler-fileops-{}-kept", std::process::id()));
-        std::fs::create_dir_all(&folder).expect("create the test folder");
+        let scratch = crate::tests::Scratch::new("kept");
         let size = 3 * BLOCK + 100;
         let old: Vec<u8> = (0..size as u32)
             .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
@@ -1092,7 +1090,7 @@ mod tests {
             path.as_os_str().encode_wide().collect()
         };
         for (case, source, destination, kept) in cases {
-            let (from, to) = (folder.join("source"), folder.join("destination"));
+            let (from, to) = (scratch.path("source"), scratch.path("destination"));
             std::fs::write(&from, source).expect("write the source");
             std::fs::write(&to, destination).expect("write the destination");
             let from_entry = open_ring_source(&units(&from), open).expect("open the source");
@@ -1100,6 +1098,5 @@ mod tests {
             let found = Ring::kept(&from_entry, &to_entry, source.len() as u64, BLOCK);
             assert_eq!(found.expect("compared"), kept, "{case}");
         }
-        let _ = std::fs::remove_dir_all(&folder);
     }
 }

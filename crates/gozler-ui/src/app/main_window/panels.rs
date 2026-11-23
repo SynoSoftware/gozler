@@ -41,9 +41,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use windows::Win32::Foundation::LRESULT;
 
-/// Where a search panel's list puts its Folder column.
-const FOLDER_COLUMN: usize = 2;
-
 /// A panel asks gozlerd for its folder sizes and reads its free space this
 /// long after the last change in its folder (DESIGN.md: Folder sizes).
 const SETTLE_MS: u32 = 500;
@@ -89,11 +86,14 @@ pub(super) struct PanelControls {
     /// drives.
     pub(super) folder: Label,
     /// Where the controls show the panel searching, `None` for a folder
-    /// panel: which controls show, the list's columns, and the status
-    /// line's parts ([`Panels::show_panel_kind`]).
+    /// panel: which controls show, and the status line's parts
+    /// ([`Panels::show_panel_kind`]).
     pub(super) kind: Cell<Option<LookIn>>,
-    /// When the list's columns fill. A panel has no header menu, so Auto
-    /// fit stays on.
+    /// The columns the list shows, which the model's change of the
+    /// panel's columns reaches only through [`Panels::show_panel_kind`].
+    columns: RefCell<Vec<PanelColumn>>,
+    /// When the list's columns fill. A panel's header menu only chooses
+    /// columns, so Auto fit stays on.
     pub(super) column_sizing: std::cell::RefCell<ColumnSizing>,
 }
 
@@ -164,21 +164,13 @@ impl PanelControls {
             free: Label::create_right_heading(parent, free)?,
             folder: Label::create_right_path(parent, folder)?,
             kind: Cell::new(None),
+            // `show_panel_kind` inserts the panel's columns before the panels
+            // start.
+            columns: RefCell::new(Vec::new()),
             column_sizing: std::cell::RefCell::new(ColumnSizing::new(true)),
         };
         controls.list.focus_on_click()?;
         controls.list.ask_before_selecting()?;
-        // The panel's fills give the widths.
-        for (index, column) in PanelColumn::FOLDER.into_iter().enumerate() {
-            controls.list.insert_column(
-                index,
-                &ListColumn {
-                    header: "",
-                    width: Px(0),
-                    right_aligned: column.right_aligned(),
-                },
-            );
-        }
         Ok(controls)
     }
 
@@ -236,11 +228,13 @@ impl PanelControls {
     }
 
     /// The columns the list shows.
-    pub(super) fn columns(&self) -> &'static [PanelColumn] {
-        match self.kind.get() {
-            Some(_) => &PanelColumn::SEARCH,
-            None => &PanelColumn::FOLDER,
-        }
+    pub(super) fn columns(&self) -> Vec<PanelColumn> {
+        self.columns.borrow().clone()
+    }
+
+    /// The column the list shows at `index`.
+    pub(super) fn column(&self, index: usize) -> Option<PanelColumn> {
+        self.columns.borrow().get(index).copied()
     }
 }
 
@@ -403,6 +397,15 @@ impl Panels {
         Side::BOTH
             .into_iter()
             .find(|side| self.panel(*side).list.hwnd() == control)
+    }
+
+    /// The panel whose list's header shows at `point`, in screen
+    /// coordinates.
+    pub(super) fn header_at(&self, point: (i32, i32)) -> Option<Side> {
+        Side::BOTH.into_iter().find(|side| {
+            let list = self.panel(*side).list;
+            list.hwnd().is_visible() && list.header().screen_rect().contains(point)
+        })
     }
 
     /// The panel whose path box is `control`.
@@ -691,41 +694,45 @@ impl Panels {
         true
     }
 
-    /// Prepares the Folder column before a changed panel's rows refresh;
-    /// [`Self::show_panel`] places and shows its controls together.
+    /// Prepares the list's columns before a changed panel's rows refresh: a
+    /// search panel's Folder column and the chosen columns. The columns
+    /// after the first that changed are made again, in one update, so the
+    /// list draws once ([`ListView::insert_column`]); [`Self::show_panel`]
+    /// places and shows the panel's controls together.
     pub(super) fn show_panel_kind(&self, window: &MainWindow, side: Side) {
-        let wanted = window
-            .model
-            .borrow()
-            .panels()
-            .search(side)
-            .map(|s| s.look_in);
+        let (kind, wanted) = {
+            let model = window.model.borrow();
+            let panel = model.panels().panel(side);
+            (panel.search().map(|s| s.look_in), panel.columns())
+        };
         let c = self.panel(side);
-        let shown = c.kind.replace(wanted);
+        c.kind.set(kind);
+        let shown = c.columns.replace(wanted.clone());
         if shown == wanted {
             return;
         }
-        if shown.is_none() != wanted.is_none() {
-            match wanted {
-                Some(_) => {
-                    let header = {
-                        let model = window.model.borrow();
-                        captions::panel_headers(model.strings(), &[PanelColumn::Folder])
-                    };
-                    c.list.insert_column(
-                        FOLDER_COLUMN,
-                        &ListColumn {
-                            header: &header[0].full,
-                            width: Px(0),
-                            right_aligned: false,
-                        },
-                    );
-                }
-                None => c.list.delete_column(FOLDER_COLUMN),
-            }
-            self.show_panel_sort(window, side);
-            self.fill_panel_columns(window);
+        let kept = (shown.iter().zip(&wanted))
+            .take_while(|(shown, wanted)| shown == wanted)
+            .count();
+        for index in (kept..shown.len()).rev() {
+            c.list.delete_column(index);
         }
+        let headers = {
+            let model = window.model.borrow();
+            captions::panel_headers(model.strings(), &wanted[kept..])
+        };
+        for ((index, column), header) in (kept..).zip(&wanted[kept..]).zip(&headers) {
+            c.list.insert_column(
+                index,
+                &ListColumn {
+                    header: &header.full,
+                    width: Px(0),
+                    right_aligned: column.right_aligned(),
+                },
+            );
+        }
+        self.show_panel_sort(window, side);
+        self.fill_panel_columns(window);
     }
 
     /// The sort arrow on `side`'s header.
@@ -750,7 +757,7 @@ impl Panels {
             let c = self.panel(side);
             let headers = {
                 let model = window.model.borrow();
-                captions::panel_headers(model.strings(), c.columns())
+                captions::panel_headers(model.strings(), &c.columns())
             };
             for (index, header) in headers.iter().enumerate() {
                 c.list.set_header(index, c.list.fitting_text(index, header));
@@ -810,8 +817,8 @@ impl Panels {
             let sizes = model.choices().size_format;
             let panels = model.panels();
             let panel = panels.panel(side);
-            (c.columns().iter().enumerate())
-                .map(|(index, &column)| MeasuredColumn {
+            (c.columns().into_iter().enumerate())
+                .map(|(index, column)| MeasuredColumn {
                     column: column.search_column(),
                     first: index == 0,
                     header: captions::panel_header(strings, column),
@@ -1932,8 +1939,8 @@ impl Panels {
             }
             ListNotify::ColumnClick(index) => {
                 self.close_quick_search_of(window, side);
-                let column = self.panel(side).columns().get(index);
-                if let Some(key) = column.and_then(|c| c.sort_key()) {
+                let column = self.panel(side).column(index);
+                if let Some(key) = column.and_then(PanelColumn::sort_key) {
                     let shown = window.model.borrow().panels().panel(side).sort();
                     self.sort_panel(window, hwnd, side, panel::header_sort(shown, key));
                 }
@@ -1989,9 +1996,8 @@ impl Panels {
                 let c = self.panel(side);
                 let header = {
                     let model = window.model.borrow();
-                    c.columns()
-                        .get(index)
-                        .map(|column| captions::panel_header(model.strings(), *column))
+                    c.column(index)
+                        .map(|column| captions::panel_header(model.strings(), column))
                 };
                 if let Some(header) = header {
                     c.list
@@ -2596,11 +2602,9 @@ impl Panels {
             let model = window.model.borrow();
             let numbers = window.numbers.borrow();
             let panels = model.panels();
-            let sizes = model.choices().size_format;
-            let columns = self.panel(side).columns();
             match (
                 shown_or_taken(panels, side, info.row()),
-                columns.get(info.column()),
+                self.panel(side).column(info.column()),
             ) {
                 (Some(row), Some(column)) => (
                     info.wants_text().then(|| {
@@ -2608,11 +2612,11 @@ impl Panels {
                         captions::panel_cell(
                             model.strings(),
                             &*numbers,
-                            sizes,
+                            model.choices().size_format,
                             &window.dates.borrow(),
                             panel,
                             row,
-                            *column,
+                            column,
                         )
                     }),
                     Some(icon_of(row)),

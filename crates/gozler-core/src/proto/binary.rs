@@ -47,7 +47,8 @@
 //!   files:    u32 LE    iff has_counts: the files below a folder
 //!   folders:  u32 LE    iff has_counts: the folders below a folder
 //!   writes:   u32 LE    iff has_writes: the writes of the last hour
-//!   written:  u64 LE    iff has_writes: the bytes those writes put on disk
+//!   written:  u64 LE    iff has_writes: the bytes those writes are known to
+//!                       have put on disk
 //!   write_marks: u8     iff has_writes: `index::writes::Marks`
 //!   file_id:  u128 LE   iff identities, and not a gone row
 //! sums, iff has_sums, after the items:

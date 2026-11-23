@@ -3,6 +3,7 @@
 //! a daemon (DESIGN.md: Requests). `app::work::requests` runs bounded
 //! purposes and answers each [`Fetch`] with a [`Fetched`].
 
+use super::model::Column;
 use super::panel::Side;
 use super::selection::row_count;
 use super::work::Interest;
@@ -62,10 +63,14 @@ pub(crate) enum Purpose {
     /// A panel's folder sizes, one purpose for each panel, so one panel's
     /// request never cancels the other's (DESIGN.md: Folder sizes).
     FolderSizes(Side),
+    /// Search's live refresh, apart from `Results`, because it runs in the
+    /// background: it shows no wait and offers no Cancel (DESIGN.md:
+    /// Results list).
+    Refresh,
 }
 
 impl Purpose {
-    pub(crate) const ALL: [Purpose; 13] = [
+    pub(crate) const ALL: [Purpose; 14] = [
         Purpose::Results(List::Search),
         Purpose::Results(List::Panel(Side::Left)),
         Purpose::Results(List::Panel(Side::Right)),
@@ -79,11 +84,12 @@ impl Purpose {
         Purpose::SettingsSaved,
         Purpose::FolderSizes(Side::Left),
         Purpose::FolderSizes(Side::Right),
+        Purpose::Refresh,
     ];
 
     pub(crate) fn interest(self) -> Interest {
         match self {
-            Self::Status | Self::FolderSizes(_) => Interest::Background,
+            Self::Status | Self::FolderSizes(_) | Self::Refresh => Interest::Background,
             _ => Interest::Awaited,
         }
     }
@@ -127,6 +133,48 @@ pub(crate) enum Ask {
     /// The direct subfolders of a panel's folder, whose sizes the panel
     /// shows, answered with [`Outcome::Rows`].
     FolderSizes(Side, ChunkAsk),
+    /// Search's first chunk again for a live refresh, answered whole with
+    /// [`Outcome::Rows`].
+    Refresh(ChunkAsk),
+    /// The values of Search's rows on screen again, from its result
+    /// snapshot, answered with [`Outcome::Values`].
+    Values(ValuesAsk),
+}
+
+/// The rows on screen read again from a list's result snapshot, for their
+/// values, with the cached chunks that hold them, which the request's
+/// thread copies with the new rows in place, so the window's thread copies
+/// no chunk (DESIGN.md: Results list).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ValuesAsk {
+    pub(crate) rows: ChunkAsk,
+    /// Sorted by their start.
+    pub(crate) cached: Vec<CachedRows>,
+}
+
+impl ValuesAsk {
+    /// The cached chunks with `read`, the rows from `self.rows.start` on, in
+    /// place of the rows they held. A row past a chunk's rows changes
+    /// nothing.
+    pub(crate) fn merge(self, read: Arc<[ResultItem]>) -> Vec<CachedRows> {
+        let start = self.rows.start;
+        (self.cached.into_iter())
+            .map(|CachedRows { range, rows }| {
+                let mut merged = rows.to_vec();
+                for (position, row) in (start..).zip(read.iter()) {
+                    let at =
+                        (position.checked_sub(range.start)).and_then(|at| usize::try_from(at).ok());
+                    if let Some(slot) = at.and_then(|at| merged.get_mut(at)) {
+                        slot.clone_from(row);
+                    }
+                }
+                CachedRows {
+                    range,
+                    rows: merged.into(),
+                }
+            })
+            .collect()
+    }
 }
 
 /// The rows of `search` in the order `sort` from the position `start`, at
@@ -138,9 +186,38 @@ pub(crate) struct ChunkAsk {
     pub(crate) start: u64,
     pub(crate) len: u64,
     pub(crate) snapshot: FromSnapshot,
-    /// Whether the rows carry their writes, which a Writes or Written
-    /// column or the inspector shows.
+    /// The optional values the rows carry.
+    pub(crate) needs: Needs,
+}
+
+/// The values of a row that only some views show, so a request asks for them
+/// only while one does: an older service does not read their wants, and they
+/// cost bytes a row.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Needs {
+    /// The writes, which a Writes or Written column or the inspector shows.
     pub(crate) writes: bool,
+    /// A folder's counts of files and folders, which a Files or Folders
+    /// column shows.
+    pub(crate) counts: bool,
+}
+
+impl Needs {
+    /// The values that `columns` show.
+    pub(crate) fn of(columns: impl IntoIterator<Item = Column>) -> Needs {
+        columns
+            .into_iter()
+            .fold(Needs::default(), |needs, column| Needs {
+                writes: needs.writes || matches!(column, Column::Writes | Column::Written),
+                counts: needs.counts || matches!(column, Column::Files | Column::Folders),
+            })
+    }
+
+    /// Whether `self` needs a value that `before` did not, so the rows shown
+    /// lack it.
+    pub(crate) fn exceed(self, before: Needs) -> bool {
+        (self.writes && !before.writes) || (self.counts && !before.counts)
+    }
 }
 
 /// Whether a chunk comes from a result snapshot (DESIGN.md: Result
@@ -175,10 +252,13 @@ impl ChunkAsk {
             Want::DateCreated,
             Want::Attributes,
         ];
-        // The writes are thirteen bytes a row, and an older service does not
-        // read the want, so only a list that shows them asks.
-        if self.writes {
+        // The writes are thirteen bytes a row and the counts eight, so only a
+        // list that shows them asks.
+        if self.needs.writes {
             wants.push(Want::Writes);
+        }
+        if self.needs.counts {
+            wants.push(Want::Counts);
         }
         // The status bar shows them beside the total. The service sums every
         // match for them, so only the first chunk asks, and the later chunks
@@ -250,6 +330,8 @@ pub(crate) struct ExportAsk {
     pub(crate) want_created: bool,
     /// Whether the file has a Writes or a Written column, likewise.
     pub(crate) want_writes: bool,
+    /// Whether the file has a Files or a Folders column, likewise.
+    pub(crate) want_counts: bool,
 }
 
 impl ExportAsk {
@@ -263,6 +345,9 @@ impl ExportAsk {
         }
         if self.want_writes {
             wants.push(Want::Writes);
+        }
+        if self.want_counts {
+            wants.push(Want::Counts);
         }
         self.search.clone().request(Returns::Rows(Rows {
             sort: self.sort,
@@ -285,6 +370,7 @@ impl Fetch {
             Ask::CountIncluded(_) => Purpose::IncludeCount,
             Ask::SettingsSaved => Purpose::SettingsSaved,
             Ask::FolderSizes(side, _) => Purpose::FolderSizes(side),
+            Ask::Refresh(_) | Ask::Values(_) => Purpose::Refresh,
         }
     }
 }
@@ -301,6 +387,9 @@ pub(crate) struct Fetched {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Outcome {
     Rows(Chunk),
+    /// The reply to [`Ask::Values`]: its cached chunks with the rows read
+    /// again in place.
+    Values(Vec<CachedRows>),
     Selection(SelectionRows),
     /// The reply to [`Ask::FolderSize`].
     Totals(QueryTotals),
@@ -331,6 +420,7 @@ impl Outcome {
     pub(crate) fn items(&self) -> usize {
         match self {
             Self::Rows(chunk) => chunk.rows.len(),
+            Self::Values(cached) => cached.iter().map(|chunk| chunk.rows.len()).sum(),
             Self::Selection(rows) => rows
                 .files
                 .len()

@@ -125,8 +125,8 @@ BEGIN
     PUSHBUTTON      "", IDC_SETTINGS_APPLY, 343, 328, 50, 14
 END
 
-// Settings > General: the language and how the window shows sizes, icons
-// and memory use, then starting and closing.
+// Settings > General: the language and how the window shows sizes, dates,
+// icons and memory use, then starting and closing.
 //
 // Each page's sections are a heading, an icon and a title that the window
 // places after it, over the section's indented controls, with an etched line
@@ -149,18 +149,16 @@ BEGIN
     COMBOBOX        IDC_GENERAL_SIZES, 91, 100, 120, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
     LTEXT           "", IDC_GENERAL_DATES_LABEL, 7, 120, 80, 8
     COMBOBOX        IDC_GENERAL_DATES, 91, 118, 120, 60, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    CONTROL         "", -1, "Static", SS_ETCHEDHORZ, 0, 138, 309, 1
-    CONTROL         "", IDC_GENERAL_STARTING_ICON, "Static", SS_ICON | SS_CENTERIMAGE, 0, 146, 10, 10
-    LTEXT           "", IDC_GENERAL_STARTING, 12, 146, 297, 10, SS_NOPREFIX | SS_CENTERIMAGE
-    AUTOCHECKBOX    "", IDC_GENERAL_SIGN_IN, 7, 158, 295, 10, WS_TABSTOP
-    AUTOCHECKBOX    "", IDC_GENERAL_UPDATES, 7, 170, 295, 10, WS_TABSTOP
-    AUTOCHECKBOX    "", IDC_GENERAL_KEEP_RUNNING, 7, 182, 295, 10, WS_TABSTOP
-    AUTOCHECKBOX    "", IDC_GENERAL_ONE_WINDOW, 7, 194, 295, 10, WS_TABSTOP
-    AUTOCHECKBOX    "", IDC_GENERAL_WARN_REPEATS, 7, 206, 295, 10, WS_TABSTOP
-    LTEXT           "", IDC_GENERAL_WARN_NOTE, 19, 218, 283, 8, SS_NOPREFIX | NOT WS_VISIBLE
-    GROUPBOX        "", IDC_GENERAL_SELECTION, 0, 230, 309, 40
-    AUTORADIOBUTTON "", IDC_GENERAL_SELECT_FILES, 7, 242, 295, 10, WS_GROUP | WS_TABSTOP
-    AUTORADIOBUTTON "", IDC_GENERAL_SELECT_FOLDERS, 7, 254, 295, 10
+    CONTROL         "", -1, "Static", SS_ETCHEDHORZ, 0, 140, 309, 1
+    CONTROL         "", IDC_GENERAL_STARTING_ICON, "Static", SS_ICON | SS_CENTERIMAGE, 0, 148, 10, 10
+    LTEXT           "", IDC_GENERAL_STARTING, 12, 148, 297, 10, SS_NOPREFIX | SS_CENTERIMAGE
+    AUTOCHECKBOX    "", IDC_GENERAL_SIGN_IN, 7, 160, 295, 10, WS_TABSTOP
+    AUTOCHECKBOX    "", IDC_GENERAL_UPDATES, 7, 172, 295, 10, WS_TABSTOP
+    AUTOCHECKBOX    "", IDC_GENERAL_KEEP_RUNNING, 7, 184, 295, 10, WS_TABSTOP
+    AUTOCHECKBOX    "", IDC_GENERAL_ONE_WINDOW, 7, 196, 295, 10, WS_TABSTOP
+    GROUPBOX        "", IDC_GENERAL_SELECTION, 0, 214, 309, 48
+    AUTORADIOBUTTON "", IDC_GENERAL_SELECT_FILES, 7, 228, 295, 10, WS_GROUP | WS_TABSTOP
+    AUTORADIOBUTTON "", IDC_GENERAL_SELECT_FOLDERS, 7, 242, 295, 10
     PUSHBUTTON      "", IDC_GENERAL_RESTORE, 259, 280, 50, 14, WS_GROUP
 END
 
@@ -286,6 +284,46 @@ BEGIN
     PUSHBUTTON      "", IDC_INDEX_USE_LOCAL, 144, 256, 50, 14, WS_DISABLED
     PUSHBUTTON      "", IDC_INDEX_FIX, 198, 256, 50, 14, WS_DISABLED
     PUSHBUTTON      "", IDC_INDEX_REPORT, 252, 256, 50, 14
+END
+
+// Settings > SSD wear: the wear alarm's five lines, then the warning about a
+// folder copied into itself again and again, and its note while the service
+// cannot watch for it; then each disk's health. Each alarm line is a check
+// box, a number box and a unit, 18 dialog units apart, in three shared
+// columns: the check boxes 150 wide, sized for the longest caption of the
+// four languages (Dutch, "Gegevens geschreven door één programma") at Segoe
+// UI's average letter width, the number boxes at 154, and the units from 198
+// to the page's edge, sized for the longest unit ("keer een gewone
+// gebruiker"). The disk list shows once
+// the service answers, as tall as its rows, up to the five rows its space
+// holds, so nothing below it moves.
+IDD_SETTINGS_SSD_WEAR DIALOGEX 0, 0, 309, 294
+STYLE DS_SHELLFONT | DS_CONTROL | WS_CHILD
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "", IDC_SSD_WEAR_HEADING, 0, 0, 309, 12, SS_NOPREFIX
+    LTEXT           "", IDC_SSD_WEAR_NOTE, 0, 14, 309, 8, SS_NOPREFIX | NOT WS_VISIBLE
+    AUTOCHECKBOX    "", IDC_SSD_WEAR_FILE_WRITES, 0, 28, 150, 10, WS_TABSTOP
+    EDITTEXT        IDC_SSD_WEAR_FILE_WRITES_NUMBER, 154, 26, 40, 14, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "", IDC_SSD_WEAR_FILE_WRITES_UNIT, 198, 29, 111, 8, SS_NOPREFIX
+    AUTOCHECKBOX    "", IDC_SSD_WEAR_FILE_WRITTEN, 0, 46, 150, 10, WS_TABSTOP
+    EDITTEXT        IDC_SSD_WEAR_FILE_WRITTEN_NUMBER, 154, 44, 40, 14, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "", IDC_SSD_WEAR_FILE_WRITTEN_UNIT, 198, 47, 111, 8, SS_NOPREFIX
+    AUTOCHECKBOX    "", IDC_SSD_WEAR_FOLDER_WRITTEN, 0, 64, 150, 10, WS_TABSTOP
+    EDITTEXT        IDC_SSD_WEAR_FOLDER_WRITTEN_NUMBER, 154, 62, 40, 14, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "", IDC_SSD_WEAR_FOLDER_WRITTEN_UNIT, 198, 65, 111, 8, SS_NOPREFIX
+    AUTOCHECKBOX    "", IDC_SSD_WEAR_PROGRAM_WRITTEN, 0, 82, 150, 10, WS_TABSTOP
+    EDITTEXT        IDC_SSD_WEAR_PROGRAM_WRITTEN_NUMBER, 154, 80, 40, 14, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "", IDC_SSD_WEAR_PROGRAM_WRITTEN_UNIT, 198, 83, 111, 8, SS_NOPREFIX
+    AUTOCHECKBOX    "", IDC_SSD_WEAR_DISK_WEEK, 0, 100, 150, 10, WS_TABSTOP
+    EDITTEXT        IDC_SSD_WEAR_DISK_WEEK_NUMBER, 154, 98, 40, 14, ES_NUMBER | ES_AUTOHSCROLL
+    LTEXT           "", IDC_SSD_WEAR_DISK_WEEK_UNIT, 198, 101, 111, 8, SS_NOPREFIX
+    AUTOCHECKBOX    "", IDC_SSD_WEAR_WARN, 0, 118, 309, 10, WS_TABSTOP
+    CONTROL         "", -1, "Static", SS_ETCHEDHORZ, 0, 136, 309, 1
+    CONTROL         "", IDC_SSD_WEAR_DISKS_GROUP_ICON, "Static", SS_ICON | SS_CENTERIMAGE, 0, 144, 10, 10
+    LTEXT           "", IDC_SSD_WEAR_DISKS_GROUP, 12, 144, 297, 10, SS_NOPREFIX | SS_CENTERIMAGE
+    CONTROL         "", IDC_SSD_WEAR_DISKS, "SysListView32", LVS_REPORT | LVS_NOSORTHEADER | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP | NOT WS_VISIBLE, 7, 158, 295, 76
+    PUSHBUTTON      "", IDC_SSD_WEAR_RESTORE, 259, 280, 50, 14
 END
 
 IDD_SETTINGS_FILE_OPERATIONS DIALOGEX 0, 0, 309, 294
@@ -651,17 +689,19 @@ BEGIN
     DEFPUSHBUTTON   "", IDCANCEL, 323, 219, 50, 14
 END
 
-// SSD wear: the folders that the service saw copied into themselves. No
-// window owns it, and it has a taskbar button of its own, so it shows while
-// the main window is hidden in the notification area. Show shows the
-// selected folder in Commander.
-IDD_WEAR DIALOGEX 0, 0, 320, 160
+// SSD wear: the folders that the service saw copied into themselves, and
+// the files, folders, programs and disks that crossed a limit of the wear
+// alarm, in four columns: what, its kind, how much, and the limit. No window
+// owns it, and it has a taskbar button of its own, so it shows while the
+// main window is hidden in the notification area. Show shows the selected
+// row's file, folder or program in Commander, or searches a disk's drives.
+IDD_WEAR DIALOGEX 0, 0, 400, 170
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
 EXSTYLE WS_EX_APPWINDOW
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
-    LTEXT           "", IDC_WEAR_TEXT, 7, 7, 306, 20, SS_NOPREFIX
-    CONTROL         "", IDC_WEAR_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 7, 30, 306, 102
-    DEFPUSHBUTTON   "", IDC_WEAR_SHOW, 209, 139, 50, 14, WS_DISABLED
-    PUSHBUTTON      "", IDCANCEL, 263, 139, 50, 14
+    LTEXT           "", IDC_WEAR_TEXT, 7, 7, 386, 20, SS_NOPREFIX
+    CONTROL         "", IDC_WEAR_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 7, 30, 386, 112
+    DEFPUSHBUTTON   "", IDC_WEAR_SHOW, 289, 149, 50, 14, WS_DISABLED
+    PUSHBUTTON      "", IDCANCEL, 343, 149, 50, 14
 END

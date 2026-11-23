@@ -7,7 +7,7 @@ use super::{
 };
 use crate::app::work::RegistryRead;
 use crate::core::include::summary_drives_changed;
-use gozler_core::proto::{CallerSees, DaemonStatus};
+use gozler_core::proto::{CallerSees, DaemonStatus, Disk};
 
 #[derive(Clone, Copy)]
 pub(super) struct OpenSettings {
@@ -40,6 +40,11 @@ pub(in crate::app) struct SettingsBridge {
     account_names: RefCell<Vec<(String, Option<String>)>>,
     /// Whether the names changed since the Visibility page last showed them.
     account_names_dirty: Cell<bool>,
+    /// Each disk's health as the service answered the SSD wear page's read,
+    /// or why it did not; `None` while the read waits.
+    disks: RefCell<Option<Result<Vec<Disk>, DaemonFailure>>>,
+    /// Whether the answer arrived since the SSD wear page last showed it.
+    disks_dirty: Cell<bool>,
     include_summary_dirty: Cell<bool>,
     include_preview_dirty: Cell<bool>,
     /// What Settings' status bar showed of the fix, which it keeps while a
@@ -57,6 +62,8 @@ impl SettingsBridge {
             labels: RefCell::new(Vec::new()),
             account_names: RefCell::new(Vec::new()),
             account_names_dirty: Cell::new(false),
+            disks: RefCell::new(None),
+            disks_dirty: Cell::new(false),
             include_summary_dirty: Cell::new(false),
             include_preview_dirty: Cell::new(false),
             kept_fix: RefCell::default(),
@@ -288,7 +295,7 @@ impl SettingsBridge {
             // The menus, the button widths and the Kind list follow.
             window.refresh_text(hwnd);
         }
-        if edited.warn_repeats != last.warn_repeats {
+        if edited.warn_repeats != last.warn_repeats || edited.wear_alarm != last.wear_alarm {
             window.follow_wear(hwnd);
         }
         if edited.show_memory != last.show_memory {
@@ -635,6 +642,45 @@ impl SettingsBridge {
 
     pub(in crate::app) fn take_account_names_changed(&self) -> bool {
         self.account_names_dirty.replace(false)
+    }
+
+    /// Asks the service, off the window's thread, for each disk's health,
+    /// which the SSD wear page shows once it answers; a page made again
+    /// asks again.
+    pub(in crate::app) fn read_disks(&self, window: &MainWindow) {
+        self.disks.take();
+        self.disks_dirty.set(false);
+        window.created().work.borrow_mut().settings.read_disks();
+    }
+
+    /// Keeps the service's answer to the disks' read and tells the open
+    /// Settings dialog.
+    pub(in crate::app) fn accept_disks(&self, disks: Result<Vec<Disk>, Box<DaemonFailure>>) {
+        self.disks.replace(Some(disks.map_err(|failure| *failure)));
+        if self.open.get().is_some() && !self.disks_dirty.replace(true) {
+            self.post_settings_reply();
+        }
+    }
+
+    pub(in crate::app) fn take_disks_changed(&self) -> bool {
+        self.disks_dirty.replace(false)
+    }
+
+    /// The SSD wear page's disk list, in the person's numbers.
+    pub(in crate::app) fn disk_rows(
+        &self,
+        window: &MainWindow,
+        strings: &Strings,
+    ) -> Vec<[String; 3]> {
+        match &*self.disks.borrow() {
+            Some(Ok(disks)) => captions::disk_rows(strings, &*window.numbers.borrow(), disks),
+            Some(Err(_)) | None => Vec::new(),
+        }
+    }
+
+    /// What the disk list says while it has no row.
+    pub(in crate::app) fn disks_empty_text(&self, strings: &Strings) -> String {
+        captions::disks_empty_text(strings, self.disks.borrow().as_ref())
     }
 
     /// The Use Total Commander link: searches the index for Total

@@ -92,6 +92,9 @@ pub enum Request {
     /// Waits until the service holds something to warn about that is newer
     /// than the request's `after`, and answers [`Response::Wear`] then.
     Wear(WearRequest),
+    /// The lifetime health of each disk under a fixed volume, as the
+    /// disk reports it ([`Response::DiskHealth`]).
+    DiskHealth,
 }
 
 /// What a [`Request::Wear`] waits for. A struct of its own, so an unknown
@@ -104,6 +107,62 @@ pub struct WearRequest {
     /// travel with each request, because the service cannot read the
     /// window's settings.
     pub copies: u32,
+    /// The wear alarm's limits that are on. Sent only when one is, so a
+    /// request with none still reaches a service that predates them.
+    #[serde(default, skip_serializing_if = "WearLimits::is_off")]
+    pub limits: WearLimits,
+}
+
+/// The limits of the wear alarm, each `None` while it is off. "An hour" is
+/// the last 12 steps of 5 minutes of the writes table (`docs/DESIGN.md`,
+/// "Writes"), and the bytes of a file or folder are its known bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WearLimits {
+    /// Writes to one file in an hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_writes: Option<u32>,
+    /// Bytes written to one file in an hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_written: Option<u64>,
+    /// Bytes written to the files directly in one folder in an hour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_written: Option<u64>,
+    /// Bytes one program wrote in an hour, by its write counter, which also
+    /// counts pipes and devices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_written: Option<u64>,
+    /// Bytes a disk wrote in a week, as this many times a typical user's
+    /// week (`alarm::TYPICAL_DAY`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_week: Option<u32>,
+}
+
+impl WearLimits {
+    /// The most writes an hour that [`Self::file_writes`] takes.
+    pub const MOST_WRITES: u32 = 1_000_000;
+    /// The most GB of 2^30 bytes an hour that a limit on bytes takes.
+    pub const MOST_GB: u32 = 100_000;
+    /// The most times a typical user's week that [`Self::disk_week`] takes.
+    pub const MOST_FACTOR: u32 = 1_000;
+
+    pub fn is_off(&self) -> bool {
+        *self == WearLimits::default()
+    }
+
+    /// Each limit that is on, raised to 1 and lowered to its most, as the
+    /// service reads a request: the pipe can bring any number.
+    pub fn bounded(self) -> WearLimits {
+        let bytes =
+            |limit: Option<u64>| limit.map(|limit| limit.clamp(1, u64::from(Self::MOST_GB) << 30));
+        WearLimits {
+            file_writes: self.file_writes.map(|l| l.clamp(1, Self::MOST_WRITES)),
+            file_written: bytes(self.file_written),
+            folder_written: bytes(self.folder_written),
+            program_written: bytes(self.program_written),
+            disk_week: self.disk_week.map(|l| l.clamp(1, Self::MOST_FACTOR)),
+        }
+    }
 }
 
 /// What the client has seen of the service's events: the
@@ -150,6 +209,95 @@ pub struct WearReply {
     pub events: Vec<RepeatingFolder>,
     /// How many events the service's lists dropped.
     pub dropped: u64,
+    /// The wear alarm's limits crossed that the client has not seen and
+    /// that reach its own limits, numbered with `events`. A service that
+    /// predates them answers only a request without limits, so an empty
+    /// list is what it means.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alarms: Vec<Alarm>,
+}
+
+/// A limit of the wear alarm crossed, as a [`Response::Wear`] sends it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Alarm {
+    /// The service's sequence number of the crossing, from the counter that
+    /// numbers [`RepeatingFolder::number`].
+    pub number: u64,
+    pub what: Alarmed,
+    /// The writes or bytes when the limit was crossed.
+    pub value: u64,
+    /// `value` is a lower bound: some writes' bytes are unknown, or a step's
+    /// count stopped at its highest value.
+    pub at_least: bool,
+    /// The request's own limit that `value` crossed, in the unit of
+    /// `value`: for a disk, the week's bytes that the factor allows.
+    pub limit: u64,
+    /// When the service saw the crossing, as a FILETIME.
+    pub time: i64,
+}
+
+/// Which limit an [`Alarm`] crossed, and what crossed it. A path is `None`
+/// when the file or folder is gone, which only a client that sees every
+/// file is told about.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Alarmed {
+    /// [`WearLimits::file_writes`].
+    FileWrites { path: Option<String> },
+    /// [`WearLimits::file_written`].
+    FileWritten { path: Option<String> },
+    /// [`WearLimits::folder_written`].
+    FolderWritten { path: Option<String> },
+    /// [`WearLimits::program_written`]: the program's full path, or only
+    /// its file name for a client that does not see every file, because the
+    /// service sees every user's programs.
+    ProgramWritten { path: String },
+    /// [`WearLimits::disk_week`]: the disk's model and mount points, and
+    /// since when `value` counts, a FILETIME at most 7 days back.
+    DiskWeek {
+        model: Option<String>,
+        mounts: Vec<String>,
+        since: i64,
+    },
+}
+
+/// One physical disk in a [`Response::DiskHealth`]. Each value the disk
+/// does not report is `None`, and `unread` says why, so a disk that reports
+/// one value still shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Disk {
+    /// Windows' number of the disk, as in `\\.\PhysicalDrive0`.
+    pub number: u32,
+    /// The disk's product id, such as `Samsung SSD 990 PRO 2TB`.
+    pub model: Option<String>,
+    /// The mount points of the fixed volumes on the disk, such as `C:\`.
+    pub mounts: Vec<String>,
+    /// `STORAGE_BUS_TYPE`, such as 17 for NVMe, 11 for SATA and 7 for USB;
+    /// `None` when the disk's descriptor could not be read.
+    pub bus: Option<i32>,
+    /// Percentage Used, the disk's own estimate of how much of its rated
+    /// life it has used. It passes 100 on a disk used past its rating, and
+    /// 255 means 255 or more.
+    pub used: Option<u8>,
+    /// The bytes the computer wrote to the disk over its life.
+    pub written: Option<u64>,
+    /// Why `used` or `written` is `None`; `None` when both are known.
+    pub unread: Option<Unread>,
+}
+
+/// Why the service could not read a disk's health.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Unread {
+    /// The service may not open the disk, as when it runs without
+    /// administrator rights.
+    NoRights,
+    /// The disk or its driver does not report the value, or reports it in
+    /// a form the service cannot read.
+    NotReported,
+    /// The service reads health only from NVMe disks, and this disk is on
+    /// another bus ([`Disk::bus`]), such as SATA, USB or a virtual disk.
+    UnsupportedBus,
+    /// Windows failed the query with this error code.
+    Failed { code: u32 },
 }
 
 /// The id of a result snapshot: 128 random bits, which only the client that
@@ -329,6 +477,8 @@ pub enum Response {
     },
     /// Reply to [`Request::Wear`].
     Wear(WearReply),
+    /// Reply to [`Request::DiskHealth`], in the order of the disk numbers.
+    DiskHealth { disks: Vec<Disk> },
     /// The request failed.
     Error {
         /// Machine-readable failure class.
@@ -470,9 +620,12 @@ pub struct ResultItem {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemWrites {
     pub writes: u32,
-    /// The bytes those writes put on the disk.
+    /// The bytes those writes are known to have put on the disk, which
+    /// [`Written::of`](crate::index::writes::Written::of) reads with
+    /// `marks`. `--json` prints that Written instead (`output::results`).
+    #[serde(skip)]
     pub written: u64,
-    /// The kinds of write and whether Written is "up to" or "at least".
+    /// The kinds of write and whether some of their bytes are unknown.
     #[serde(skip)]
     pub marks: Marks,
 }
@@ -780,6 +933,7 @@ mod tests {
                 number: u64::MAX - 7,
             },
             copies: 4,
+            limits: WearLimits::default(),
         }));
         rt_response(&Response::Wear(WearReply {
             run,
@@ -793,6 +947,7 @@ mod tests {
                 time: 133_500_000_000_000_000,
             }],
             dropped: 0,
+            alarms: Vec::new(),
         }));
     }
 

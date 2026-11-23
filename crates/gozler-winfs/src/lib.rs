@@ -54,6 +54,8 @@ mod pipe_sd;
 #[cfg(windows)]
 mod pipe_trust;
 #[cfg(windows)]
+mod processes;
+#[cfg(windows)]
 mod registry;
 #[cfg(windows)]
 mod ring;
@@ -123,7 +125,9 @@ pub use ring::{
 };
 
 #[cfg(windows)]
-pub use storage::{StorageDevice, VolumeStorage, volume_storage, windows_build};
+pub use storage::{
+    StorageDevice, VolumeStorage, disk_descriptor, nvme_health_log, volume_storage, windows_build,
+};
 
 #[cfg(windows)]
 pub use entry::{Access, AttributeTag, Entry, EntryStat, FileIdentity, Reparse, open_entry};
@@ -154,6 +158,9 @@ pub use pipe_sd::{PipeSecurity, build_pipe_security};
 
 #[cfg(windows)]
 pub use pipe_trust::{pipe_bytes_available, pipe_server_is_trusted};
+
+#[cfg(windows)]
+pub use processes::{ProcessWrites, process_writes};
 
 #[cfg(windows)]
 pub use registry::{machine_string, machine_strings, set_machine_strings};

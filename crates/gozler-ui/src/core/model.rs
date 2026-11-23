@@ -10,8 +10,8 @@
 //! follow them. The app delivers effects without holding a model borrow.
 
 use super::fetch::{
-    Ask, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, FromSnapshot, Generation, List, Local,
-    Outcome, Programs, Purpose, WriteFailure,
+    Ask, CachedRows, ChunkAsk, DaemonFailure, ExportAsk, Fetch, Fetched, FromSnapshot, Generation,
+    List, Local, Needs, Outcome, Programs, Purpose, WriteFailure,
 };
 use super::file_operations::{self, StatusOperation};
 use super::fixer::{FixEvent, FixWork, Fixer, SetupEvent, SetupFix, SetupResult};
@@ -20,15 +20,17 @@ use super::layout::column_sizing::NewRows;
 use super::layout::{Dip, Panes};
 use super::open::{TOTAL_COMMANDER_SEARCH, newest_total_commander};
 use super::operations::{OperationSteps, QueueStep, Source};
-use super::panel::{LookIn, PanelFollow, Panels, Side, TakenRows, View, drive_root};
+use super::panel::{LookIn, PanelColumn, PanelFollow, Panels, Side, TakenRows, View, drive_root};
 use super::query::{self, Filters, LocationItem, Matching};
-use super::results::{Fix, ListButton, ListMessage, RowsChange, Shown};
+use super::results::{
+    CHUNK_ROWS, Fix, Held, ListButton, ListMessage, RefreshKind, Remap, Remapped, RowsChange, Shown,
+};
 use super::search::SearchArea;
 use super::search_list::Deselect;
 use super::search_list::{Ended, Keep, Kept, SearchList, SelectedSize};
 use super::selection::{
-    Filter, Filtered, FolderContents, RowSelection, SELECTION_LIMIT, Selection, SelectionSource,
-    Sums, wide_path,
+    CaptureKey, Filter, Filtered, FolderContents, RowSelection, SELECTION_LIMIT, Selection,
+    SelectionSource, Sums, wide_path,
 };
 use super::settings::{
     Changes, Choices, CompareState, Mode, MultiRenameState, Placement, SavedColumn, Settings,
@@ -36,7 +38,7 @@ use super::settings::{
 };
 use super::text::{self, LanguageChoice, Strings};
 use super::update;
-use super::work::Retirement;
+use super::work::{INLINE_ITEMS, Retirement};
 use gozler_core::escompat::EsPlan;
 use gozler_core::include::IndexSettings;
 use gozler_core::links::Links;
@@ -80,8 +82,8 @@ pub(crate) struct Model {
     temporary_search: Option<SearchPreferences>,
     /// New search intent in any list, independent of background reruns.
     search_revision: u64,
-    /// `settings` when [`Model::saved_state_changed`] last ran, so the save
-    /// timer starts once for each change.
+    /// `settings` when [`Model::saved_state_changed`] last ran, so each
+    /// change is reported once.
     seen: Settings,
     /// The settings as this window saved them last, or loaded them, which
     /// a save compares with, so it writes only what this window changed.
@@ -412,6 +414,7 @@ impl Model {
                 matches!(self.export, Export::Running { generation: asked, .. } if asked == generation)
             }
             Purpose::FolderSizes(_) => true,
+            Purpose::Refresh => self.search.list.results.awaits(generation),
         }
     }
 
@@ -888,7 +891,7 @@ impl Model {
                 start: 0,
                 len: PROGRAM_ROWS,
                 snapshot: FromSnapshot::No,
-                writes: false,
+                needs: Needs::default(),
             }),
         }
     }
@@ -1507,7 +1510,7 @@ impl Model {
 
     /// Shows or hides the inspector (DESIGN.md: C14).
     pub(crate) fn toggle_inspector(&mut self) -> Accepted {
-        let before = self.shows_writes();
+        let before = self.needs();
         let window = &mut self.settings.window;
         window.inspector = self.inspector_content != super::layout::InspectorContent::Selection
             || !window.inspector;
@@ -1528,7 +1531,7 @@ impl Model {
                 Effect::NoteSavedState,
             ],
         };
-        self.search_again_for_writes(before, &mut accepted);
+        self.search_again_for_needs(before, &mut accepted);
         accepted
     }
 
@@ -1653,7 +1656,7 @@ impl Model {
         if !column.row().can_hide {
             return Accepted::default();
         }
-        let before = self.shows_writes();
+        let before = self.needs();
         let mut accepted = match self.columns.iter().position(|c| *c == column) {
             Some(index) => {
                 self.columns.remove(index);
@@ -1686,29 +1689,318 @@ impl Model {
                 }
             }
         };
-        self.search_again_for_writes(before, &mut accepted);
+        self.search_again_for_needs(before, &mut accepted);
         accepted
     }
 
-    /// Whether the search list's rows must carry their writes: a Writes or
-    /// Written column or the inspector shows them.
-    fn shows_writes(&self) -> bool {
-        let window = &self.settings.window;
-        self.columns
-            .iter()
-            .any(|column| matches!(column, Column::Writes | Column::Written))
-            || (window.inspector
-                && self.inspector_content == super::layout::InspectorContent::Selection)
+    /// Shows or hides `column` in `side`'s list (DESIGN.md: A panel). Rows
+    /// asked for without the values it shows are asked for again: a search
+    /// panel searches again, and a folder panel asks for its sizes again.
+    pub(crate) fn toggle_panel_column(&mut self, side: Side, column: Column) -> Accepted {
+        let lacks = self.panels.toggle_column(side, PanelColumn::of(column));
+        let mut accepted = Accepted {
+            touched: Areas::panel(side),
+            effects: vec![Effect::PreparePanel(side), Effect::NoteSavedState],
+        };
+        if lacks {
+            if self.panels.search(side).is_some() {
+                (accepted.effects).push(Effect::SearchAgain(vec![List::Panel(side)]));
+            } else {
+                (accepted.effects).extend(self.ask_sizes(side).map(Effect::Fetch));
+            }
+        }
+        accepted
     }
 
-    /// Searches again when a change made [`Model::shows_writes`] true,
-    /// because the rows shown were asked for without their writes.
-    fn search_again_for_writes(&self, before: bool, accepted: &mut Accepted) {
-        if !before && self.shows_writes() {
+    /// The optional values the search list's rows must carry: the writes
+    /// when a Writes or Written column or the inspector shows them, and the
+    /// counts when a Files or Folders column does.
+    fn needs(&self) -> Needs {
+        let window = &self.settings.window;
+        let mut needs = Needs::of(self.columns.iter().copied());
+        needs.writes |= window.inspector
+            && self.inspector_content == super::layout::InspectorContent::Selection;
+        needs
+    }
+
+    /// Searches again when a change made [`Model::needs`] more, because the
+    /// rows shown were asked for without those values.
+    fn search_again_for_needs(&self, before: Needs, accepted: &mut Accepted) {
+        if self.needs().exceed(before) {
             accepted
                 .effects
                 .push(Effect::SearchAgain(vec![List::Search]));
         }
+    }
+
+    /// Whether the live refresh runs: the window is on screen, and Search
+    /// shows rows or Commander mode shows its panels (DESIGN.md: Results
+    /// list, Folder sizes).
+    pub(crate) fn refreshes_live(&self, on_screen: bool) -> bool {
+        on_screen
+            && match self.mode() {
+                Mode::Search => self.search.list.results.refresh_kind().is_some(),
+                Mode::Commander => true,
+            }
+    }
+
+    /// The live refresh, the one rule for when a value on screen is read
+    /// again (DESIGN.md: Results list, Folder sizes). Every `LIVE_MS` the
+    /// window gives each shown list's rows on screen, `visible`, and this
+    /// reads their values again, so sizes, dates, counts and writes follow
+    /// the disk without `F5`; which rows a list holds, and their order,
+    /// change only with `F5`, `Ctrl+R`, a new search and a folder's watch.
+    ///
+    /// - Search's list reads the values of those rows from its result
+    ///   snapshot ([`super::results::Results::start_values`]). Sorted by
+    ///   Writes or Written, or before it has a result snapshot, it runs its
+    ///   search again, holding the list's place in `place`: the native
+    ///   selection's key, its rows and the focused row
+    ///   ([`Model::start_refresh`]).
+    /// - A folder panel on an indexed volume asks gozlerd for the entries
+    ///   on screen by name ([`Panels::ask_visible`]).
+    /// - A search panel reads nothing yet.
+    ///
+    /// Each request is a background one, which shows no wait and fails
+    /// silently, and none starts while the list's last one waits.
+    pub(crate) fn read_visible(
+        &mut self,
+        list: List,
+        visible: Range<u64>,
+        place: Option<(CaptureKey, RowSelection, Option<u64>)>,
+    ) -> Accepted {
+        match list {
+            List::Panel(side) if self.panels.search(side).is_none() => {
+                // gozlerd has no value for a folder on no indexed volume.
+                if self.status.is_none() || !self.indexes(side) {
+                    return Accepted::default();
+                }
+                let generation = self.generation();
+                let ask = self.panels.ask_visible(side, visible, generation);
+                Accepted {
+                    touched: Areas::NONE,
+                    effects: (ask.map(|ask| Effect::Fetch(Fetch { generation, ask })))
+                        .into_iter()
+                        .collect(),
+                }
+            }
+            List::Panel(_) => Accepted::default(),
+            List::Search => match self.search.list.results.refresh_kind() {
+                None => Accepted::default(),
+                Some(RefreshKind::Values) => self.start_values(visible),
+                Some(RefreshKind::Search) => match place {
+                    Some((key, selected, focused)) => self.start_refresh(key, selected, focused),
+                    None => Accepted::default(),
+                },
+            },
+        }
+    }
+
+    /// Reads the values of Search's rows `visible` again from its result
+    /// snapshot. Nothing while ended operations' rows are being kept or an
+    /// operation takes files, because a taken row shows as it was until the
+    /// next search.
+    fn start_values(&mut self, visible: Range<u64>) -> Accepted {
+        if self.search.list.is_keeping() || !self.panels.taken().is_empty() {
+            return Accepted::default();
+        }
+        let generation = self.generation();
+        let Some(ask) = self.search.list.results.start_values(generation, visible) else {
+            return Accepted::default();
+        };
+        Accepted {
+            touched: Areas::NONE,
+            effects: vec![Effect::Fetch(Fetch {
+                generation,
+                ask: Ask::Values(ask),
+            })],
+        }
+    }
+
+    /// A values read's chunks with the rows read again: the rows show their
+    /// new values in place, and the selected files among them take theirs,
+    /// so the inspector and the status bar show them too. A folder selected
+    /// alone keeps its counted contents.
+    fn accept_values(&mut self, generation: Generation, copies: Vec<CachedRows>) -> Accepted {
+        let shown = &mut self.search.list;
+        let Some((rows, read)) = shown.results.accept_values(generation, copies) else {
+            return Accepted::default();
+        };
+        // Only the rows read, and only for a selection that shows values.
+        let read: std::collections::HashMap<&str, &ResultItem> = match shown.selection {
+            Selection::Files(_) | Selection::Folder { .. } => read
+                .filter_map(|row| shown.results.row(row))
+                .map(|item| (item.path.as_str(), item))
+                .collect(),
+            _ => std::collections::HashMap::new(),
+        };
+        let selected = match &shown.selection {
+            Selection::Files(files)
+                if files.len() <= INLINE_ITEMS / 2
+                    && files
+                        .iter()
+                        .any(|file| read.contains_key(file.path.as_str())) =>
+            {
+                let files: Arc<[ResultItem]> = (files.iter())
+                    .map(|file| (*read.get(file.path.as_str()).unwrap_or(&file)).clone())
+                    .collect();
+                Some(Selection::Files(files))
+            }
+            _ => None,
+        };
+        let folder = match &shown.selection {
+            Selection::Folder { folder, .. } => {
+                read.get(folder.path.as_str()).map(|&item| item.clone())
+            }
+            _ => None,
+        };
+        let mut touched = Areas::list(List::Search);
+        if let Some(selection) = selected {
+            let Selection::Files(files) = &selection else {
+                unreachable!("the selection read again is files");
+            };
+            let sums = Sums::of(files);
+            shown.set_selection(selection);
+            shown.selection_sums = sums;
+            touched |= Areas::INSPECTOR | Areas::STATUS;
+        }
+        if let (Some(item), Selection::Folder { folder, .. }) = (folder, &mut shown.selection) {
+            *folder = item;
+            touched |= Areas::INSPECTOR;
+        }
+        Accepted {
+            touched,
+            effects: vec![
+                Effect::Redraw {
+                    list: List::Search,
+                    rows,
+                },
+                Effect::InspectAge,
+            ],
+        }
+    }
+
+    /// Runs Search's shown search again for a live refresh, holding the
+    /// list's place: `key` and `selected` are its native selection's key and
+    /// rows, and `focused` its focused row. Nothing while the selection is
+    /// being read, filtered or too large to find again by its files, while
+    /// ended operations' rows are being kept or an operation takes files,
+    /// because those passes name the shown rows; nor while the focused row
+    /// is not cached, so the focus is never lost.
+    ///
+    /// Nothing either while a selected or the focused row lies past the
+    /// first chunk, which is all a refresh reads, so it would lose them; or
+    /// while more than half of [`INLINE_ITEMS`] rows are selected: two such
+    /// selections differ on at most that many rows, which the list writes
+    /// one by one on the window's thread.
+    pub(crate) fn start_refresh(
+        &mut self,
+        key: CaptureKey,
+        selected: RowSelection,
+        focused: Option<u64>,
+    ) -> Accepted {
+        if selected.count > (INLINE_ITEMS / 2) as u64
+            || selected.positions.iter().any(|rows| rows.end > CHUNK_ROWS)
+            || focused.is_some_and(|row| row >= CHUNK_ROWS)
+        {
+            return Accepted::default();
+        }
+        let shown = &self.search.list;
+        let files: Arc<[ResultItem]> = match &shown.selection {
+            Selection::Reading { .. } | Selection::Filtering { .. } | Selection::TooMany(_) => {
+                return Accepted::default();
+            }
+            // The focused row alone is the selection: it selects no row.
+            _ if shown.chosen_by_focus => Arc::from(Vec::new()),
+            Selection::None => Arc::from(Vec::new()),
+            Selection::Files(files) => Arc::clone(files),
+            Selection::Folder { folder, .. } => Arc::from(vec![folder.clone()]),
+        };
+        if shown.is_keeping() || !self.panels.taken().is_empty() {
+            return Accepted::default();
+        }
+        let focused = match focused {
+            Some(row) => match shown.results.row(row) {
+                Some(item) => Some((row, item.path.clone())),
+                None => return Accepted::default(),
+            },
+            None => None,
+        };
+        let generation = self.generation();
+        let held = Held::new(key, selected.positions, focused, files);
+        let Some(ask) = self.search.list.results.start_refresh(generation, held) else {
+            return Accepted::default();
+        };
+        Accepted {
+            touched: Areas::NONE,
+            effects: vec![Effect::Fetch(Fetch {
+                generation,
+                ask: Ask::Refresh(ask),
+            })],
+        }
+    }
+
+    /// The pass that finds a live refresh's held place among its rows.
+    pub(crate) fn take_refresh(&mut self) -> Option<Remap> {
+        self.search.list.results.take_remap()
+    }
+
+    /// Shows a live refresh's rows, which `answer` found the held place on,
+    /// in place of the shown ones; the window then shows that place. A
+    /// refresh is a new moment of the search, as a new search is (window
+    /// rule 10), but its selection and focus stay on their files. The
+    /// selection takes its files' new values in place: a folder selected
+    /// alone keeps its counted contents, so nothing is read or counted
+    /// again and the inspector and the status bar keep showing values.
+    /// `None` when a newer search replaced the refresh.
+    pub(crate) fn accept_refresh(&mut self, answer: &Remapped) -> Option<Accepted> {
+        let shown = &mut self.search.list;
+        let count = shown.results.install_refresh(answer)?;
+        shown.reset_kept();
+        let (files, sums) = if shown.chosen_by_focus {
+            let focused: Arc<[ResultItem]> = (answer.focused)
+                .and_then(|row| shown.results.row(row))
+                .cloned()
+                .into_iter()
+                .collect();
+            let sums = Sums::of(&focused);
+            (focused, sums)
+        } else {
+            (Arc::clone(&answer.files), answer.sums)
+        };
+        let same_folder = matches!(
+            (&shown.selection, files.as_ref()),
+            (Selection::Folder { folder, .. }, [entry]) if entry.is_dir && entry.path == folder.path
+        );
+        let mut effects = if same_folder {
+            if let Selection::Folder { folder, .. } = &mut shown.selection {
+                folder.clone_from(&files[0]);
+            }
+            shown.selection_sums = sums;
+            Vec::new()
+        } else {
+            self.adopt_selection(List::Search, files, None, sums)
+        };
+        effects.extend([
+            Effect::Rows {
+                list: List::Search,
+                rows: 0..count,
+                count,
+            },
+            Effect::ReleaseOperations,
+            Effect::FetchVisible(List::Search),
+            Effect::InspectAge,
+            Effect::Polling,
+        ]);
+        Some(Accepted {
+            touched: Areas::list(List::Search) | Areas::INSPECTOR | Areas::STATUS | Areas::KEY_BAR,
+            effects,
+        })
+    }
+
+    /// Forgets a live refresh whose place the person changed meanwhile.
+    pub(crate) fn drop_refresh(&mut self) {
+        self.search.list.results.drop_refresh();
     }
 
     /// The search that `list`'s typed text and controls ask for, or the
@@ -1756,12 +2048,12 @@ impl Model {
             (Ok(search), None) => {
                 let generation = self.generation();
                 let sort = self.sort();
-                let writes = self.shows_writes();
+                let needs = self.needs();
                 let ask = self
                     .search
                     .list
                     .results
-                    .start_search(generation, search, sort, writes);
+                    .start_search(generation, search, sort, needs);
                 return {
                     let mut accepted = Accepted {
                         touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
@@ -1848,9 +2140,10 @@ impl Model {
                 Err(error) => ListMessage::Parse(error),
                 Ok(search) => {
                     let sort = panel.sort();
+                    let needs = panel.needs();
                     let generation = self.generation();
                     let shown = self.list_mut(list).expect("the panel searches");
-                    let ask = shown.results.start_search(generation, search, sort, false);
+                    let ask = shown.results.start_search(generation, search, sort, needs);
                     return {
                         let mut accepted = Accepted {
                             touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
@@ -1882,12 +2175,19 @@ impl Model {
             && panel
                 .search()
                 .is_some_and(|search| search.look_in == LookIn::ThisFolder)
-            && self.panel_folder(side).is_some_and(|folder| {
-                Coverage::of(self.volumes(), Some(folder), false)
-                    .volumes()
-                    .next()
-                    .is_none()
-            })
+            && !self.indexes(side)
+    }
+
+    /// Whether gozlerd indexes the volume of the folder of the panel on
+    /// `side`, as its real path is when a folder link leads there. A real
+    /// path not known yet counts as indexed, so gozlerd answers for it.
+    fn indexes(&self, side: Side) -> bool {
+        self.panel_folder(side).is_none_or(|folder| {
+            Coverage::of(self.volumes(), Some(folder), false)
+                .volumes()
+                .next()
+                .is_some()
+        })
     }
 
     /// Shows `message` in `list` instead of its rows, with nothing
@@ -1952,6 +2252,10 @@ impl Model {
                 touched: Areas::panel(side) | Areas::STATUS | Areas::KEY_BAR,
                 effects: vec![Effect::PreparePanel(side), Effect::FolderSizes(side)],
             },
+            Purpose::Refresh => {
+                self.search.list.results.end_refresh(Some(generation));
+                Accepted::default()
+            }
             _ => Accepted::default(),
         }
     }
@@ -2419,6 +2723,8 @@ impl Model {
                     want_created: plan.columns.contains(&EsColumn::DateCreated),
                     want_writes: plan.columns.contains(&EsColumn::Writes)
                         || plan.columns.contains(&EsColumn::Written),
+                    want_counts: plan.columns.contains(&EsColumn::Files)
+                        || plan.columns.contains(&EsColumn::Folders),
                     format: plan.result_format(),
                 }),
             })));
@@ -2837,12 +3143,36 @@ impl Model {
     pub(crate) fn accept(&mut self, fetched: Fetched) -> Accepted {
         let generation = fetched.generation;
         if !self.awaits(fetched.purpose, generation) {
+            if let (Purpose::Refresh, Outcome::Rows(chunk)) = (fetched.purpose, &fetched.outcome) {
+                self.search.list.results.keep_made(chunk.made);
+            }
             let items = fetched.outcome.items();
             self.retired.push(fetched, items);
             return Accepted::default();
         }
         match fetched.purpose {
             Purpose::Results(list) => self.accept_results(list, generation, fetched.outcome),
+            // A failed refresh shows nothing; the next tick tries again, and
+            // the status poll and `F5` report a service that stopped.
+            Purpose::Refresh => match fetched.outcome {
+                Outcome::Rows(_) => self.accept_results(List::Search, generation, fetched.outcome),
+                Outcome::Values(copies) => self.accept_values(generation, copies),
+                // The next tick searches again, holding the list's place,
+                // which makes a new result snapshot; a search as `F5` runs
+                // it would empty the selection and scroll to the top.
+                Outcome::ResultSnapshotGone => {
+                    let results = &mut self.search.list.results;
+                    results.end_refresh(Some(generation));
+                    results.forget_snapshot();
+                    Accepted::default()
+                }
+                outcome => {
+                    self.search.list.results.end_refresh(Some(generation));
+                    let items = outcome.items();
+                    self.retired.push(outcome, items);
+                    Accepted::default()
+                }
+            },
             Purpose::Status => self.accept_status(fetched.outcome),
             Purpose::Selection(list) => self.accept_selection(list, fetched.outcome),
             Purpose::Export => self.accept_export(fetched.outcome),
@@ -2966,6 +3296,10 @@ impl Model {
                             Effect::FetchVisible(list),
                             Effect::InspectAge,
                         ],
+                    },
+                    RowsChange::Refreshed => Accepted {
+                        touched: Areas::NONE,
+                        effects: vec![Effect::ListPasses],
                     },
                 };
                 // A page's flags cover every volume in scope, and the status
@@ -3407,8 +3741,8 @@ impl Model {
     }
 
     /// Records the state that `ui.json` saves and answers whether it
-    /// changed since the last call, so the window starts its save timer
-    /// once for each change (DESIGN.md: Where settings are saved). The
+    /// changed since the last call, so the window's save timer sees each
+    /// change once (DESIGN.md: Where settings are saved). The
     /// panels are compared in place, so nothing is copied unless they
     /// changed.
     pub(crate) fn saved_state_changed(&mut self) -> bool {
@@ -3478,11 +3812,13 @@ pub(crate) enum Column {
     Attributes,
     Writes,
     Written,
+    Files,
+    Folders,
 }
 
 impl Column {
     /// In View > Columns' order.
-    pub(crate) const ALL: [Column; 9] = [
+    pub(crate) const ALL: [Column; 11] = [
         Column::Name,
         Column::Path,
         Column::Size,
@@ -3492,6 +3828,8 @@ impl Column {
         Column::Attributes,
         Column::Writes,
         Column::Written,
+        Column::Files,
+        Column::Folders,
     ];
 
     /// Its facts, in one match, so a new column chooses each on purpose.
@@ -3609,6 +3947,31 @@ impl Column {
                 can_grow: false,
                 sort_key: Some(SortKey::Written),
                 export_column: Some(EsColumn::Written),
+            },
+            Column::Files => ColumnRow {
+                header: "header.files",
+                short_header: None,
+                menu_label: "column.files",
+                shown_by_default: false,
+                can_hide: true,
+                right_aligned: true,
+                can_shrink: false,
+                can_grow: false,
+                // The counts have no sort key.
+                sort_key: None,
+                export_column: Some(EsColumn::Files),
+            },
+            Column::Folders => ColumnRow {
+                header: "header.folders",
+                short_header: None,
+                menu_label: "column.folders",
+                shown_by_default: false,
+                can_hide: true,
+                right_aligned: true,
+                can_shrink: false,
+                can_grow: false,
+                sort_key: None,
+                export_column: Some(EsColumn::Folders),
             },
         }
     }
@@ -3729,7 +4092,7 @@ pub(crate) mod tests {
                     jiff::Timestamp::UNIX_EPOCH.to_zoned(jiff::tz::TimeZone::UTC),
                 ),
                 Column::Name,
-                row
+                row,
             )
             .full,
             "row1"
@@ -3745,8 +4108,8 @@ pub(crate) mod tests {
     }
 
     /// A change that no `Accepted` reports, such as the active panel, was
-    /// lost when the window ended without Exit; each change starts the save
-    /// timer once, so a burst of changes saves a second after the last.
+    /// lost when the window ended without Exit; each change is reported
+    /// once, so the window's save timer sees every change.
     #[test]
     fn each_change_of_the_saved_state_starts_one_save() {
         let mut model = model();
@@ -4238,7 +4601,7 @@ pub(crate) mod tests {
     /// The reply to `fetch`: its first rows of a search with `total` matches.
     pub(crate) fn rows(fetch: &Fetch, total: u64) -> Fetched {
         let start = match &fetch.ask {
-            Ask::Rows(_, ask) => ask.start,
+            Ask::Rows(_, ask) | Ask::Refresh(ask) => ask.start,
             other => panic!("a rows fetch: {other:?}"),
         };
         Fetched {
@@ -5085,6 +5448,35 @@ pub(crate) mod tests {
             .iter()
             .map(|f| f.path.as_str())
             .collect()
+    }
+
+    /// With nothing selected, the focused row is the selection, and it selects
+    /// no row; a live refresh that selected it would make Delete act on that
+    /// file after the person moved the focus on.
+    #[test]
+    fn a_refresh_of_a_focus_only_selection_selects_no_row() {
+        let mut model = showing(50);
+        model.set_selection(List::Search, Vec::<Range<u64>>::new().into(), Some(3));
+        let key = crate::core::selection::Capturing::default().key(50);
+        let started = model.start_refresh(key, Vec::<Range<u64>>::new().into(), Some(3));
+        let fetch = fetch_of(started);
+        model.accept(rows(&fetch, 50));
+        let answer = (model.take_refresh())
+            .expect("the rows wait for their place")
+            .run();
+        assert!(answer.selected.is_empty());
+        assert_eq!(answer.focused, Some(3));
+    }
+
+    /// A refresh reads only the first chunk, so it would not find rows
+    /// selected past it, and would drop them from the selection.
+    #[test]
+    fn a_selection_past_the_first_chunk_starts_no_refresh() {
+        let mut model = showing(50_000);
+        let key = crate::core::selection::Capturing::default().key(50_000);
+        let selected = vec![CHUNK_ROWS + 6..CHUNK_ROWS + 17].into();
+        let started = model.start_refresh(key, selected, Some(0));
+        assert_eq!(started, Accepted::default());
     }
 
     /// The cached rows are the files the person sees, so reading them again

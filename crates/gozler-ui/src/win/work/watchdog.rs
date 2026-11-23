@@ -7,7 +7,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
 use windows::Win32::System::Threading::{OpenThread, THREAD_QUERY_LIMITED_INFORMATION};
 use windows::Win32::System::WindowsProgramming::QueryThreadCycleTime;
@@ -21,18 +21,19 @@ pub(crate) struct Thread {
     _thread: JoinHandle<()>,
 }
 
-/// How many records of `ui-frames.log` can wait for the next write, at
-/// most one [`HEARTBEAT`] later; the presenter counts more as dropped.
+/// How many records of `ui-frames.log` can wait for the watchdog's thread to
+/// take them, at most one [`HEARTBEAT`] later; the presenter counts more as
+/// dropped.
 const FRAMES: usize = 256;
 
 impl Thread {
-    /// Starts the worker, which writes `path` and `ui-frames.log` beside it,
-    /// and gives the presenter of the calling window thread its channel.
+    /// Starts the worker. A debug build, except under test, also writes
+    /// `path` and `ui-frames.log` beside it, and gives the presenter of the
+    /// calling window thread its channel.
     pub(crate) fn start(delivery: Delivery, path: PathBuf) -> Self {
         let (stop, stopped) = sync_channel(1);
-        let (frames, records) = sync_channel(FRAMES);
-        crate::win::present::log_frames(frames);
-        let thread = super::spawn(move |worker| run(delivery, path, stopped, records, worker));
+        let logs = Logs::start(path);
+        let thread = super::spawn(move |worker| run(delivery, logs, stopped, worker));
         Self {
             stop: Some(stop),
             _thread: thread,
@@ -73,25 +74,68 @@ impl Drop for UiThread {
     }
 }
 
-fn run(
-    delivery: Delivery,
-    path: PathBuf,
-    stopped: Receiver<()>,
+/// How long frame records wait in memory for one append, unless a quarter
+/// of [`LOG_BYTES`] gathers first, so a debug build writes the file a few
+/// hundred times an hour, below the SSD wear alarm's default limit for one
+/// file.
+const FRAMES_EVERY: Duration = Duration::from_secs(10);
+
+/// The diagnostic logs of a debug build, which a release build and the
+/// tests never open.
+struct Logs {
+    stalls: Log,
+    frames: Log,
     records: Receiver<Frame>,
-    worker: &OffThread,
-) {
+    ticks: i64,
+    /// Frame lines not yet appended, since `appended`.
+    waiting: String,
+    appended: Instant,
+}
+
+impl Logs {
+    fn start(path: PathBuf) -> Option<Self> {
+        // A test's window keeps its settings file in the temporary folder,
+        // where nobody reads these logs and nothing removes them.
+        if !cfg!(debug_assertions) || cfg!(test) {
+            return None;
+        }
+        let (frames, records) = sync_channel(FRAMES);
+        crate::win::present::log_frames(frames);
+        Some(Self {
+            frames: Log {
+                path: path.with_file_name("ui-frames.log"),
+            },
+            stalls: Log { path },
+            records,
+            ticks: crate::win::present::ticks_per_second(),
+            waiting: String::new(),
+            appended: Instant::now(),
+        })
+    }
+
+    /// Takes the channel's records each heartbeat, so no more are dropped,
+    /// and appends them after [`FRAMES_EVERY`], or at once when `now`.
+    fn write_frames(&mut self, now: bool, worker: &OffThread) {
+        let ticks = self.ticks;
+        self.waiting
+            .extend(self.records.try_iter().map(|frame| frame.line(ticks)));
+        let due =
+            now || self.waiting.len() >= LOG_BYTES / 4 || self.appended.elapsed() >= FRAMES_EVERY;
+        if due && !self.waiting.is_empty() {
+            let _ = self.frames.append(self.waiting.as_bytes(), worker);
+            self.waiting.clear();
+            self.appended = Instant::now();
+        }
+    }
+}
+
+fn run(delivery: Delivery, mut logs: Option<Logs>, stopped: Receiver<()>, worker: &OffThread) {
     let thread = UiThread::open(delivery.thread_id, worker);
     let origin = Instant::now();
     let mut watchdog = Watchdog::default();
-    let frames = Log {
-        path: path.with_file_name("ui-frames.log"),
-    };
-    let ticks = crate::win::present::ticks_per_second();
-    let log = Log { path };
     loop {
-        let lines: String = records.try_iter().map(|frame| frame.line(ticks)).collect();
-        if !lines.is_empty() {
-            let _ = frames.append(lines.as_bytes(), worker);
+        if let Some(logs) = &mut logs {
+            logs.write_frames(false, worker);
         }
         if !matches!(
             stopped.try_recv(),
@@ -109,8 +153,8 @@ fn run(
                 watchdog.reset();
             } else {
                 watchdog.acknowledge(delivery.acknowledged());
-                if let Some(stall) = watchdog.overdue(now, cycles, context) {
-                    let _ = log.append(stall.line().as_bytes(), worker);
+                if let (Some(stall), Some(logs)) = (watchdog.overdue(now, cycles, context), &logs) {
+                    let _ = logs.stalls.append(stall.line().as_bytes(), worker);
                 }
             }
         } else {
@@ -120,6 +164,9 @@ fn run(
             Err(RecvTimeoutError::Timeout) => {}
             _ => break,
         }
+    }
+    if let Some(logs) = &mut logs {
+        logs.write_frames(true, worker);
     }
 }
 
@@ -161,10 +208,15 @@ impl Log {
             .write(true)
             .truncate(false)
             .open(&self.path)?;
-        // All processes reread the current tail under one lock; closing this
-        // handle releases it on both successful and failed updates.
+        // All processes append under one lock, which closing this handle
+        // releases on both successful and failed updates.
         file.lock()?;
         let length = file.seek(SeekFrom::End(0))?;
+        if length + line.len() as u64 <= 2 * LOG_BYTES as u64 {
+            return file.write_all(line);
+        }
+        // The file outgrew twice its bound: trim it to the newest bytes, so
+        // the rewrite happens once per `LOG_BYTES` of new records.
         file.seek(SeekFrom::Start(length.saturating_sub(LOG_BYTES as u64)))?;
         let mut bytes = Vec::with_capacity(LOG_BYTES);
         Read::by_ref(&mut file)
@@ -188,7 +240,7 @@ mod tests {
         let bytes = super::super::spawn(|worker| {
             let path = std::env::temp_dir()
                 .join(format!("gozler-watchdog-log-{}.txt", std::process::id()));
-            std::fs::write(&path, vec![b'x'; LOG_BYTES + 7]).unwrap();
+            std::fs::write(&path, vec![b'x'; 2 * LOG_BYTES + 7]).unwrap();
             let first = Log { path: path.clone() };
             let second = Log { path: path.clone() };
             first.append(b"window A first\n", worker).unwrap();
@@ -208,7 +260,8 @@ mod tests {
         .join()
         .unwrap();
         let lines = b"window A first\nwindow B\nwindow A last\n";
-        assert_eq!(bytes.len(), 65_536);
+        // The first append trims the file to `LOG_BYTES`; the rest append.
+        assert_eq!(bytes.len(), LOG_BYTES + lines.len() - 15);
         assert!(bytes.ends_with(lines));
         assert!(
             bytes[..bytes.len() - lines.len()]

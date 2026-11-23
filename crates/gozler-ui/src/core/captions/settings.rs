@@ -1,12 +1,14 @@
 use super::status::{JobCaption, StatusWidest, fix_status};
 use super::{CaptionTable, DialogItem, MessageButton, failure_text};
-use crate::core::fetch::{Beside, Local, ProgramFile, Programs};
+use crate::core::fetch::{Beside, DaemonFailure, Local, ProgramFile, Programs};
 use crate::core::glyph::Glyph;
 use crate::core::ids::ControlId;
 use crate::core::model::{Job, Model};
 use crate::core::results::{Fix, ListButton};
 use crate::core::settings::SettingsPage;
 use crate::core::text::{self, Numbers, Strings};
+use gozler_core::index::CREATED_ENTRY_BYTES;
+use gozler_core::proto::Disk;
 use gozler_core::types::{IndexProgress, VolumePhase};
 
 /// The groups of the Settings pages: each title, the static icon before it
@@ -73,6 +75,11 @@ pub(crate) const SETTINGS_GROUPS: &[(ControlId, ControlId, Glyph)] = &[
         Glyph::Processing,
     ),
     (
+        ControlId::SsdWearDisksGroup,
+        ControlId::SsdWearDisksGroupIcon,
+        Glyph::HardDrive,
+    ),
+    (
         ControlId::VisibilityGroup,
         ControlId::VisibilityGroupIcon,
         Glyph::People,
@@ -120,6 +127,9 @@ pub(crate) struct IndexCaptions {
     pub(crate) beside: ProgramLines,
     /// Why Use local is not offered, or empty.
     pub(crate) note: String,
+    /// The note under Dates created, with the memory it costs once the
+    /// service has told its entries.
+    pub(crate) dates_created_note: String,
     /// The Use local button, which shows before the fix's.
     pub(crate) use_local: Option<MessageButton>,
     pub(crate) fix: Option<MessageButton>,
@@ -193,6 +203,7 @@ impl IndexCaptions {
             service_program,
             beside,
             note,
+            dates_created_note: strings.text("settings_index.dates_created_note").to_owned(),
             ..IndexCaptions::default()
         };
         if let Some(failure) = failure {
@@ -272,8 +283,22 @@ impl IndexCaptions {
                 &[&text::bytes(strings, numbers, bytes)],
             ),
         };
+        let entries: u64 = status.volumes.iter().map(|volume| volume.entries).sum();
+        let dates_created_note = if entries == 0 {
+            files.dates_created_note.clone()
+        } else {
+            strings.format(
+                "settings_index.dates_created_note_size",
+                &[&text::bytes(
+                    strings,
+                    numbers,
+                    entries * CREATED_ENTRY_BYTES,
+                )],
+            )
+        };
         IndexCaptions {
             drives,
+            dates_created_note,
             service,
             use_local: model
                 .use_local_fix()
@@ -384,6 +409,69 @@ pub(crate) fn settings_job(
     }
 }
 
+/// Settings > SSD wear's disk list (DESIGN.md: The SSD wear page): one row
+/// for each disk that reports its wear or the bytes written to it, such as
+/// "Samsung SSD 990 PRO 2TB (C:, D:)", "4% used" and "34.9 TB written". A
+/// disk that reports neither has no row, and a value that a disk does not
+/// report leaves its cell empty.
+pub(crate) fn disk_rows(
+    strings: &Strings,
+    numbers: &dyn Numbers,
+    disks: &[Disk],
+) -> Vec<[String; 3]> {
+    let reporting = disks
+        .iter()
+        .filter(|disk| disk.used.is_some() || disk.written.is_some());
+    reporting
+        .map(|disk| {
+            let name = disk.model.clone().unwrap_or_else(|| {
+                let number = numbers.integer(u64::from(disk.number));
+                strings.format("settings_ssd_wear.disk", &[&number])
+            });
+            let name = with_mounts(strings, name, &disk.mounts);
+            let used = disk.used.map_or_else(String::new, |used| {
+                let used = numbers.integer(u64::from(used));
+                strings.format("settings_ssd_wear.used", &[&used])
+            });
+            let written = (disk.written)
+                .map_or_else(String::new, |bytes| text::bytes(strings, numbers, bytes));
+            [name, used, written]
+        })
+        .collect()
+}
+
+/// A disk's `name` with the drives on it, as `KXG50ZNV512G (C:, D:)`; a
+/// drive's `C:\` shows as `C:`, as File Explorer names a drive.
+pub(crate) fn with_mounts(strings: &Strings, name: String, mounts: &[String]) -> String {
+    if mounts.is_empty() {
+        return name;
+    }
+    let mounts: Vec<&str> = (mounts.iter())
+        .map(|mount| mount.strip_suffix('\\').unwrap_or(mount))
+        .collect();
+    let mounts = mounts.join(", ");
+    strings.format("settings_ssd_wear.disk_mounts", &[&name, &mounts])
+}
+
+/// What the disk list says while it has no row: "Waiting…" while the
+/// service has not answered (`health` is `None`), that no disk reports its
+/// health, that an older service cannot read the request, or the service's
+/// failure.
+pub(crate) fn disks_empty_text(
+    strings: &Strings,
+    health: Option<&Result<Vec<Disk>, DaemonFailure>>,
+) -> String {
+    match health {
+        None => crate::core::work::waiting(strings, None),
+        Some(Ok(_)) => strings.text("settings_ssd_wear.no_disks").to_owned(),
+        // A service that cannot read the request is older than the window.
+        Some(Err(DaemonFailure::TooOld { .. } | DaemonFailure::Unreadable { .. })) => {
+            strings.text("settings_ssd_wear.needs_newer").to_owned()
+        }
+        Some(Err(failure)) => failure_text(strings, failure),
+    }
+}
+
 /// Settings' work takes the space after its fixed unsaved-changes part.
 pub(crate) fn settings_status_widest(strings: &Strings) -> StatusWidest {
     let view = vec![settings_status_view(strings, true).to_owned()];
@@ -398,12 +486,33 @@ pub(crate) fn settings_status_widest(strings: &Strings) -> StatusWidest {
 
 #[cfg(test)]
 mod tests {
-    use super::{settings_page_hits, settings_pages_matching};
+    use super::{disk_rows, settings_page_hits, settings_pages_matching};
     use crate::core::captions::DialogCaptions;
     use crate::core::ids::ControlId;
     use crate::core::settings::SettingsPage;
-    use crate::core::text::tests::english;
+    use crate::core::text::tests::{English, english};
     use crate::core::text::{LANGUAGES, Strings};
+    use gozler_core::proto::Disk;
+
+    /// The owner's rule for the SSD wear page: a disk that reports neither
+    /// value has no row, and a disk that reports one value shows it with
+    /// the other cell empty. A row names its drives as File Explorer does.
+    #[test]
+    fn the_disk_list_shows_only_disks_that_report_a_value() {
+        let disk = |number, used, written| Disk {
+            number,
+            model: Some("SSD".into()),
+            mounts: vec![r"C:\".into(), r"D:\".into()],
+            bus: Some(17),
+            used,
+            written,
+            unread: None,
+        };
+        let disks = [disk(0, Some(4), None), disk(1, None, None)];
+        let rows = disk_rows(&english(), &English, &disks);
+        let expected = ["SSD (C:, D:)", "4%", ""].map(String::from);
+        assert_eq!(rows, [expected]);
+    }
 
     /// A search that matched inside a word would keep pages the person did
     /// not mean, and one that needed the words in order would drop pages

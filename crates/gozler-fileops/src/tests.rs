@@ -22,13 +22,13 @@ use crate::conflicts::{Rule, Run};
 use crate::copy::{Copied, Copying, Source, TargetVolume, copy};
 use crate::identity::Identity;
 use crate::io_threads::IoThreads;
-use crate::listing::LISTING_WORDS;
+use crate::listing::{FILES_PER_ITEM, LISTING_WORDS};
 use crate::names::Names;
 use crate::operation::{Found, Pause, Progress};
 use crate::place::Target;
 use crate::prepare::{Preparation, Work};
 use crate::receive::{receive, verbatim};
-use crate::ring_plan::Layout;
+use crate::ring_plan::{Layout, OVERLAPPED_FROM};
 use crate::saved::{self, Saved};
 use crate::totals::Index;
 use crate::volumes::{CopyPlan, VolumeClass};
@@ -745,12 +745,18 @@ fn delete_removes_a_whole_tree() {
     let scratch = Scratch::new("tree");
     let tree = scratch.path("tree");
     make_read_only(&scratch.file(r"tree\read-only.txt"));
-    let deep: PathBuf =
-        std::iter::repeat_n("a-folder-name-of-forty-characters-long-x", 8).collect();
+    // Eight different names: one name repeated would look like a folder
+    // copied into itself, which gozlerd's copy warning reports.
+    let deep: PathBuf = (0..8)
+        .map(|n| format!("a-folder-name-of-forty-characters-long-{n}"))
+        .collect();
     let long = scratch.file(Path::new("tree").join(deep).join("file.txt"));
     assert!(long.as_os_str().len() > 260);
     fs::create_dir_all(tree.join(r"empty\empty\empty")).expect("empty folders");
-    for i in 0..1000 {
+    // One file more than a work item holds, so two workers delete in one
+    // folder.
+    let many = FILES_PER_ITEM + 1;
+    for i in 0..many {
         scratch.file(format!(r"tree\many\{i}.txt"));
     }
     fs::create_dir(tree.join(r"many\empty")).expect("an empty subfolder");
@@ -761,7 +767,7 @@ fn delete_removes_a_whole_tree() {
     assert!(!tree.exists());
     // The files, the 8 long folders, `empty` three times, `many` and its
     // subfolder, and the tree.
-    assert_eq!(outcome.items, 2 + 1000 + 8 + 3 + 2 + 1);
+    assert_eq!(outcome.items, 2 + many as u64 + 8 + 3 + 2 + 1);
 }
 
 /// A delete starts at once and never waits for gozlerd's total (D5): it
@@ -1388,11 +1394,7 @@ fn identity(path: &Path) -> FileIdentity {
 /// are replaced on the Windows engine's workers.
 #[test]
 fn continue_replaces_an_interrupted_replace_in_place() {
-    let automatic = CopyPlan::new(
-        VolumeClass::Ssd,
-        &SpeedSettings::automatic(),
-        Layout::TwoDisks,
-    );
+    let automatic = CopyPlan::new(VolumeClass::Ssd, &small_blocks(), Layout::TwoDisks);
     // The ring takes an SSD's files from 1 MiB, so it runs in a first run
     // too.
     let ring = CopyPlan::new(VolumeClass::Ssd, &ring_settings(), Layout::TwoDisks);
@@ -1745,7 +1747,7 @@ fn modified(path: &Path) -> SystemTime {
 /// its first run started.
 fn save(scratch: &Scratch, request: &Request, choice: Option<Policy>, started: i64) {
     let request = with_policy(request.clone(), choice);
-    let saved = Saved::new(&request, started, &SpeedSettings::automatic()).expect("saved");
+    let saved = Saved::new(&request, started, &small_blocks()).expect("saved");
     let saved = if choice.is_none() {
         let mut legacy = serde_json::to_value(saved).unwrap();
         legacy.as_object_mut().unwrap().remove("choice");
@@ -1841,8 +1843,18 @@ fn continue_counts_the_bytes_of_done_files() {
     assert_eq!(counted, (3, 8, 4));
 }
 
-/// Automatic's ring block, which a resume between SSDs compares in.
-const BLOCK: usize = 8 * 1024 * 1024;
+/// The ring block of [`small_blocks`], which a resume between SSDs compares
+/// in: the smallest block for which a file of two blocks is still read
+/// overlapped, as a large file is, so the tests of a few blocks write as
+/// little to the disk as they can.
+const BLOCK: usize = OVERLAPPED_FROM as usize / 2;
+
+/// Automatic's settings with the SSD ring block at [`BLOCK`].
+fn small_blocks() -> SpeedSettings {
+    let mut settings = SpeedSettings::automatic();
+    settings.ring_ssd.block = RingBlock::from_bytes(BLOCK as u32).expect("in range");
+    settings
+}
 
 /// Continue resumes each file an interrupted run left at its final name,
 /// whatever the file holds now, and each ends byte for byte equal to its
@@ -1851,8 +1863,8 @@ const BLOCK: usize = 8 * 1024 * 1024;
 /// start, as writes that end out of order leave it, and a source that
 /// changed inside the start, grew or shrank since the crash. Each source's
 /// last write time is a day old, so no copy looks done. The settings are
-/// Automatic's, which give large files between SSDs to the Windows engine,
-/// so the ring runs only for the resume.
+/// [`small_blocks`], Automatic's, which give large files between SSDs to the
+/// Windows engine, so the ring runs only for the resume.
 #[test]
 fn continue_resumes_every_unfinished_file() {
     let scratch = Scratch::new("resume");
@@ -2010,11 +2022,7 @@ fn an_unfinished_file_is_resumed_whatever_the_choice() {
 /// source stays.
 #[test]
 fn a_continued_move_resumes_then_deletes_its_source() {
-    let plan = CopyPlan::new(
-        VolumeClass::Ssd,
-        &SpeedSettings::automatic(),
-        Layout::TwoDisks,
-    );
+    let plan = CopyPlan::new(VolumeClass::Ssd, &small_blocks(), Layout::TwoDisks);
     for locked in [false, true] {
         let scratch = Scratch::new("move-resume");
         let bytes = pattern(4, 2 * BLOCK + 10);
