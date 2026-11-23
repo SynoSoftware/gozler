@@ -157,14 +157,70 @@ pub(crate) fn shrink_vec<T>(v: &mut Vec<T>) {
     }
 }
 
-/// Makes room for `additional` more elements, growing by an eighth instead of
-/// `Vec`'s doubling: once live growth passes the headroom
-/// [`shrink_vec`] leaves, doubling would pin up to twice the column's size for
-/// the daemon's lifetime. Growth stays amortized O(1).
+/// The capacity a buffer of `len` elements grows to when it lacks room for
+/// `additional` more: an eighth more instead of `Vec`'s doubling, because
+/// once live growth passes the headroom [`shrink_vec`] leaves, doubling would
+/// pin up to twice the buffer's size for the daemon's lifetime. Growth stays
+/// amortized O(1).
+fn eighth_capacity(len: usize, additional: usize) -> usize {
+    len + additional.max(len / 8 + 64)
+}
+
+/// Makes room for `additional` more elements in place, to
+/// [`eighth_capacity`]. A journal batch normally finds the room made off the
+/// write lock ([`grown_vec`]), so this growth under the lock is the fallback
+/// for a batch that needs more than its [`super::volume::Room`] counted.
 fn reserve_eighth<T>(v: &mut Vec<T>, additional: usize) {
     if v.capacity() - v.len() < additional {
-        v.reserve_exact(additional.max(v.len() / 8 + 64));
+        v.reserve_exact(eighth_capacity(v.len(), additional) - v.len());
     }
+}
+
+/// A copy of `v` with room for `additional` more elements, at the capacity
+/// [`reserve_eighth`] would give it, made while searches keep reading.
+/// `None` when `v` has the room, or when the allocation fails: the batch then
+/// grows `v` in place, as it would without this copy.
+fn grown_vec<T: Copy>(v: &Vec<T>, additional: usize) -> Option<Vec<T>> {
+    if v.capacity() - v.len() >= additional {
+        return None;
+    }
+    let mut grown = Vec::new();
+    grown
+        .try_reserve_exact(eighth_capacity(v.len(), additional))
+        .ok()?;
+    grown.extend_from_slice(v);
+    Some(grown)
+}
+
+/// [`grown_vec`] for a hash map: a new map with room for `additional` more
+/// keys, built at that size and filled from `m`, so the rehash that the map
+/// would do on its next insert runs while searches keep reading.
+pub(crate) fn grown_map<K, V>(m: &FxHashMap<K, V>, additional: usize) -> Option<FxHashMap<K, V>>
+where
+    K: Clone + Eq + core::hash::Hash,
+    V: Clone,
+{
+    if m.capacity() - m.len() >= additional {
+        return None;
+    }
+    let mut grown = FxHashMap::default();
+    grown.try_reserve(m.len() + additional).ok()?;
+    grown.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+    Some(grown)
+}
+
+/// Grows the buffers of one part of the index, `S`, one buffer at a time,
+/// for `super::volume::make_room`. A trait, because each owner lists its
+/// buffers of many element types, and a closure cannot be generic over them.
+pub(crate) trait Grow<S> {
+    /// `grown` reads `S` while searches keep reading and returns a larger
+    /// copy of one buffer, or `None` when it has room; the copy then replaces
+    /// the buffer that `get_mut` names, under the exclusive lock.
+    fn buffer<B>(
+        &self,
+        grown: impl FnOnce(&S) -> Option<B>,
+        get_mut: impl FnOnce(&mut S) -> &mut B,
+    );
 }
 
 /// [`Vec::push`] that grows by [`reserve_eighth`].
@@ -371,15 +427,17 @@ impl NameStore {
     /// with [`Self::install_compacted`].
     pub(crate) fn plan_compact(&self, ranks: &NameRanks) -> CompactedNames {
         let live = self.refcount.iter().filter(|&&c| c > 0).count();
+        // With the headroom `shrink_vec` leaves, so the next new name does
+        // not grow every table at once.
         let mut c = CompactedNames {
-            raw: Vec::with_capacity(self.raw.len().saturating_sub(self.garbage)),
+            raw: Vec::with_capacity(with_headroom(self.raw.len().saturating_sub(self.garbage))),
             folded: Vec::with_capacity(self.folded.len()),
-            pairs: Vec::with_capacity(live),
-            refcount: Vec::with_capacity(live),
-            head: Vec::with_capacity(live),
-            by_bytes: hashbrown::HashTable::with_capacity(live),
+            pairs: Vec::with_capacity(with_headroom(live)),
+            refcount: Vec::with_capacity(with_headroom(live)),
+            head: Vec::with_capacity(with_headroom(live)),
+            by_bytes: hashbrown::HashTable::with_capacity(with_headroom(live)),
             ranks: NameRanks {
-                rank: Vec::with_capacity(live),
+                rank: Vec::with_capacity(with_headroom(live)),
                 by_rank: Vec::with_capacity(ranks.by_rank.len() - ranks.dead_ranked),
                 unranked: 0,
                 dead_ranked: 0,
@@ -425,19 +483,20 @@ impl NameStore {
 
     /// Installs storage built by [`Self::plan_compact`], returning the id
     /// remap (`remap[old_id]` = new id or [`NIL`]). The caller must rewrite
-    /// every entry's name id through it. Only buffer swaps. The plan is valid
-    /// only if the store has not changed since it was built (see
-    /// [`super::volume::VolumeIndex::plan_compaction`]).
-    pub(crate) fn install_compacted(&mut self, c: CompactedNames) -> Vec<NameId> {
-        self.raw = c.raw;
-        self.folded = c.folded;
-        self.pairs = c.pairs;
-        self.refcount = c.refcount;
-        self.head = c.head;
-        self.by_bytes = c.by_bytes;
+    /// every entry's name id through it. Only buffer swaps: `c` is left
+    /// holding the old storage, for the caller to free after the lock. The
+    /// plan is valid only if the store has not changed since it was built
+    /// (see [`super::volume::VolumeIndex::plan_compaction`]).
+    pub(crate) fn install_compacted(&mut self, c: &mut CompactedNames) -> Vec<NameId> {
+        std::mem::swap(&mut self.raw, &mut c.raw);
+        std::mem::swap(&mut self.folded, &mut c.folded);
+        std::mem::swap(&mut self.pairs, &mut c.pairs);
+        std::mem::swap(&mut self.refcount, &mut c.refcount);
+        std::mem::swap(&mut self.head, &mut c.head);
+        std::mem::swap(&mut self.by_bytes, &mut c.by_bytes);
+        std::mem::swap(&mut self.ranks, &mut c.ranks);
         self.garbage = 0;
-        self.ranks = c.ranks;
-        c.remap
+        std::mem::take(&mut c.remap)
     }
 
     /// Whether names added since the ranks were made, or ranked names that
@@ -506,11 +565,11 @@ impl NameStore {
         }
     }
 
-    /// Installs ranks built by [`Self::plan_ranks`]. Only buffer swaps. The
-    /// ranks are valid only if the store has not changed since they were
-    /// built.
-    pub(crate) fn install_ranks(&mut self, ranks: NameRanks) {
-        self.ranks = ranks;
+    /// Installs ranks built by [`Self::plan_ranks`] and returns the old
+    /// ones, for the caller to free after the lock. The ranks are valid only
+    /// if the store has not changed since they were built.
+    pub(crate) fn install_ranks(&mut self, ranks: NameRanks) -> NameRanks {
+        std::mem::replace(&mut self.ranks, ranks)
     }
 
     /// The ranks as they are, for a compaction that does not merge them.
@@ -605,6 +664,34 @@ impl NameStore {
             ..
         } = self;
         by_bytes.shrink_to_fit(|&id| hash_bytes(raw_bytes_in(pairs, raw, folded, id)));
+    }
+
+    /// Makes room through `grow` for `names` new names of `bytes` bytes in
+    /// all, each buffer that lacks it in turn, as [`Self::intern`] would grow
+    /// them.
+    pub(crate) fn grow_buffers(grow: &impl Grow<Self>, names: usize, bytes: usize) {
+        grow.buffer(|s| grown_vec(&s.raw, bytes), |s| &mut s.raw);
+        grow.buffer(|s| grown_vec(&s.folded, bytes), |s| &mut s.folded);
+        grow.buffer(|s| grown_vec(&s.pairs, names), |s| &mut s.pairs);
+        grow.buffer(|s| grown_vec(&s.refcount, names), |s| &mut s.refcount);
+        grow.buffer(|s| grown_vec(&s.head, names), |s| &mut s.head);
+        grow.buffer(|s| grown_vec(&s.ranks.rank, names), |s| &mut s.ranks.rank);
+        grow.buffer(|s| s.grown_intern_table(names), |s| &mut s.by_bytes);
+    }
+
+    /// A new intern table with room for `names` more, filled from
+    /// `by_bytes`, or `None` when it has the room or the allocation fails.
+    fn grown_intern_table(&self, names: usize) -> Option<hashbrown::HashTable<NameId>> {
+        if self.by_bytes.capacity() - self.by_bytes.len() >= names {
+            return None;
+        }
+        let hash = |&id: &NameId| hash_bytes(self.raw_bytes(id));
+        let mut grown = hashbrown::HashTable::new();
+        grown.try_reserve(self.by_bytes.len() + names, hash).ok()?;
+        for &id in self.by_bytes.iter() {
+            grown.insert_unique(hash(&id), id, hash);
+        }
+        Some(grown)
     }
 }
 
@@ -764,6 +851,14 @@ impl FrnColumn {
         match self {
             FrnColumn::Narrow(v) => compact_column(v, remap, live, |id| id),
             FrnColumn::Wide(v) => compact_column(v, remap, live, |id| id),
+        }
+    }
+
+    /// [`grown_vec`] of the column, of the same width.
+    fn grown(&self, additional: usize) -> Option<FrnColumn> {
+        match self {
+            FrnColumn::Narrow(v) => grown_vec(v, additional).map(FrnColumn::Narrow),
+            FrnColumn::Wide(v) => grown_vec(v, additional).map(FrnColumn::Wide),
         }
     }
 
@@ -1246,11 +1341,59 @@ impl EntryTable {
         shrink_vec(&mut self.descriptor);
         shrink_vec(&mut self.free);
     }
+
+    /// Makes room through `grow` for `entries` new entries, each column that
+    /// lacks it in turn, as [`Self::alloc`] would grow them. A new entry
+    /// takes a free slot first, so only the entries past the free slots need
+    /// room.
+    pub(crate) fn grow_buffers(grow: &impl Grow<Self>, entries: usize) {
+        let slots = |t: &Self| entries.saturating_sub(t.free.len());
+        grow.buffer(|t| t.frn.grown(slots(t)), |t| &mut t.frn);
+        grow.buffer(|t| grown_vec(&t.parent, slots(t)), |t| &mut t.parent);
+        grow.buffer(|t| grown_vec(&t.name_id, slots(t)), |t| &mut t.name_id);
+        grow.buffer(|t| grown_vec(&t.flags, slots(t)), |t| &mut t.flags);
+        grow.buffer(|t| grown_vec(&t.size, slots(t)), |t| &mut t.size);
+        grow.buffer(|t| grown_vec(&t.below, slots(t)), |t| &mut t.below);
+        grow.buffer(|t| grown_vec(&t.mtime, slots(t)), |t| &mut t.mtime);
+        grow.buffer(
+            |t| grown_vec(t.created.as_ref()?, slots(t)).map(Some),
+            |t| &mut t.created,
+        );
+        grow.buffer(
+            |t| grown_vec(&t.attributes, slots(t)),
+            |t| &mut t.attributes,
+        );
+        grow.buffer(|t| grown_vec(&t.next_link, slots(t)), |t| &mut t.next_link);
+        grow.buffer(|t| grown_vec(&t.next_same, slots(t)), |t| &mut t.next_same);
+        grow.buffer(|t| grown_vec(&t.prev_same, slots(t)), |t| &mut t.prev_same);
+        grow.buffer(
+            |t| grown_vec(&t.first_child, slots(t)),
+            |t| &mut t.first_child,
+        );
+        grow.buffer(
+            |t| grown_vec(&t.next_child, slots(t)),
+            |t| &mut t.next_child,
+        );
+        grow.buffer(
+            |t| grown_vec(&t.prev_child, slots(t)),
+            |t| &mut t.prev_child,
+        );
+        grow.buffer(
+            |t| grown_vec(&t.descriptor, slots(t)),
+            |t| &mut t.descriptor,
+        );
+    }
 }
 
 /// How many records past twice its length a dense [`FrnMap`] still grows to
 /// before [`FrnMap::set`] switches it to the sparse backing.
 const DENSE_GROWTH_SLACK: u64 = 1 << 16;
+
+/// Whether a dense [`FrnMap`] of `len` records grows to hold `record`, rather
+/// than switch to the sparse backing.
+fn dense_reaches(len: usize, record: u64) -> bool {
+    record <= len as u64 * 2 + DENSE_GROWTH_SLACK
+}
 
 /// Maps a file ID to its chain-head [`EntryIdx`].
 ///
@@ -1303,7 +1446,7 @@ impl FrnMap {
     pub(crate) fn set(&mut self, frn: Frn, idx: EntryIdx) {
         let record = frn.record_number();
         if let FrnMap::Dense(v) = self
-            && record > v.len() as u64 * 2 + DENSE_GROWTH_SLACK
+            && !dense_reaches(v.len(), record)
         {
             let records = v.iter().enumerate().filter(|&(_, &i)| i != NIL);
             *self = FrnMap::Sparse(records.map(|(r, &i)| (r as u64, i)).collect());
@@ -1323,6 +1466,24 @@ impl FrnMap {
             FrnMap::Wide(m) => {
                 m.insert(frn.0, idx);
             }
+        }
+    }
+
+    /// A larger copy of the map, with room for `keys` new keys, the highest
+    /// of record number `highest`, as [`Self::set`] would grow it; `None` when
+    /// the map has the room or the allocation fails. A record number that
+    /// [`Self::set`] would not store densely is left to it.
+    pub(crate) fn grown(&self, keys: usize, highest: u64) -> Option<FrnMap> {
+        match self {
+            FrnMap::Dense(v) => {
+                let record = usize::try_from(highest).ok()?;
+                if record < v.len() || !dense_reaches(v.len(), highest) {
+                    return None;
+                }
+                grown_vec(v, record + 1 - v.len()).map(FrnMap::Dense)
+            }
+            FrnMap::Sparse(m) => grown_map(m, keys).map(FrnMap::Sparse),
+            FrnMap::Wide(m) => grown_map(m, keys).map(FrnMap::Wide),
         }
     }
 

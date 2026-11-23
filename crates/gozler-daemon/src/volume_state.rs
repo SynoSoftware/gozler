@@ -21,8 +21,9 @@
 //!   [`VolumeState::begin_build`] reads the index the same way, before it
 //!   sets the phase.
 //! - Build facts change only with the index, in [`Building::finish`].
-//! - [`VolumeState::compact_index`] holds the only upgradable read, and
-//!   nothing else takes one, because an upgradable read queues behind another.
+//! - Only the tail thread takes an upgradable read, through
+//!   [`SharedIndex::replace`] (a compaction, and the room a journal batch
+//!   needs), because an upgradable read queues behind another.
 //!
 //! [`VolumeState::read`] reads the phase while it holds the index, and that
 //! phase describes that index: an index is swapped only while the phase is
@@ -36,8 +37,9 @@
 //! `Retired`, or when no tail ever started, and never while a start is
 //! pending. So the phase a writer last saw is the phase it moves from.
 
+use std::cell::Cell;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gozler_core::include::VolumeRules;
 use gozler_core::index::settle::SharedIndex;
@@ -304,30 +306,34 @@ impl VolumeState {
     ///
     /// The expensive half copies every live name into fresh arenas (hundreds
     /// of MB on a large volume), or sorts the unranked names and merges them
-    /// into the rank order, so it runs while queries keep reading. The
-    /// plan is valid only while the index does not change, and the upgradable
-    /// read keeps every writer out until it upgrades, so the plan cannot go
-    /// stale whoever else writes. The upgrade to exclusive covers only the
-    /// column writes.
+    /// into the rank order, so it runs while queries keep reading
+    /// ([`SharedIndex::replace`]). The exclusive lock covers only the column
+    /// writes, and the old arenas are freed after it.
     pub(crate) fn compact_index(&self) {
         let started = Instant::now();
-        let guard = self.indexed.upgradable_read();
-        let Some(plan) = guard.index.plan_compaction() else {
+        let (planned, blocked) = (Cell::new(Duration::ZERO), Cell::new(Duration::ZERO));
+        let compacted = self.replace(
+            |index| {
+                let plan = index.plan_compaction();
+                planned.set(started.elapsed());
+                plan
+            },
+            |index, plan| {
+                let old = index.apply_compaction(plan);
+                blocked.set(started.elapsed() - planned.get());
+                old
+            },
+        );
+        if !compacted {
             return; // raced with another compaction, or no longer worth it
-        };
-        let planned = started.elapsed();
-
-        let install_started = Instant::now();
-        let mut indexed = RwLockUpgradableReadGuard::upgrade(guard);
-        indexed.index.apply_compaction(plan);
-        drop(indexed);
+        }
 
         // `blocked_ms` is the only part that stops queries; `planned_ms` runs
         // alongside them.
         tracing::debug!(
             volume = %self.mount_prefix(),
-            planned_ms = planned.as_millis() as u64,
-            blocked_ms = install_started.elapsed().as_millis() as u64,
+            planned_ms = planned.get().as_millis() as u64,
+            blocked_ms = blocked.get().as_millis() as u64,
             "compacted the name store"
         );
     }
@@ -447,6 +453,24 @@ impl SharedIndex for VolumeState {
 
     fn write<R>(&self, f: impl FnOnce(&mut VolumeIndex) -> R) -> R {
         f(&mut self.index_mut())
+    }
+
+    /// The upgradable read lets searches read while `plan` runs and keeps
+    /// every writer out until it upgrades, so the plan cannot go stale.
+    fn replace<P, O>(
+        &self,
+        plan: impl FnOnce(&VolumeIndex) -> Option<P>,
+        install: impl FnOnce(&mut VolumeIndex, P) -> O,
+    ) -> bool {
+        let read = self.indexed.upgradable_read();
+        let Some(new) = plan(&read.index) else {
+            return false;
+        };
+        let mut indexed = RwLockUpgradableReadGuard::upgrade(read);
+        let old = install(&mut indexed.index, new);
+        drop(indexed);
+        drop(old);
+        true
     }
 }
 

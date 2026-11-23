@@ -30,10 +30,13 @@
 //! Every read of the volume happens with the index unlocked, because one read
 //! can block on a slow disk, and a lock held across it would stall every
 //! search on the volume. Each step applies what it read in one short
-//! [`SharedIndex::write`].
+//! [`SharedIndex::write`]. Before the batch and the walk's names are applied,
+//! [`make_room`] grows the storage they need while searches keep reading, so
+//! that write does not copy a column.
 
 use std::collections::{HashSet, VecDeque};
 
+use crate::index::volume::{Room, make_room};
 use crate::index::{Anomaly, ApplyOutcome, LinkTarget, VolumeIndex};
 use crate::layout::LayoutFile;
 use crate::types::Frn;
@@ -129,6 +132,17 @@ pub struct FileLink {
 pub trait SharedIndex {
     fn read<R>(&self, f: impl FnOnce(&VolumeIndex) -> R) -> R;
     fn write<R>(&self, f: impl FnOnce(&mut VolumeIndex) -> R) -> R;
+
+    /// Replaces part of the index, holding the exclusive lock only for the
+    /// swap. `plan` builds the replacement while searches keep reading and
+    /// no writer can change the index, so it stays valid; `install` swaps it
+    /// in under the exclusive lock and returns what it replaced, which is
+    /// dropped after the lock is released. Returns whether `plan` built one.
+    fn replace<P, O>(
+        &self,
+        plan: impl FnOnce(&VolumeIndex) -> Option<P>,
+        install: impl FnOnce(&mut VolumeIndex, P) -> O,
+    ) -> bool;
 }
 
 #[cfg(test)]
@@ -139,6 +153,18 @@ impl SharedIndex for std::cell::RefCell<VolumeIndex> {
 
     fn write<R>(&self, f: impl FnOnce(&mut VolumeIndex) -> R) -> R {
         f(&mut self.borrow_mut())
+    }
+
+    fn replace<P, O>(
+        &self,
+        plan: impl FnOnce(&VolumeIndex) -> Option<P>,
+        install: impl FnOnce(&mut VolumeIndex, P) -> O,
+    ) -> bool {
+        let Some(new) = plan(&self.borrow()) else {
+            return false;
+        };
+        install(&mut self.borrow_mut(), new);
+        true
     }
 }
 
@@ -256,6 +282,7 @@ pub fn settle_batch<R: VolumeReads>(
     batch: Batch<'_>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<Settled, WalkFailed<R::Error>> {
+    make_room(index, &Room::of(batch.records));
     let ApplyOutcome {
         needs_stat,
         needs_link_reconcile: mut relink,
@@ -326,6 +353,11 @@ pub fn settle_batch<R: VolumeReads>(
                 Listed::Folder { .. } => 0,
             })
             .sum();
+        let listed = events.iter().flat_map(|e| match e {
+            Listed::Page(files) => files.as_slice(),
+            Listed::Folder { .. } => &[],
+        });
+        make_room(index, &Room::of_listed(listed));
         index.write(|i| {
             for event in &events {
                 event.apply(i);
@@ -421,6 +453,7 @@ mod tests {
         Batch, FileLink, FileStat, Listed, VolumeReads, Walk, WalkFailed, settle_batch,
         walk_folders,
     };
+    use crate::index::volume::{Room, make_room};
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::layout::{LayoutFile, LayoutName};
     use crate::types::Frn;
@@ -748,5 +781,74 @@ mod tests {
 
         assert_eq!(paths(&index), set(&["a.txt"]));
         assert_eq!(index.borrow().stats().link_reconciles_dropped, 1);
+    }
+    /// After `make_room`, the batch grows no buffer under the write lock.
+    /// A buffer missing from an owner's list, or a `Room` that counts too
+    /// little, would grow it here, and the hold would copy it again. The
+    /// batch crosses every capacity: new folders, a parent the index lacks
+    /// (a placeholder), a record number past the dense FRN map's end, and
+    /// the dates created column.
+    #[test]
+    fn a_batch_after_make_room_grows_no_buffer() {
+        let creates: Vec<_> = (100..1_100)
+            .map(|n| (id(n), ROOT, format!("old_{n}"), n % 10 == 0))
+            .collect();
+        let creates: Vec<_> = creates
+            .iter()
+            .map(|(frn, parent, name, is_dir)| (*frn, *parent, name.as_str(), *is_dir))
+            .collect();
+        let index = index_of(&creates);
+        {
+            let mut i = index.borrow_mut();
+            i.keep_created(true);
+            i.optimize_storage();
+        }
+        // The accent makes the original-case bytes differ from the folded
+        // ones, so the raw arena needs room too.
+        let mut batch: Vec<_> = (2_000..2_400)
+            .map(|n| {
+                let name = format!("néw_{n}");
+                record(id(n), id(100), &name, n % 4 == 0, USN_REASON_FILE_CREATE)
+            })
+            .collect();
+        let orphan = record(
+            id(9_000),
+            id(8_000),
+            "orphan",
+            false,
+            USN_REASON_FILE_CREATE,
+        );
+        batch.push(orphan);
+        let allocated = |i: &VolumeIndex| {
+            let m = i.memory();
+            [
+                m.entries,
+                m.arena_raw,
+                m.arena_folded,
+                m.frn_map,
+                m.name_tables,
+                m.dir_children,
+            ]
+            .map(|component| component.allocated)
+        };
+        let before = allocated(&index.borrow());
+
+        make_room(&index, &Room::of(&batch));
+        let made = allocated(&index.borrow());
+        index.borrow_mut().apply_batch(&batch);
+
+        let after = allocated(&index.borrow());
+        assert!(
+            made.iter().zip(&before).all(|(made, before)| made > before),
+            "the batch needs room in every part: {before:?} -> {made:?}"
+        );
+        assert_eq!(after, made, "the batch grew a buffer under the lock");
+        let i = index.borrow();
+        assert_eq!(i.memory().frn_map_kind, "dense");
+        assert!(i.name_chains_match_rebuild());
+        assert!(i.child_chains_match_rebuild());
+        assert!(i.dir_index_matches_rebuild());
+        drop(i);
+        assert!(paths(&index).contains(r"old_100\néw_2399"));
     }
 }

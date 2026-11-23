@@ -26,9 +26,11 @@
 //!   user sees its entries by another folder's rights.
 
 use super::descriptors::{DescriptorTable, Listable, SeenBy};
+use super::settle::SharedIndex;
 use super::store::{
-    CompactedNames, ComponentBytes, Counts, EntryFlags, EntryTable, FrnMap, IdWidth, MTIME_UNKNOWN,
-    NameId, NamePair, NameRanks, NameStore, SIZE_UNKNOWN, hash_bytes, moved, shrink_vec,
+    CompactedNames, ComponentBytes, Counts, EntryFlags, EntryTable, FrnMap, Grow, IdWidth,
+    MTIME_UNKNOWN, NameId, NamePair, NameRanks, NameStore, SIZE_UNKNOWN, grown_map, hash_bytes,
+    moved, shrink_vec,
 };
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::fold::{fold, fold_accents};
@@ -36,7 +38,10 @@ use crate::include::VolumeRules;
 use crate::layout::LayoutFile;
 use crate::links::{FolderLink, ReparseTarget};
 use crate::types::{EntryIdx, Frn, NIL};
-use crate::usn::record::{FILE_ATTRIBUTE_REPARSE_POINT, USN_REASON_RENAME_NEW_NAME};
+use crate::usn::record::{
+    FILE_ATTRIBUTE_REPARSE_POINT, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
+    USN_REASON_RENAME_NEW_NAME,
+};
 use crate::usn::{ParsedUsnRecord, UsnOp, moves_folder_date, ops_for};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -78,6 +83,11 @@ pub(crate) const MAX_PATH_HOPS: usize = 4096;
 /// [`VolumeIndex::apply_compaction`] consumes it, so a plan can never be applied
 /// to an index it was not built from.
 pub struct CompactPlan(Compaction);
+
+/// The name storage that [`VolumeIndex::apply_compaction`] replaced. The
+/// caller drops it after it releases the lock, so the old buffers are freed
+/// while searches keep reading.
+pub struct Replaced(#[allow(dead_code)] Compaction);
 
 enum Compaction {
     /// New name arenas, which carry the ranks, merged when they were stale.
@@ -213,6 +223,125 @@ pub struct ApplyOutcome {
     /// [`VolumeIndex::plan_compaction`] off the write lock and then
     /// [`VolumeIndex::apply_compaction`].
     pub wants_compact: bool,
+}
+
+/// What a journal batch or a folder walk can add to the index, counted from
+/// its records before any lock is taken, for [`make_room`].
+#[derive(Debug, Default)]
+pub struct Room {
+    /// Each record that creates or renames can add its entry and a
+    /// placeholder for its folder.
+    entries: usize,
+    names: usize,
+    /// The names' bytes, each with its NUL.
+    name_bytes: usize,
+    folders: usize,
+    /// The highest record number among the records' files and folders.
+    highest: u64,
+}
+
+impl Room {
+    /// The room `records` can need. A record that neither creates nor
+    /// renames adds no entry and no name, and a delete removes one.
+    pub fn of(records: &[ParsedUsnRecord]) -> Room {
+        let mut room = Room::default();
+        for rec in records {
+            let adds = rec.reason & (USN_REASON_FILE_CREATE | USN_REASON_RENAME_NEW_NAME) != 0;
+            if adds && rec.reason & USN_REASON_FILE_DELETE == 0 {
+                room.add(rec.frn, rec.parent_frn, &rec.name, rec.is_dir());
+            }
+        }
+        room
+    }
+
+    /// The room that inserting the listed `files` can need
+    /// ([`VolumeIndex::insert_listed`]).
+    pub fn of_listed<'a>(files: impl IntoIterator<Item = &'a LayoutFile>) -> Room {
+        let mut room = Room::default();
+        for file in files {
+            if let Some(name) = file.names.first() {
+                room.add(file.frn, name.parent_frn, &name.name, file.is_dir());
+            }
+        }
+        room
+    }
+
+    fn add(&mut self, frn: Frn, folder: Frn, name: &[u8], is_dir: bool) {
+        if self.entries == 0 {
+            // The one name every placeholder shares.
+            self.names += 1;
+            self.name_bytes += PLACEHOLDER_NAME.len() + 1;
+        }
+        self.entries += 2;
+        self.names += 1;
+        self.name_bytes += name.len() + 1;
+        self.folders += usize::from(is_dir);
+        self.highest = self
+            .highest
+            .max(frn.record_number())
+            .max(folder.record_number());
+    }
+}
+
+/// Grows each buffer of `index` that lacks the room `room` counts, one
+/// buffer at a time through [`SharedIndex::replace`]: each copy is made while
+/// searches keep reading, and only its swap holds the exclusive lock. The
+/// batch applied next then finds the room. What `room` did not count, the
+/// batch still grows in place, under the lock.
+pub fn make_room(index: &impl SharedIndex, room: &Room) {
+    if room.entries == 0 {
+        return;
+    }
+    let names = Part {
+        index,
+        part: |i| &i.names,
+        part_mut: |i| &mut i.names,
+    };
+    NameStore::grow_buffers(&names, room.names, room.name_bytes);
+    let entries = Part {
+        index,
+        part: |i| &i.entries,
+        part_mut: |i| &mut i.entries,
+    };
+    EntryTable::grow_buffers(&entries, room.entries);
+    let whole = Part {
+        index,
+        part: |i| i,
+        part_mut: |i| i,
+    };
+    whole.buffer(
+        |i| i.by_frn.grown(room.entries, room.highest),
+        |i| &mut i.by_frn,
+    );
+    whole.buffer(
+        |i| grown_map(&i.dir_children, room.folders),
+        |i| &mut i.dir_children,
+    );
+}
+
+/// One part of the index, `S`, reached through the lock of `index`, so its
+/// owner can list its buffers for [`make_room`] without knowing the lock.
+struct Part<'a, I, S> {
+    index: &'a I,
+    part: fn(&VolumeIndex) -> &S,
+    part_mut: fn(&mut VolumeIndex) -> &mut S,
+}
+
+impl<I: SharedIndex, S> Grow<S> for Part<'_, I, S> {
+    fn buffer<B>(
+        &self,
+        grown: impl FnOnce(&S) -> Option<B>,
+        get_mut: impl FnOnce(&mut S) -> &mut B,
+    ) {
+        let (part, part_mut) = (self.part, self.part_mut);
+        self.index.replace(
+            |index| grown(part(index)),
+            |index, mut new| {
+                std::mem::swap(get_mut(part_mut(index)), &mut new);
+                new
+            },
+        );
+    }
 }
 
 /// Whether the index keeps a size for each folder yet, and whether that
@@ -1845,13 +1974,16 @@ impl VolumeIndex {
     /// reference), so the remap lookup always yields a live new id.
     ///
     /// This is the half that must hold the exclusive lock: buffer swaps and
-    /// column writes, no copying or hashing of names.
-    pub fn apply_compaction(&mut self, plan: CompactPlan) {
-        let compacted = match plan.0 {
+    /// column writes, no copying or hashing of names. Returns the storage it
+    /// replaced, for the caller to free after the lock.
+    pub fn apply_compaction(&mut self, plan: CompactPlan) -> Replaced {
+        let mut compacted = match plan.0 {
             Compaction::Arenas(compacted) => compacted,
-            Compaction::Ranks(ranks) => return self.names.install_ranks(ranks),
+            Compaction::Ranks(ranks) => {
+                return Replaced(Compaction::Ranks(self.names.install_ranks(ranks)));
+            }
         };
-        let remap = self.names.install_compacted(compacted);
+        let remap = self.names.install_compacted(&mut compacted);
         for idx in 0..self.entries.capacity() as EntryIdx {
             if self.entries.is_tombstone(idx) {
                 continue;
@@ -1860,6 +1992,7 @@ impl VolumeIndex {
             debug_assert_ne!(new_id, NIL, "live entry referenced a dead name id");
             self.entries.set_name_id(idx, new_id);
         }
+        Replaced(Compaction::Arenas(compacted))
     }
 
     /// Per-component heap accounting for this index. O(directories) for the

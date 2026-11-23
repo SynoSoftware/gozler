@@ -449,6 +449,7 @@ dependencies = [
  "jiff",
  "memchr",
  "mimalloc",
+ "parking_lot",
  "proptest",
  "rayon",
  "regex",

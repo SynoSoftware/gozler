@@ -17,6 +17,40 @@ pub(crate) fn criterion() -> Criterion<Measure> {
     Criterion::default().with_measurement(measure)
 }
 
+/// What [`Measure`] counts so far: the CPU cycles of this thread. The
+/// difference of two calls is a timing in the bench's unit.
+#[cfg(windows)]
+// The compact bench shares this module and reads neither function.
+#[allow(dead_code)]
+pub(crate) fn thread_cycles() -> u64 {
+    gozler_winfs::thread_cycles()
+}
+
+/// What [`Measure`] counts so far: the nanoseconds since the first call.
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub(crate) fn thread_cycles() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let start = START.get_or_init(std::time::Instant::now);
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// The process's private bytes, its commit charge.
+#[cfg(windows)]
+#[allow(dead_code)]
+pub(crate) fn private_bytes() -> u64 {
+    gozler_winfs::self_memory()
+        .expect("a process reads its own counters")
+        .private_bytes
+}
+
+/// 0, because only the Windows benches report memory.
+#[cfg(not(windows))]
+#[allow(dead_code)]
+pub(crate) fn private_bytes() -> u64 {
+    0
+}
+
 #[cfg(windows)]
 mod cycles {
     use criterion::Throughput;

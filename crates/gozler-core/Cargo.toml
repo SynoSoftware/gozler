@@ -28,6 +28,8 @@ jiff.workspace = true
 proptest.workspace = true
 criterion.workspace = true
 mimalloc = "0.1"
+# The growth bench measures the daemon's lock (benches/query.rs, `Locked`).
+parking_lot.workspace = true
 
 # The benches count CPU cycles on Windows (benches/measure).
 [target.'cfg(windows)'.dev-dependencies]

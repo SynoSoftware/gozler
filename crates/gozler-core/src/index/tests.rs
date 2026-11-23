@@ -2026,14 +2026,14 @@ proptest! {
                     exact = true;
                 }
                 NameChange::Compact => {
-                    let remap = names.install_compacted(names.plan_compact(names.ranks()));
+                    let remap = names.install_compacted(&mut names.plan_compact(names.ranks()));
                     for id in &mut held {
                         *id = remap[*id as usize];
                     }
                 }
                 NameChange::MergeAndCompact => {
                     let ranks = names.plan_ranks();
-                    let remap = names.install_compacted(names.plan_compact(&ranks));
+                    let remap = names.install_compacted(&mut names.plan_compact(&ranks));
                     for id in &mut held {
                         *id = remap[*id as usize];
                     }

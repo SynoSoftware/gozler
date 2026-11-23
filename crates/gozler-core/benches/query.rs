@@ -16,6 +16,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod measure;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use gozler_core::index::settle::SharedIndex;
+use gozler_core::index::volume::{Room, make_room};
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::links::{FolderLink, Links};
 use gozler_core::query::{
@@ -24,10 +26,14 @@ use gozler_core::query::{
 };
 use gozler_core::scope::VolumeMounts;
 use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
-use gozler_core::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
+use gozler_core::usn::record::{
+    FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_CLOSE, USN_REASON_FILE_CREATE,
+};
+use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use std::hint::black_box;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // Deep, long-named tree (WinSxS / node_modules-like) so path reconstruction pays
@@ -693,10 +699,220 @@ fn bench_folder_tree(c: &mut Criterion<measure::Measure>) {
     group.finish();
 }
 
+/// The longest write lock a journal batch holds when it grows the index's
+/// storage, measured in matched pairs over the same batches: "in lock" grows
+/// the buffers in the batch's hold, as `apply_batch` alone does, and "room"
+/// runs `make_room` first, as `settle_batch` does. Each batch also reports
+/// how far the commit charge rose above where it started. Runs only when the
+/// filter names `growth`, because it builds a volume of 2.6 million entries
+/// for each run and prints its own table: three pairs, then one pair with
+/// three threads searching the volume, which reports how long a search
+/// waits for the lock.
+fn bench_growth_hold(_: &mut Criterion<measure::Measure>) {
+    if !std::env::args().any(|arg| arg.contains("growth")) {
+        return;
+    }
+    let commit = CommitPeak::start();
+    for run in 0..3 {
+        for room in [false, true] {
+            growth_run(run, room, 0, &commit);
+        }
+    }
+    for room in [false, true] {
+        growth_run(3, room, 3, &commit);
+    }
+}
+
+/// One run of [`bench_growth_hold`]: 24 batches of 5,000 new files, with
+/// `make_room` before each batch when `room`, while `readers` threads search.
+fn growth_run(run: usize, room: bool, readers: u64, commit: &CommitPeak) {
+    const BATCH: u64 = 5_000;
+    const BATCHES: u64 = 24;
+    let (mut idx, _) = build_system_volume();
+    idx.optimize_storage();
+    let entries = idx.len();
+    let first = entries as u64 + 1_100;
+    let folder = frn(1000);
+    let locked = Locked {
+        index: RwLock::new(idx),
+        longest_swap: AtomicU64::new(0),
+    };
+    let (stop, waits) = (AtomicBool::new(false), Mutex::new(Vec::new()));
+    let series = std::thread::scope(|scope| {
+        for reader in 0..readers {
+            let (locked, stop, waits) = (&locked, &stop, &waits);
+            scope.spawn(move || {
+                // A rare needle scans the whole folded arena, as a search does.
+                let query = compiled("zqxjv");
+                std::thread::sleep(Duration::from_millis(reader * 3));
+                let mut mine = Vec::new();
+                while !stop.load(Relaxed) {
+                    let asked = Instant::now();
+                    let index = locked.index.read();
+                    mine.push(asked.elapsed());
+                    black_box(search_rows(&index, &query, None, Viewer::Everything));
+                }
+                waits.lock().expect("no reader panics").extend(mine);
+            });
+        }
+        let mut series = Vec::new();
+        for batch in 0..BATCHES {
+            let records: Vec<ParsedUsnRecord> = (0..BATCH)
+                .map(|n| {
+                    let file = batch * BATCH + n;
+                    ParsedUsnRecord {
+                        frn: frn(first + file),
+                        parent_frn: folder,
+                        reason: USN_REASON_FILE_CREATE | USN_REASON_CLOSE,
+                        attributes: 0,
+                        name: format!("grown_{file}.log").into_bytes(),
+                    }
+                })
+                .collect();
+            let start = commit.reset();
+            if room {
+                make_room(&locked, &Room::of(&records));
+            }
+            let hold = locked.write(|i| {
+                let cycles = measure::thread_cycles();
+                black_box(i.apply_batch(&records));
+                measure::thread_cycles() - cycles
+            });
+            series.push((hold, commit.peak().saturating_sub(start)));
+        }
+        stop.store(true, Relaxed);
+        series
+    });
+    let mut holds: Vec<u64> = series.iter().map(|s| s.0).collect();
+    holds.sort_unstable();
+    let (normal, worst) = (holds[holds.len() / 2], holds[holds.len() - 1]);
+    let commit_rise = series.iter().map(|s| s.1).max().expect("batches ran");
+    let path = if room { "room" } else { "in lock" };
+    eprintln!(
+        "growth run {run} {path}: {entries} entries, median batch {:.1} M cycles, worst {:.1} M = {:.2}x, longest swap {:.0} K cycles, highest commit rise {:.0} MB",
+        normal as f64 / 1e6,
+        worst as f64 / 1e6,
+        worst as f64 / normal as f64,
+        locked.longest_swap.load(Relaxed) as f64 / 1e3,
+        commit_rise as f64 / 1e6,
+    );
+    eprintln!(
+        "  per batch (M cycles / commit rise MB): {}",
+        series
+            .iter()
+            .map(|(c, m)| format!("{:.0}/{:.0}", *c as f64 / 1e6, *m as f64 / 1e6))
+            .collect::<Vec<_>>()
+            .join("  ")
+    );
+    let waits = waits.into_inner().expect("no reader panics");
+    if let Some(longest) = waits.iter().max() {
+        let over = waits
+            .iter()
+            .filter(|w| **w > Duration::from_millis(1))
+            .count();
+        eprintln!(
+            "  {readers} readers: {} searches, longest wait for the lock {:.1} ms, {over} waits over 1 ms",
+            waits.len(),
+            longest.as_secs_f64() * 1e3
+        );
+    }
+}
+
+/// The index behind the daemon's lock, with `replace` as `VolumeState` has
+/// it, and the longest swap that `replace` held the exclusive lock for.
+struct Locked {
+    index: RwLock<VolumeIndex>,
+    longest_swap: AtomicU64,
+}
+
+impl SharedIndex for Locked {
+    fn read<R>(&self, f: impl FnOnce(&VolumeIndex) -> R) -> R {
+        f(&self.index.read())
+    }
+
+    fn write<R>(&self, f: impl FnOnce(&mut VolumeIndex) -> R) -> R {
+        f(&mut self.index.write())
+    }
+
+    fn replace<P, O>(
+        &self,
+        plan: impl FnOnce(&VolumeIndex) -> Option<P>,
+        install: impl FnOnce(&mut VolumeIndex, P) -> O,
+    ) -> bool {
+        let read = self.index.upgradable_read();
+        let Some(new) = plan(&read) else {
+            return false;
+        };
+        let mut index = RwLockUpgradableReadGuard::upgrade(read);
+        let cycles = measure::thread_cycles();
+        let old = install(&mut index, new);
+        self.longest_swap
+            .fetch_max(measure::thread_cycles() - cycles, Relaxed);
+        drop(index);
+        drop(old);
+        true
+    }
+}
+
+/// The process's highest commit charge since the last [`Self::reset`], which
+/// a thread samples as fast as it can, because a batch's peak lasts only
+/// while it copies.
+struct CommitPeak {
+    peak: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    sampler: Option<std::thread::JoinHandle<()>>,
+}
+
+impl CommitPeak {
+    fn start() -> Self {
+        let (peak, stop) = (
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let sampler = {
+            let (peak, stop) = (Arc::clone(&peak), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(Relaxed) {
+                    peak.fetch_max(commit_now(), Relaxed);
+                }
+            })
+        };
+        CommitPeak {
+            peak,
+            stop,
+            sampler: Some(sampler),
+        }
+    }
+
+    /// Starts a new peak at the commit charge now, and returns it.
+    fn reset(&self) -> u64 {
+        let now = commit_now();
+        self.peak.store(now, Relaxed);
+        now
+    }
+
+    fn peak(&self) -> u64 {
+        self.peak.load(Relaxed).max(commit_now())
+    }
+}
+
+impl Drop for CommitPeak {
+    fn drop(&mut self) {
+        self.stop.store(true, Relaxed);
+        if let Some(sampler) = self.sampler.take() {
+            sampler.join().expect("the sampler does not panic");
+        }
+    }
+}
+
+fn commit_now() -> u64 {
+    measure::private_bytes()
+}
+
 criterion_group! {
     name = benches;
     config = measure::criterion();
     targets = bench_query, bench_linked_release, bench_folder_sizes, bench_sort_change,
-        bench_folder_tree
+        bench_folder_tree, bench_growth_hold
 }
 criterion_main!(benches);
