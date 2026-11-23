@@ -67,10 +67,19 @@ jobs:
       # GOZLER_RELEASE keeps the build date out of the version (gozler-core's
       # build.rs).
       - name: Build binaries and installer
+        id: setup
         shell: pwsh
         env:
           GOZLER_RELEASE: "1"
-        run: ./installer/Build.ps1 -Compiler $env:INNO_COMPILER
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          ./installer/Build.ps1 -Compiler $env:INNO_COMPILER
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "version=$($env:RELEASE_TAG.Substring(1))" >> $env:GITHUB_OUTPUT
+          $notes = "target/release-notes/gozler-$env:RELEASE_TAG.md"
+          if (Test-Path -LiteralPath $notes) {
+            "notes=$notes" >> $env:GITHUB_OUTPUT
+          }
 
       # Bundle the three programs with the license and readme into one archive
       # named after the tag, so the download is self-contained.
@@ -88,7 +97,9 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
-          generate_release_notes: true
+          name: Gozler ${{ steps.setup.outputs.version }}
+          body_path: ${{ steps.setup.outputs.notes }}
+          generate_release_notes: ${{ steps.setup.outputs.notes == '' }}
           files: |
             dist/*.zip
-            target/installer/*.exe
+            target/installer/gozler-${{ steps.setup.outputs.version }}-x64-Setup.exe

@@ -123,19 +123,13 @@ The built-in Text and Hex Viewer opens even multi-gigabyte files at once,
 without blocking other programs from writing to, renaming or deleting them.
 Press **F4** to switch between text and hex, and copy text with Ctrl+C.
 
-## Coming in the next release
-
-The current development version adds ordered word matching in the window:
-with Start of words, `para 50 mg` finds `paracetamol extra 500 tablets.mg`.
-It also shows concurrent jobs separately in the status bar, and lets you
-choose whether Commander selection masks include folders. Commander gains
-Total Commander's selection commands, such as Invert selection, Restore
-selection and Select same extension, its mask syntax and mask history, and
-saving a selection to a file and loading it from a file or the clipboard.
-These changes are not yet in the latest release.
-
 ## Recent releases
 
+- **[0.6.2](https://github.com/SynoSoftware/gozler/releases/tag/v0.6.2)** adds SSD
+  wear warnings, live file values, folder totals and Total Commander-style
+  selection commands.
+- **[0.6.1](https://github.com/SynoSoftware/gozler/releases/tag/v0.6.1)** adds
+  Multi-Rename, Compare by content and faster searches.
 - **[0.5.7](https://github.com/SynoSoftware/gozler/releases/tag/v0.5.7):**
   Search through junctions and folder symbolic links, faster path searches,
   F3 Viewer in Search, and shortcuts to switch between Search and Commander.

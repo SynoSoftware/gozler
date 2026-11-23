@@ -14,9 +14,9 @@ owner has run it, and file an issue for each item that fails.
   without administrator rights: Task Manager's Details page shows it with
   Elevated "No".
 - On an upgrade, the last page also offers "View what's new", unchecked.
-  With Launch cleared, selecting it opens the installed release notes even
-  offline. A fresh installation offers only Launch, and a silent installation
-  opens neither.
+  With Launch cleared, selecting it opens the installed release notes in
+  the default text editor, even offline. A fresh installation offers only
+  Launch, and a silent installation opens neither.
 - Against the installed `gozlerd`, `gozler ext:cs -n 3`,
   `gozler -get-result-count ext:cs`, `gozler --status` and
   `gozler -path X:\no-such-folder x` exit with the codes they gave before, and

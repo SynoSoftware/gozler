@@ -21,9 +21,6 @@ if (-not $Compiler) {
     if (-not $Compiler) { throw 'Inno Setup 7 was not found. Install it or pass -Compiler.' }
 }
 
-$process = Get-Process -Id $PID
-$priority = $process.PriorityClass
-$rustFlags = $env:RUSTFLAGS
 Push-Location (Split-Path $PSScriptRoot)
 try {
     # Each local run raises the patch version in Cargo.toml, so every setup it
@@ -45,22 +42,30 @@ try {
         Where-Object name -eq 'gozler-daemon'
     if (-not $package) { throw 'cargo metadata did not list gozler-daemon.' }
 
-    # Below normal, as in build.ps1, so the build does not slow interactive
-    # work. RUSTFLAGS would replace the static CRT flag in .cargo/config.toml,
-    # and the installed service would then need vcruntime140.dll.
-    $process.PriorityClass = 'BelowNormal'
-    $env:RUSTFLAGS = $null
-    cargo build --release --workspace
+    & (Join-Path (Get-Location) 'build.ps1') -Release
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & (Join-Path $PSScriptRoot 'Pair.ps1')
 
+    $version = [regex]::Escape($package.version)
+    $history = Get-Content -LiteralPath 'docs/WHATS-NEW.md' -Raw
+    $notes = [regex]::Match($history, "(?ms)^## Gozler ${version}[ \t]*\r?\n(.*?)(?=^## |\z)").Groups[1].Value.Trim()
+    $notesArgs = @()
+    if ($notes) {
+        $output = New-Item -ItemType Directory -Path 'target/release-notes' -Force
+        Set-Content -LiteralPath (Join-Path $output.FullName "gozler-v$($package.version).md") -Value $notes -Encoding utf8
+        $page = Join-Path $output.FullName 'WhatsNew.txt'
+        $plain = $notes -replace '(?m)^#{1,6} '
+        $plain = $plain -replace '`([^`\r\n]+)`|\*\*([^*\r\n]+)\*\*', '$1$2'
+        $plain = $plain -replace '\[([^\]\r\n]+)\]\((https?://[^)\s]+)\)', '$1 ($2)'
+        Set-Content -LiteralPath $page -Encoding utf8BOM -Value "Gozler $($package.version)`n`n$plain"
+        $notesArgs = @("/DWhatsNewFile=$page")
+    }
+
     # The first author, the company that develops gozler, is the publisher.
     & $Compiler /Qp "/DAppVersion=$($package.version)" "/DAppPublisher=$($package.authors[0])" `
-        "/DAppUrl=$($package.repository)" installer\Setup.iss
+        "/DAppUrl=$($package.repository)" @notesArgs installer\Setup.iss
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 finally {
-    $process.PriorityClass = $priority
-    $env:RUSTFLAGS = $rustFlags
     Pop-Location
 }

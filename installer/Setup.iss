@@ -6,6 +6,7 @@
 #endif
 
 #define AppName "Gozler"
+#define AppId "gozler"
 
 ; The service name, gozler_core::proto::SERVICE_NAME. It stays "gozler" across
 ; versions, and it is not "goz", the upstream service installed beside it.
@@ -23,7 +24,7 @@
 #define ExitCloses 1
 
 [Setup]
-AppId=gozler
+AppId={#AppId}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
@@ -62,6 +63,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 UninstallAppRunningError={#AppName} is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to stop uninstalling.
 
 [CustomMessages]
+WhatsNew=View what's new
 StartService=Starting the {#AppName} service...
 ServiceFailed=The {#AppName} service could not be installed (exit code %1). Search does not work until it runs. Run "gozlerd install" in an elevated terminal to retry.
 CleanupCaption=Keep or remove other programs
@@ -83,6 +85,9 @@ Source: "..\target\release\gozler.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\target\release\gozler-ui.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
+#ifdef WhatsNewFile
+Source: "{#WhatsNewFile}"; DestDir: "{app}"; Flags: ignoreversion
+#endif
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\gozler-ui.exe"
@@ -92,6 +97,9 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\gozler-ui.exe"
 ; so its settings, its sign-in entry and its File Explorer command are that
 ; person's.
 Filename: "{app}\gozler-ui.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: postinstall nowait skipifsilent runasoriginaluser
+#ifdef WhatsNewFile
+Filename: "{app}\WhatsNew.txt"; Description: "{cm:WhatsNew}"; Flags: postinstall shellexec skipifsilent unchecked runasoriginaluser; Check: IsUpgrade
+#endif
 
 [UninstallRun]
 Filename: "{app}\gozler-ui.exe"; Parameters: "--unregister-shortcut"; Flags: runhidden waituntilterminated; RunOnceId: "RestoreWindowsShortcut"
@@ -136,6 +144,16 @@ var
   // users who see every file.
   SeeEveryFilePage: TInputOptionWizardPage;
   SignedInUser: String;
+#ifdef WhatsNewFile
+  Upgrading: Boolean;
+#endif
+
+#ifdef WhatsNewFile
+function IsUpgrade: Boolean;
+begin
+  Result := Upgrading;
+end;
+#endif
 
 function NormalFolder(Folder: String): String;
 begin
@@ -389,6 +407,10 @@ procedure InitializeWizard;
 var
   Daemon: String;
 begin
+#ifdef WhatsNewFile
+  // Read the uninstall key before Setup writes it for this installation.
+  Upgrading := RegKeyExists(HKLM64, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1');
+#endif
   InstallFolder := ExpandConstant('{#AppFolder}');
   // Services first, so a folder that both a service and a PATH name keeps its
   // service.

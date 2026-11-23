@@ -51,6 +51,7 @@ function Invoke-CargoStep {
 $process = Get-Process -Id $PID
 $priority = $process.PriorityClass
 $rustdocFlags = $env:RUSTDOCFLAGS
+$rustFlags = $env:RUSTFLAGS
 Push-Location $PSScriptRoot
 try {
     $process.PriorityClass = 'BelowNormal'
@@ -75,6 +76,9 @@ try {
     }
     elseif ($Release) {
         $features = if ($Pseudo) { @('--features', 'gozler-ui/pseudo-language') } else { @() }
+        # RUSTFLAGS would replace the static CRT flag in .cargo/config.toml, and
+        # the installed service would then need vcruntime140.dll.
+        $env:RUSTFLAGS = $null
         Invoke-Cargo build --release --workspace @features
     }
     elseif ($Bench) {
@@ -105,5 +109,6 @@ finally {
     # Restored because a caller in the same session keeps this process.
     $process.PriorityClass = $priority
     $env:RUSTDOCFLAGS = $rustdocFlags
+    $env:RUSTFLAGS = $rustFlags
     Pop-Location
 }
