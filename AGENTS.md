@@ -3,7 +3,7 @@
 gozler finds files instantly on Windows NTFS and ReFS volumes, and its window
 copies, moves and deletes them at full speed. An elevated daemon (`gozlerd`)
 indexes the MFT, or walks a ReFS volume's folders, and serves queries over
-`\\.\pipe\gozler-v1` to an `es.exe`-compatible client (`gozler`) and to the
+`\\.\pipe\gozler-v1` to a command-line client (`gozler`) and to the
 window (`gozler-ui`). The window's engine (`gozler-fileops`) does the file
 work with the person's own permissions. Each crate's `lib.rs` or `main.rs`
 opens with a doc comment that explains its design; read it before you change
@@ -34,13 +34,18 @@ that you cannot responsibly resolve yourself.
 
 ## Everything and es.exe
 
-**Owner ruling: Everything is a reference, not a target.** gozler keeps
-es.exe's command line for existing scripts (see "The command line" under
-"Contracts"), but adds nothing only because Everything, es.exe or upstream
-goz has it. When Everything has a feature that helps a gozler user, or does
-something better than gozler, weigh it on that merit. gozler already does
-several things better, and copying another product for compatibility alone
-would bind gozler to that product's decisions.
+**Owner ruling: Everything is inspiration, not compatibility.** gozler takes
+an option name, a query term or a behavior from Everything, es.exe or
+upstream goz when it serves a gozler user, and does better wherever it can.
+It already departs often: it shows colored help, and run without arguments it
+prints a short help instead of every file. Compatibility with another
+product is never a reason by itself.
+
+**Owner ruling: an early decision is not a contract.** gozler is work in
+progress, and the owner is its only user. When a decision made before the
+case was foreseen gives a worse result, do the better thing in the change at
+hand and update `docs/DESIGN.md` and the help with it. This is not a reason
+to refactor beyond the change: leave sound decisions alone.
 
 ## The window
 
@@ -369,12 +374,9 @@ superset plan built a feature about every 25 minutes and the ReFS plan landed
   there is a deliberate choice, and the same change adds it to that list.
   Platform code stays out of it, and Win32 calls go through `gozler-winfs`,
   which depends on no other workspace crate (`deny.toml`).
-- **The command line.** Scripts written for Everything or for goz v0.2.0 change
-  only the program name, to `gozler`: every option keeps its name and purpose,
-  and gozler's own options start with `--`. The "Command line" and "Exit
-  codes" sections of `docs/DESIGN.md` say where gozler departs from `es.exe`
-  and why, such as the exit codes, the CSV columns and the default result
-  limit. The rules live in `gozler_core::escompat` (arguments, exit codes and
+- **The command line.** The "Command line" and "Exit codes" sections of
+  `docs/DESIGN.md` say what each option, output and exit code means. They
+  change in the same change as the code and the help. The rules live in `gozler_core::escompat` (arguments, exit codes and
   the help), `gozler_core::output::table` (output rows),
   `gozler_core::query::parse` (query syntax) and `gozler-cli`'s
   `failure.rs` (which failure exits with which code) and `main.rs` (the
