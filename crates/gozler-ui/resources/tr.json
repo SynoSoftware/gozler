@@ -1114,6 +1114,7 @@
     "save_kept": "Kaydedilen metin aynı klasördeki {0} dosyasında.",
     "cannot_encode": "{0}, {1} kodlamasının içeremediği karakterler içeriyor; bu yüzden kaydedilmedi.",
     "cannot_encode_character": "{0}, {1} kodlamasının içeremediği karakterler içeriyor ({3}. satırdaki {2} gibi); bu yüzden kaydedilmedi.",
+    "withheld": "{0} de kaydedilmedi; iki dosya birlikte kaydedilir.",
     "unsaved": "Değişiklikleriniz kaydedilmedi.",
     "tool_failed": "{0} başlatılamadı. {1} Dosya > Ayarlar > Bağlam menüsü bölümündeki karşılaştırma aracını denetleyin.",
     "next": "So&nraki",

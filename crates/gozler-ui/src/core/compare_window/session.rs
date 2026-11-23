@@ -276,7 +276,9 @@ pub(crate) enum Answer {
 pub(crate) struct SaveFile {
     pub(crate) side: Side,
     pub(crate) path: Vec<u16>,
-    pub(crate) bytes: Vec<u8>,
+    /// The side's text when the person answered, which the worker encodes;
+    /// typing meanwhile changes the session's copy.
+    pub(crate) text: Arc<Text>,
 }
 
 /// A file that a save wrote, or failed to write.
@@ -444,9 +446,20 @@ pub(crate) enum Event {
 #[derive(Clone, Copy, Debug, Default)]
 struct Batch {
     marks: [Option<u64>; 2],
+    /// Each side that the answer let go, which loses its changes only once
+    /// the save succeeds, so a save that fails loses nothing.
+    discards: [Option<Discard>; 2],
     /// The sides swapped since the worker took the files, so its results
     /// name the other side.
     flipped: bool,
+}
+
+/// A side's changes after `after`, through `through`, that an answer let
+/// go.
+#[derive(Clone, Copy, Debug)]
+struct Discard {
+    after: Option<u64>,
+    through: u64,
 }
 
 #[derive(Debug, Default)]
@@ -469,11 +482,20 @@ impl Saves {
         marks
     }
 
-    fn start(&mut self, marks: [Option<u64>; 2], files: Vec<SaveFile>, effects: &mut Vec<Effect>) {
-        let batch = Batch {
-            marks,
-            flipped: false,
-        };
+    /// The last change of each side that an answer let go while a save
+    /// runs, which the question no longer asks about.
+    fn discarding(&self) -> [Option<u64>; 2] {
+        let mut marks = [None, None];
+        let batches = (self.running.iter()).chain(self.waiting.iter().map(|(batch, _)| batch));
+        for batch in batches {
+            for (mark, discard) in marks.iter_mut().zip(batch.discards) {
+                *mark = (*mark).max(discard.map(|discard| discard.through));
+            }
+        }
+        marks
+    }
+
+    fn start(&mut self, batch: Batch, files: Vec<SaveFile>, effects: &mut Vec<Effect>) {
         if self.running.is_some() {
             self.waiting.push_back((batch, files));
         } else {
@@ -485,10 +507,12 @@ impl Saves {
     fn swap(&mut self) {
         if let Some(batch) = &mut self.running {
             batch.marks.swap(0, 1);
+            batch.discards.swap(0, 1);
             batch.flipped = !batch.flipped;
         }
         for (batch, files) in &mut self.waiting {
             batch.marks.swap(0, 1);
+            batch.discards.swap(0, 1);
             for file in files {
                 file.side = file.side.other();
             }
@@ -1090,12 +1114,15 @@ impl Session {
         }
     }
 
-    /// The sides with changes that no save writes.
+    /// The sides with changes that no save writes and no answer let go.
     fn unsaved(&self) -> Vec<Side> {
-        let writing = self.saves.writing();
+        let (writing, discarding) = (self.saves.writing(), self.saves.discarding());
         Side::BOTH
             .into_iter()
-            .filter(|side| self.history.changed_after(*side, writing[side.index()]))
+            .filter(|side| {
+                let answered = writing[side.index()].max(discarding[side.index()]);
+                self.history.changed_after(*side, answered)
+            })
             .collect()
     }
 
@@ -1160,19 +1187,34 @@ impl Session {
             Answer::DontSave => Vec::new(),
             Answer::Save(files) => files.iter().map(|file| file.side).collect(),
         };
-        if asking.then != Then::Stay {
-            for &side in asking.sides.iter().filter(|side| !saved.contains(*side)) {
-                self.revert_after(side, asking.marks[side.index()]);
+        // The sides that the answer lets go; Save's own question lets none.
+        let let_go: Vec<Side> = (asking.sides.iter().copied())
+            .filter(|side| asking.then != Then::Stay && !saved.contains(side))
+            .collect();
+        match answer {
+            Answer::Save(files) => {
+                let last = |side: Side, kept: &[Side]| {
+                    kept.contains(&side)
+                        .then(|| self.history.last(side))
+                        .flatten()
+                };
+                let batch = Batch {
+                    marks: Side::BOTH.map(|side| last(side, &saved)),
+                    discards: Side::BOTH.map(|side| {
+                        Some(Discard {
+                            after: asking.marks[side.index()],
+                            through: last(side, &let_go)?,
+                        })
+                    }),
+                    flipped: false,
+                };
+                self.saves.start(batch, files, effects);
             }
-        }
-        if let Answer::Save(files) = answer {
-            let marks = Side::BOTH.map(|side| {
-                saved
-                    .contains(&side)
-                    .then(|| self.history.last(side))
-                    .flatten()
-            });
-            self.saves.start(marks, files, effects);
+            Answer::DontSave | Answer::Cancel => {
+                for side in let_go {
+                    self.revert_after(side, asking.marks[side.index()]);
+                }
+            }
         }
         // The question can come while an earlier request waits for a save.
         let then = match self.after.take() {
@@ -1223,6 +1265,20 @@ impl Session {
                 effects.push(Effect::Renamed(side));
             }
         }
+        if !failed {
+            let writing = self.saves.writing();
+            for side in Side::BOTH {
+                // A side changed since the answer, or that a later answer
+                // saves, keeps its changes, which the question asks about
+                // again.
+                if let Some(discard) = batch.discards[side.index()]
+                    && self.history.last(side) == Some(discard.through)
+                    && writing[side.index()].is_none_or(|mark| mark < discard.through)
+                {
+                    self.revert_after(side, discard.after);
+                }
+            }
+        }
         if let Some((batch, files)) = self.saves.waiting.pop_front() {
             self.saves.running = Some(batch);
             effects.push(Effect::Save(files));
@@ -1259,19 +1315,6 @@ mod tests {
     fn lines_of(picks: &[u8]) -> Vec<String> {
         (picks.iter())
             .map(|pick| ["", "a", "b", "ab"][usize::from(*pick % 4)].to_owned())
-            .collect()
-    }
-
-    fn bytes_of(lines: &[String]) -> Vec<u8> {
-        (lines.iter())
-            .flat_map(|line| line.bytes().chain(*b"\n"))
-            .collect()
-    }
-
-    fn lines_from(bytes: &[u8]) -> Vec<String> {
-        String::from_utf8_lossy(bytes)
-            .split_terminator('\n')
-            .map(str::to_owned)
             .collect()
     }
 
@@ -1616,7 +1659,7 @@ mod tests {
                 .into_iter()
                 .map(|file| {
                     if !fail {
-                        self.disk.insert(file.path.clone(), lines_from(&file.bytes));
+                        self.disk.insert(file.path.clone(), file.text.lines.clone());
                     }
                     SavedFile {
                         side: file.side,
@@ -1649,11 +1692,11 @@ mod tests {
                             } else {
                                 showing.paths()[side.index()].clone()
                             };
-                            let text = showing.text(side).expect("changes are in Text");
+                            let texts = showing.texts().expect("changes are in Text");
                             SaveFile {
                                 side,
                                 path,
-                                bytes: bytes_of(&text.lines),
+                                text: Arc::clone(&texts[side.index()]),
                             }
                         })
                         .collect();
@@ -1829,6 +1872,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// With both sides changed, Close answered with Save left lets the
+    /// right side's changes go only once the left side saves, so a save
+    /// that fails, as one that cannot be encoded does, loses nothing
+    /// (reported defect).
+    #[test]
+    fn a_failed_save_keeps_the_changes_that_the_answer_let_go() {
+        let save_left_and_close = |world: &mut World, fail: bool| {
+            world.step(Step::Close);
+            assert_eq!(world.question, Some(Side::BOTH.to_vec()));
+            // The fifth choice saves the first side asked about.
+            world.step(Step::Answer(4));
+            world.step(Step::FinishSave { fail });
+            world.check();
+        };
+        let mut world = World::new(lines_of(&[1]), lines_of(&[2]));
+        world.step(Step::FinishJob { fail: false });
+        world.step(Step::Command(CompareCommand::EditMode));
+        for side in Side::BOTH {
+            world.step(Step::Type {
+                side,
+                at: 0,
+                key: 0,
+            });
+        }
+        save_left_and_close(&mut world, true);
+        assert!(!world.closed, "a failed save keeps the window open");
+        assert_eq!(world.session.unsaved(), Side::BOTH.to_vec());
+        save_left_and_close(&mut world, false);
+        assert!(
+            world.closed,
+            "the right side's changes went once the left side saved"
+        );
     }
 
     proptest! {

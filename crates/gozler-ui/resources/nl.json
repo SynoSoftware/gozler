@@ -1114,6 +1114,7 @@
     "save_kept": "De opgeslagen tekst staat in {0}, in dezelfde map.",
     "cannot_encode": "{0} bevat tekens die {1} niet kan bevatten, dus het is niet opgeslagen.",
     "cannot_encode_character": "{0} bevat tekens die {1} niet kan bevatten, zoals {2} in regel {3}, dus het is niet opgeslagen.",
+    "withheld": "{0} is ook niet opgeslagen, omdat de twee bestanden samen worden opgeslagen.",
     "unsaved": "Uw wijzigingen zijn niet opgeslagen.",
     "tool_failed": "Kan {0} niet starten. {1} Controleer het vergelijkingsprogramma in Bestand > Instellingen > Snelmenu.",
     "next": "Vol&gende",

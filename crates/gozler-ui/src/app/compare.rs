@@ -10,7 +10,7 @@ use super::dialogs::ViewerFind;
 use super::work::CopyNotice;
 pub(super) use super::work::compare::Source;
 use super::work::compare::{
-    Find, Found, Job, Look, Options, Outcome, Progress, Rendering, Saved, Searched, retire,
+    Find, Found, Job, Look, Options, Outcome, Progress, Rendering, Saved, Searched, Unsaved, retire,
 };
 use crate::core::captions::{DialogCaptions, button_glyph};
 use crate::core::clipboard::folder_of;
@@ -29,7 +29,6 @@ use crate::core::layout::{Dpi, Px, Rect, Size, WHEEL_DELTA, image_button_width};
 use crate::core::panel::Side;
 use crate::core::settings::{CompareState, Placement};
 use crate::core::text::{self, Numbers as _, Strings};
-use crate::core::viewer::Encoding;
 use crate::core::viewer::Mode;
 use crate::core::viewer::find::Query;
 use crate::win::compare::{RichText, SIDE_SCROLLED, palette, rtf_font};
@@ -38,7 +37,7 @@ use crate::win::controls::{
 };
 use crate::win::dialog::{DialogEnd, choose, error_box, info_box, run_modal};
 use crate::win::gdi::{Font, TextMeter};
-use crate::win::locale::{WindowsNumbers, code_page_encoded};
+use crate::win::locale::WindowsNumbers;
 use crate::win::menu::Menu;
 use crate::win::notify::Command;
 use crate::win::shell::{FileType, accept_files, pick_file, save_dialog};
@@ -1804,7 +1803,8 @@ impl CompareWindow {
     }
 
     /// The parts of `row` that differ, as the sides mark them; `texts` are
-    /// the two sides' text of the row, which the list shows.
+    /// the two sides' text of the row, which the list shows and only Hex
+    /// reads.
     fn row_marks(&self, row: usize, texts: &[String; 2]) -> [Vec<std::ops::Range<usize>>; 2] {
         let session = self.session.borrow();
         let Some(showing) = session.showing() else {
@@ -2108,25 +2108,24 @@ impl CompareWindow {
         let selection = control.selection();
         let row = control.row_of(selection.start);
         let column = selection.start - control.row_start(row).unwrap_or(0).min(selection.start);
-        let count =
-            (self.session.borrow().showing()).map_or(0, |showing| showing.view().rows.rows.len());
+        let (count, hex) = (self.session.borrow().showing()).map_or((0, false), |showing| {
+            (showing.view().rows.rows.len(), showing.mode() == Mode::Hex)
+        });
         let marks_of = |row: usize| {
-            // Rows that do not differ have no marks, and reading their text
-            // first would cost every row the search passes.
-            let differs = (self.session.borrow().showing())
-                .and_then(|showing| {
-                    showing
-                        .view()
-                        .rows
-                        .rows
-                        .get(row)
-                        .map(|shown| shown.differs())
-                })
-                .unwrap_or(false);
-            if !differs {
+            // Only a row that differs and holds a line of `side` can have
+            // marks there.
+            let marked = (self.session.borrow().showing())
+                .and_then(|showing| showing.view().rows.rows.get(row))
+                .is_some_and(|shown| shown.differs() && shown.line(side).is_some());
+            if !marked {
                 return Vec::new();
             }
-            let texts = c.sides().map(|side| side.row_text(row));
+            // Text marks the session's lines, so only Hex reads the controls.
+            let texts = if hex {
+                c.sides().map(|side| side.row_text(row))
+            } else {
+                [String::new(), String::new()]
+            };
             let [left, right] = self.row_marks(row, &texts);
             match side {
                 Side::Left => left,
@@ -2461,61 +2460,29 @@ impl CompareWindow {
         };
         let mut files = Vec::new();
         for &side in saved {
-            let path = if index % 2 == 1 {
+            let chosen = if index % 2 == 1 {
                 match self.save_as(hwnd, side) {
-                    Some(path) => path,
+                    Some(path) => Some(path),
                     None => return Answer::Cancel,
                 }
             } else {
-                let session = self.session.borrow();
-                let Some(showing) = session.showing() else {
-                    continue;
-                };
-                showing.paths()[side.index()].clone()
+                None
             };
-            match self.encoded(side) {
-                Ok(bytes) => files.push(SaveFile { side, path, bytes }),
-                Err(text) => {
-                    error_box(Some(hwnd), &text, &title);
-                    return Answer::Cancel;
-                }
-            }
+            let session = self.session.borrow();
+            let Some((showing, texts)) =
+                (session.showing()).and_then(|showing| Some((showing, showing.texts()?)))
+            else {
+                return Answer::Cancel;
+            };
+            // The save's worker encodes the text, so the window's thread
+            // does not wait in proportion to a side.
+            files.push(SaveFile {
+                side,
+                path: chosen.unwrap_or_else(|| showing.paths()[side.index()].clone()),
+                text: Arc::clone(&texts[side.index()]),
+            });
         }
         Answer::Save(files)
-    }
-
-    /// The bytes that Save writes for `side`, or why it cannot.
-    fn encoded(&self, side: Side) -> Result<Vec<u8>, String> {
-        let session = self.session.borrow();
-        let showing = session.showing();
-        let Some((showing, text)) =
-            showing.and_then(|showing| Some((showing, showing.text(side)?)))
-        else {
-            return Err(String::new());
-        };
-        compare::encoded(&text.lines, text.form, &code_page_encoded).ok_or_else(|| {
-            let strings = self.strings.borrow();
-            let (name, encoding) = (showing.name(side), text.form.encoding.name());
-            // Only a code page can lack a character.
-            let first = match text.form.encoding {
-                Encoding::CodePage(page) => {
-                    compare::first_unencodable(&text.lines, page, &code_page_encoded)
-                }
-                _ => None,
-            };
-            match first {
-                Some((line, character)) => strings.format(
-                    "compare.cannot_encode_character",
-                    &[
-                        &name,
-                        encoding,
-                        &character.to_string(),
-                        &self.numbers.borrow().integer(line as u64 + 1),
-                    ],
-                ),
-                None => strings.format("compare.cannot_encode", &[&name, encoding]),
-            }
-        })
     }
 
     /// Save as… for `side`: the file the person chose. The dialog opens in
@@ -2571,23 +2538,43 @@ impl CompareWindow {
         for (side, path, failure) in failures {
             let text = {
                 let strings = self.strings.borrow();
-                let text = strings.format(
-                    "compare.save_failed",
-                    &[&name_of(&path), &win::error_text(&failure.error)],
-                );
-                let next = match failure.kept.as_ref().and_then(|kept| kept.file_name()) {
-                    Some(kept) => strings.format("compare.save_kept", &[&kept.to_string_lossy()]),
-                    // Save's question offers Save as… for the side.
-                    None => {
-                        let save_as = match side {
-                            Side::Left => "compare.save_left_as",
-                            Side::Right => "compare.save_right_as",
+                let name = name_of(&path);
+                match failure {
+                    Unsaved::Withheld => strings.format("compare.withheld", &[&name]),
+                    Unsaved::Unencodable { encoding, first } => match first {
+                        Some((line, character)) => strings.format(
+                            "compare.cannot_encode_character",
+                            &[
+                                &name,
+                                encoding.name(),
+                                &character.to_string(),
+                                &self.numbers.borrow().integer(line as u64 + 1),
+                            ],
+                        ),
+                        None => strings.format("compare.cannot_encode", &[&name, encoding.name()]),
+                    },
+                    Unsaved::Write(failure) => {
+                        let text = strings.format(
+                            "compare.save_failed",
+                            &[&name, &win::error_text(&failure.error)],
+                        );
+                        let next = match failure.kept.as_ref().and_then(|kept| kept.file_name()) {
+                            Some(kept) => {
+                                strings.format("compare.save_kept", &[&kept.to_string_lossy()])
+                            }
+                            // Save's question offers Save as… for the side.
+                            None => {
+                                let save_as = match side {
+                                    Side::Left => "compare.save_left_as",
+                                    Side::Right => "compare.save_right_as",
+                                };
+                                let choice = text::without_access_key(strings.text(save_as));
+                                strings.format("compare.save_elsewhere", &[&choice])
+                            }
                         };
-                        let choice = text::without_access_key(strings.text(save_as));
-                        strings.format("compare.save_elsewhere", &[&choice])
+                        format!("{text} {next}")
                     }
-                };
-                format!("{text} {next}")
+                }
             };
             error_box(Some(hwnd), &text, &title);
         }

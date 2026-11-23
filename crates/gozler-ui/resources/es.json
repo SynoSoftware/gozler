@@ -1114,6 +1114,7 @@
     "save_kept": "El texto guardado está en {0}, en la misma carpeta.",
     "cannot_encode": "{0} tiene caracteres que {1} no admite, así que no se guardó.",
     "cannot_encode_character": "{0} tiene caracteres que {1} no admite, como {2} en la línea {3}, así que no se guardó.",
+    "withheld": "{0} tampoco se guardó, porque los dos archivos se guardan juntos.",
     "unsaved": "Tus cambios no se han guardado.",
     "tool_failed": "No se pudo iniciar {0}. {1} Revisa la herramienta de comparación en Archivo > Configuración > Menú contextual.",
     "next": "&Siguiente",

@@ -1114,6 +1114,7 @@
     "save_kept": "The saved text is in {0}, in the same folder.",
     "cannot_encode": "{0} has characters that {1} can't hold, so it wasn't saved.",
     "cannot_encode_character": "{0} has characters that {1} can't hold, such as {2} in line {3}, so it wasn't saved.",
+    "withheld": "{0} wasn't saved either, because the two files save together.",
     "unsaved": "Your changes aren't saved.",
     "tool_failed": "Couldn't start {0}. {1} Check the comparison tool in File > Settings > Context menu.",
     "next": "Ne&xt",

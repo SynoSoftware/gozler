@@ -9,6 +9,9 @@
 
 pub(crate) mod diff;
 pub(crate) mod rtf;
+// Windows only, because the timings count the thread's cycles.
+#[cfg(all(test, windows))]
+mod timing;
 
 use super::open::Selected;
 use super::panel::Side;
@@ -30,8 +33,8 @@ pub(crate) const LINES_LIMIT: u64 = 32 << 20;
 pub(crate) const LINE_COUNT_LIMIT: usize = 1_000_000;
 
 /// Edit mode works for files up to this many bytes, because an edit while
-/// the worker builds the rows copies the side's lines on the window's
-/// thread (issue #160).
+/// the worker holds the side's lines, to build the rows, find or encode a
+/// save, copies them on the window's thread (issue #160).
 pub(crate) const EDIT_LIMIT: u64 = 4 << 20;
 
 /// The most rows that show: a RichEdit holds every row in memory and lays

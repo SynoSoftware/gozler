@@ -170,7 +170,21 @@ pub(in crate::app) struct Rendering {
 }
 
 /// Each file that Save wrote, or why not.
-pub(in crate::app) type Saved = Vec<(Side, Vec<u16>, Result<(), SaveFailure>)>;
+pub(in crate::app) type Saved = Vec<(Side, Vec<u16>, Result<(), Unsaved>)>;
+
+/// Why Save did not write a file.
+pub(in crate::app) enum Unsaved {
+    /// The file's code page cannot hold a character of its text: the first
+    /// one, with the index of its line, when a single character fails.
+    Unencodable {
+        encoding: Encoding,
+        first: Option<(usize, char)>,
+    },
+    /// Another file of the same save could not be encoded, so none was
+    /// written.
+    Withheld,
+    Write(SaveFailure),
+}
 
 /// What Find reads besides the rows that show.
 pub(in crate::app) enum Searched {
@@ -886,12 +900,41 @@ fn search(find: Find, worker: &OffThread, cancel: &CancelToken) -> Found {
     Found::Nothing
 }
 
+/// Encodes every file, then writes them, unless one cannot be encoded: the
+/// person asked for them together. The texts are dropped before the writes,
+/// because typing while the worker holds a side's text copies it on the
+/// window's thread.
 fn save(files: Vec<SaveFile>, worker: &OffThread, _cancel: &CancelToken) -> Saved {
-    files
+    let encoded: Vec<_> = (files.into_iter())
+        .map(|file| (file.side, file.path, encode(&file.text)))
+        .collect();
+    let refused = encoded.iter().any(|(_, _, bytes)| bytes.is_err());
+    encoded
         .into_iter()
-        .map(|file| {
-            let saved = save_file(&file.path, &file.bytes, worker);
-            (file.side, file.path, saved)
+        .map(|(side, path, bytes)| {
+            let saved = match bytes {
+                Ok(_) if refused => Err(Unsaved::Withheld),
+                Ok(bytes) => save_file(&path, &bytes, worker).map_err(Unsaved::Write),
+                Err(unencodable) => Err(unencodable),
+            };
+            (side, path, saved)
         })
         .collect()
+}
+
+/// The bytes that Save writes for `text`.
+fn encode(text: &Text) -> Result<Vec<u8>, Unsaved> {
+    compare::encoded(&text.lines, text.form, &code_page_encoded).ok_or_else(|| {
+        // Only a code page can lack a character.
+        let first = match text.form.encoding {
+            Encoding::CodePage(page) => {
+                compare::first_unencodable(&text.lines, page, &code_page_encoded)
+            }
+            _ => None,
+        };
+        Unsaved::Unencodable {
+            encoding: text.form.encoding,
+            first,
+        }
+    })
 }
