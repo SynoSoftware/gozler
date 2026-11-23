@@ -380,16 +380,15 @@ async fn handle_connection(
             let encoder = tokio::task::spawn_blocking(move || {
                 // A failed send means the receiver is gone (client vanished or
                 // write error): stop encoding.
-                serve(
-                    &vols,
-                    &include,
-                    &snapshots,
-                    &user,
-                    &access,
-                    decoded,
-                    &stopped,
-                    &mut |reply| tx.blocking_send(reply).is_ok(),
-                );
+                Serving {
+                    volumes: &vols,
+                    include: &include,
+                    snapshots: &snapshots,
+                    user: &user,
+                    stop: &stopped,
+                    emit: &mut |reply| tx.blocking_send(reply).is_ok(),
+                }
+                .serve(&access, decoded);
                 match access {
                     Access::Refused(Refusal::Unidentified(error)) => Some(error),
                     _ => None,
@@ -460,302 +459,12 @@ async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Res
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "client stopped reading"))?
 }
 
-/// Answers one request, as [`decode_request`] decoded its frame, from a
-/// client running as `user`, with what `access` lets it see, handing each
-/// framed reply to `emit` as soon as it is encoded. `emit` returning `false`
-/// means the client is gone; encoding stops. `stop` set means the same, and
-/// stops a search before its first reply.
-///
-/// `Hello`, `Status` and `SettingsSaved` answer every client, because they
-/// show no name; `Status` also tells the client what it sees. A request
-/// that reads the index's entries is refused when gozlerd cannot tell who
-/// sent it, and the Include count answers only a user who sees every file:
-/// its folder and name rules over the whole index would let any other user
-/// count hidden entries until the counts spell their names.
-///
-/// A request from a newer client may hold parts this daemon cannot read:
-/// the reply names the skipped parts in [`Response::Skipped`] before the
-/// answer, or refuses the request with [`ProtoError::UnknownRequest`].
-#[allow(clippy::too_many_arguments)]
-fn serve(
-    volumes: &VolumeSet,
-    include: &Include,
-    snapshots: &Snapshots,
-    user: &[u8],
-    access: &Access,
-    decoded: Result<Decoded, DecodeError>,
-    stop: &AtomicBool,
-    emit: &mut dyn FnMut(Vec<u8>) -> bool,
-) {
-    let Decoded { request, skipped } = match decoded {
-        Ok(decoded) => decoded,
-        Err(DecodeError::Unknown(part)) => {
-            return reply(
-                emit,
-                Response::Error {
-                    code: ProtoError::UnknownRequest,
-                    message: part,
-                },
-            );
-        }
-        Err(error) => return reply(emit, refusal(error.to_string())),
-    };
-    let request = match request {
-        Request::Hello {
-            proto_min,
-            proto_max,
-            ..
-        } => return reply(emit, hello(volumes, proto_min, proto_max)),
-        Request::Status { links_held } => {
-            let mut status = build_status(volumes, include, snapshots, access.caller_sees());
-            if let (Some(held), Access::Sees(visibility)) = (links_held, access) {
-                let links = folder_links(volumes, visibility.viewer());
-                status.links = (links.fingerprint() != held).then_some(links);
-            }
-            return reply(emit, Response::Status(status));
-        }
-        Request::SettingsSaved => {
-            include.reload();
-            return reply(emit, Response::SettingsApplied);
-        }
-        request => request,
-    };
-    let viewer = match access {
-        Access::Sees(visibility) => visibility.viewer(),
-        Access::Refused(refused) => return reply(emit, unsupported(refused.message())),
-    };
-    if !skipped.is_empty() {
-        reply(emit, Response::Skipped { parts: skipped });
-    }
-    let search = match request {
-        Request::Search(search) => search,
-        Request::CountIncluded(settings) => {
-            return reply(
-                emit,
-                match viewer {
-                    Viewer::Everything => Response::IncludedCount {
-                        entries: count_included(volumes, &settings),
-                    },
-                    Viewer::Filtered(_) => unsupported(
-                        "only a user who sees every file can count what the Include settings keep",
-                    ),
-                },
-            );
-        }
-        Request::ResultSnapshotRows(read) => {
-            return read_snapshot(volumes, snapshots, &read, viewer, emit);
-        }
-        Request::SortResultSnapshot(sort) => {
-            return sort_snapshot(volumes, snapshots, user, &sort, viewer, stop, emit);
-        }
-        Request::Hello { .. } | Request::Status { .. } | Request::SettingsSaved => {
-            unreachable!("answered before the client's access is taken")
-        }
-    };
-    if let Err(off) = include.applied().allows(&search.query) {
-        return reply(emit, refusal(off.to_string()));
-    }
-    let scope = search.scope.as_deref();
-    let links = folder_links(volumes, viewer);
-    let query = match CompiledQuery::with_links(&search.query, &links, scope) {
-        Ok(query) => query,
-        Err(e) => return reply(emit, refusal(e.to_string())),
-    };
-    // In `VolumeSet` order, the order every request takes the volumes' locks
-    // in.
-    let targets = volumes.to_vec();
-    match search.returns {
-        Returns::Rows(wanted) => {
-            match ResultRows::search(targets, &query, scope, wanted.spec(), viewer, stop) {
-                Ok(rows) => stream_rows(rows, &wanted, emit),
-                Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
-            }
-        }
-        Returns::Totals => reply(emit, totals(targets, &query, scope, viewer, stop)),
-        Returns::ResultSnapshot { rows, replaces } => {
-            let every_row = RowsSpec {
-                offset: 0,
-                limit: None,
-                ..rows.spec()
-            };
-            match ResultRows::search(targets, &query, scope, every_row, viewer, stop) {
-                // A stopped search is short and no one reads it, so it must
-                // not take the place of the user's last result snapshot.
-                Ok(_) if stop.load(Ordering::Relaxed) => {}
-                Ok(found) => {
-                    let made = Made {
-                        user,
-                        replaces,
-                        cap: snapshot_cap(volumes),
-                    };
-                    make_snapshot(snapshots, made, found, &rows, viewer, stop, emit);
-                }
-                Err(not_indexed) => reply(emit, refusal(not_indexed.to_string())),
-            }
-        }
-    }
-}
-
-/// Who makes a result snapshot, and what makes room for it.
-struct Made<'a> {
-    user: &'a [u8],
-    replaces: Option<ResultSnapshotId>,
-    /// The most rows all result snapshots hold.
-    cap: u64,
-}
-
-/// The most rows all result snapshots hold: twice the entries of every
-/// index, two empty searches.
-fn snapshot_cap(volumes: &VolumeSet) -> u64 {
-    2 * volumes.iter().map(|v| v.index().len() as u64).sum::<u64>()
-}
-
-/// Keeps `found`, a search for every row, as a result snapshot, answers its
-/// id, and streams the rows that `rows`' offset and limit ask for, as
-/// `viewer` sees them.
-fn make_snapshot(
-    snapshots: &Snapshots,
-    made: Made<'_>,
-    found: ResultRows<Arc<VolumeState>>,
-    rows: &Rows,
-    viewer: Viewer<'_>,
-    stop: &AtomicBool,
-    emit: &mut dyn FnMut(Vec<u8>) -> bool,
-) {
-    let (snapshot, volumes) = match found.into_snapshot(stop) {
-        Ok(kept) => kept,
-        Err(IntoSnapshotError::TooManyVolumes(too_many)) => {
-            return reply(emit, refusal(too_many.to_string()));
-        }
-        // The client left: nothing is kept, so no slot is taken and the
-        // snapshot this one replaces stays.
-        Err(IntoSnapshotError::Stopped(_)) => return,
-    };
-    let id = match gozler_winfs::random_u128() {
-        Ok(bits) => ResultSnapshotId(bits),
-        Err(e) => return reply(emit, refusal(format!("no id for a result snapshot: {e}"))),
-    };
-    let snapshot = Arc::new(snapshot);
-    snapshots.keep(
-        Kept {
-            id,
-            user: made.user.to_vec(),
-            last_read: Instant::now(),
-            snapshot: snapshot.clone(),
-            volumes: volumes.iter().map(Arc::downgrade).collect(),
-        },
-        made.replaces,
-        made.cap,
-    );
-    let total = snapshot.total();
-    let mut made_frame = Vec::new();
-    encode_response_frame(&Response::ResultSnapshot { id, total }, &mut made_frame);
-    if !emit(made_frame) {
-        return;
-    }
-    let read = SnapshotRowsRequest {
-        id,
-        offset: rows.offset,
-        limit: rows.limit,
-        wants: rows.wants.clone(),
-    };
-    stream_snapshot(&snapshot, volumes, &read, viewer, emit);
-}
-
-/// Streams the rows of the result snapshot that `read` names, as `viewer`
-/// sees them, or says it is gone.
-fn read_snapshot(
-    volumes: &VolumeSet,
-    snapshots: &Snapshots,
-    read: &SnapshotRowsRequest,
-    viewer: Viewer<'_>,
-    emit: &mut dyn FnMut(Vec<u8>) -> bool,
-) {
-    let found = snapshots.get(read.id, Instant::now());
-    let Some((snapshot, held)) = found else {
-        return reply(emit, snapshot_gone());
-    };
-    let Some(held) = live_volumes(&held, volumes) else {
-        return reply(emit, snapshot_gone());
-    };
-    stream_snapshot(&snapshot, held, read, viewer, emit);
-}
-
-/// Sorts the result snapshot that `sort` names again with no search, as
-/// `viewer` sees its rows, keeps the sorted one in its place, answers its id,
-/// and streams the rows that `sort.rows`' offset and limit ask for; or says
-/// it is gone.
-fn sort_snapshot(
-    volumes: &VolumeSet,
-    snapshots: &Snapshots,
-    user: &[u8],
-    sort: &SortSnapshotRequest,
-    viewer: Viewer<'_>,
-    stop: &AtomicBool,
-    emit: &mut dyn FnMut(Vec<u8>) -> bool,
-) {
-    let found = snapshots.get(sort.id, Instant::now());
-    let Some((snapshot, held)) = found else {
-        return reply(emit, snapshot_gone());
-    };
-    let Some(held) = live_volumes(&held, volumes) else {
-        return reply(emit, snapshot_gone());
-    };
-    let sorted = match snapshot.sort_again(held, sort.rows.sort, viewer, stop) {
-        Ok(sorted) => sorted,
-        Err(SortAgainError::Gone(_)) => return reply(emit, snapshot_gone()),
-        // The client left: no one reads an answer.
-        Err(SortAgainError::Stopped(_)) => return,
-    };
-    let made = Made {
-        user,
-        replaces: Some(sort.id),
-        cap: snapshot_cap(volumes),
-    };
-    make_snapshot(snapshots, made, sorted, &sort.rows, viewer, stop, emit);
-}
-
-/// Streams the rows of `snapshot` that `read` asks for, from `volumes`, its
-/// volumes, as `viewer` sees them and as [`stream_rows`] streams a search's;
-/// each page carries the search's sums when `read` asks for them. An index
-/// replaced meanwhile ends the reply with the gone error.
-fn stream_snapshot(
-    snapshot: &ResultSnapshot,
-    volumes: Vec<Arc<VolumeState>>,
-    read: &SnapshotRowsRequest,
-    viewer: Viewer<'_>,
-    emit: &mut dyn FnMut(Vec<u8>) -> bool,
-) {
-    let sums = (read.wants.contains(&Want::Sums))
-        .then(|| snapshot.sums())
-        .flatten();
-    let mut rows = snapshot.read(volumes, read.offset, read.limit, viewer);
-    let mut sent = SentFolders::default();
-    loop {
-        match encode_snapshot_page(&mut rows, &read.wants, sums, &mut sent) {
-            Ok((page, more)) => {
-                if !emit(page) || !more {
-                    return;
-                }
-            }
-            Err(_) => return reply(emit, snapshot_gone()),
-        }
-    }
-}
-
 /// The reply to a read of a result snapshot that no longer answers.
 fn snapshot_gone() -> Response {
     Response::Error {
         code: ProtoError::ResultSnapshotGone,
         message: "the result snapshot is gone; search again".into(),
     }
-}
-
-/// Encodes one tagged reply frame and hands it to `emit`.
-fn reply(emit: &mut dyn FnMut(Vec<u8>) -> bool, response: Response) {
-    let mut out = Vec::new();
-    encode_response_frame(&response, &mut out);
-    let _ = emit(out);
 }
 
 /// The reply that refuses a request the daemon cannot run as sent.
@@ -774,43 +483,308 @@ fn unsupported(message: &str) -> Response {
     }
 }
 
-/// Streams `rows` as one or more binary results-page frames (paged by
-/// [`ResultsPage::push`](gozler_core::proto::ResultsPage::push), `more` set
-/// on all but the last). An empty result set still emits one `more: false`
-/// page so the client always sees a terminal frame. No full path is built:
-/// each page sends the folders its rows need that no earlier page sent, and
-/// each row its folder and its name. A page releases the volumes' locks
-/// before it is sent, so the pipe and a slow client never hold a lock.
-fn stream_rows(
-    mut rows: ResultRows<Arc<VolumeState>>,
-    wanted: &Rows,
-    emit: &mut dyn FnMut(Vec<u8>) -> bool,
-) {
-    let mut sent = SentFolders::default();
-    loop {
-        let (page, more) = encode_page(&mut rows, &wanted.wants, &mut sent);
-        if !emit(page) || !more {
-            return;
-        }
-    }
+/// What answers one request: the server's parts and the client's end of the
+/// pipe. [`handle_connection`] builds one for each request, because `stop`
+/// and `emit` belong to that request alone.
+struct Serving<'a> {
+    volumes: &'a VolumeSet,
+    include: &'a Include,
+    snapshots: &'a Snapshots,
+    /// The user a result snapshot counts against.
+    user: &'a [u8],
+    /// Set when the client is gone; it stops a search, even before its first
+    /// reply.
+    stop: &'a AtomicBool,
+    /// Takes each framed reply as soon as it is encoded. Returning `false`
+    /// means the client is gone; encoding stops.
+    emit: &'a mut dyn FnMut(Vec<u8>) -> bool,
 }
 
-/// The reply to a [`Returns::Totals`] search, of the matches `viewer` sees,
-/// or of every entry below a folder for every viewer ([`search_totals`]).
-fn totals(
-    volumes: Vec<Arc<VolumeState>>,
-    query: &CompiledQuery,
-    scope: Option<&str>,
-    viewer: Viewer<'_>,
-    stop: &AtomicBool,
-) -> Response {
-    match search_totals(volumes, query, scope, viewer, stop) {
-        Ok(totals) => Response::Totals(totals.into()),
-        Err(TotalsError::NotIndexed(not_indexed)) => refusal(not_indexed.to_string()),
-        Err(TotalsError::Overflow(overflow)) => Response::Error {
-            code: ProtoError::Overflow,
-            message: overflow.to_string(),
-        },
+impl Serving<'_> {
+    /// Answers one request, as [`decode_request`] decoded its frame, with what
+    /// `access` lets the client see.
+    ///
+    /// `Hello`, `Status` and `SettingsSaved` answer every client, because they
+    /// show no name; `Status` also tells the client what it sees. A request
+    /// that reads the index's entries is refused when gozlerd cannot tell who
+    /// sent it, and the Include count answers only a user who sees every file:
+    /// its folder and name rules over the whole index would let any other user
+    /// count hidden entries until the counts spell their names.
+    ///
+    /// A request from a newer client may hold parts this daemon cannot read:
+    /// the reply names the skipped parts in [`Response::Skipped`] before the
+    /// answer, or refuses the request with [`ProtoError::UnknownRequest`].
+    fn serve(&mut self, access: &Access, decoded: Result<Decoded, DecodeError>) {
+        let Self {
+            volumes,
+            include,
+            snapshots,
+            stop,
+            ..
+        } = *self;
+        let Decoded { request, skipped } = match decoded {
+            Ok(decoded) => decoded,
+            Err(DecodeError::Unknown(part)) => {
+                return self.reply(Response::Error {
+                    code: ProtoError::UnknownRequest,
+                    message: part,
+                });
+            }
+            Err(error) => return self.reply(refusal(error.to_string())),
+        };
+        let request = match request {
+            Request::Hello {
+                proto_min,
+                proto_max,
+                ..
+            } => return self.reply(hello(volumes, proto_min, proto_max)),
+            Request::Status { links_held } => {
+                let mut status = build_status(volumes, include, snapshots, access.caller_sees());
+                if let (Some(held), Access::Sees(visibility)) = (links_held, access) {
+                    let links = folder_links(volumes, visibility.viewer());
+                    status.links = (links.fingerprint() != held).then_some(links);
+                }
+                return self.reply(Response::Status(status));
+            }
+            Request::SettingsSaved => {
+                include.reload();
+                return self.reply(Response::SettingsApplied);
+            }
+            request => request,
+        };
+        let viewer = match access {
+            Access::Sees(visibility) => visibility.viewer(),
+            Access::Refused(refused) => return self.reply(unsupported(refused.message())),
+        };
+        if !skipped.is_empty() {
+            self.reply(Response::Skipped { parts: skipped });
+        }
+        let search = match request {
+            Request::Search(search) => search,
+            Request::CountIncluded(settings) => {
+                return self.reply(match viewer {
+                    Viewer::Everything => Response::IncludedCount {
+                        entries: count_included(volumes, &settings),
+                    },
+                    Viewer::Filtered(_) => unsupported(
+                        "only a user who sees every file can count what the Include settings keep",
+                    ),
+                });
+            }
+            Request::ResultSnapshotRows(read) => {
+                return self.read_snapshot(&read, viewer);
+            }
+            Request::SortResultSnapshot(sort) => {
+                return self.sort_snapshot(&sort, viewer);
+            }
+            Request::Hello { .. } | Request::Status { .. } | Request::SettingsSaved => {
+                unreachable!("answered before the client's access is taken")
+            }
+        };
+        if let Err(off) = include.applied().allows(&search.query) {
+            return self.reply(refusal(off.to_string()));
+        }
+        let scope = search.scope.as_deref();
+        let links = folder_links(volumes, viewer);
+        let query = match CompiledQuery::with_links(&search.query, &links, scope) {
+            Ok(query) => query,
+            Err(e) => return self.reply(refusal(e.to_string())),
+        };
+        // In `VolumeSet` order, the order every request takes the volumes' locks
+        // in.
+        let targets = volumes.to_vec();
+        match search.returns {
+            Returns::Rows(wanted) => {
+                match ResultRows::search(targets, &query, scope, wanted.spec(), viewer, stop) {
+                    Ok(rows) => self.stream_rows(rows, &wanted),
+                    Err(not_indexed) => self.reply(refusal(not_indexed.to_string())),
+                }
+            }
+            Returns::Totals => {
+                let totals = self.totals(targets, &query, scope, viewer);
+                self.reply(totals)
+            }
+            Returns::ResultSnapshot { rows, replaces } => {
+                let every_row = RowsSpec {
+                    offset: 0,
+                    limit: None,
+                    ..rows.spec()
+                };
+                match ResultRows::search(targets, &query, scope, every_row, viewer, stop) {
+                    // A stopped search is short and no one reads it, so it must
+                    // not take the place of the user's last result snapshot.
+                    Ok(_) if stop.load(Ordering::Relaxed) => {}
+                    Ok(found) => {
+                        self.make_snapshot(found, &rows, replaces, viewer);
+                    }
+                    Err(not_indexed) => self.reply(refusal(not_indexed.to_string())),
+                }
+            }
+        }
+    }
+
+    /// Keeps `found`, a search for every row, as a result snapshot, answers its
+    /// id, and streams the rows that `rows`' offset and limit ask for, as
+    /// `viewer` sees them.
+    ///
+    /// `replaces` is the snapshot this one takes the place of. All result
+    /// snapshots hold at most twice the entries of every index, two empty
+    /// searches.
+    fn make_snapshot(
+        &mut self,
+        found: ResultRows<Arc<VolumeState>>,
+        rows: &Rows,
+        replaces: Option<ResultSnapshotId>,
+        viewer: Viewer<'_>,
+    ) {
+        let cap = 2 * self
+            .volumes
+            .iter()
+            .map(|v| v.index().len() as u64)
+            .sum::<u64>();
+        let (snapshot, volumes) = match found.into_snapshot(self.stop) {
+            Ok(kept) => kept,
+            Err(IntoSnapshotError::TooManyVolumes(too_many)) => {
+                return self.reply(refusal(too_many.to_string()));
+            }
+            // The client left: nothing is kept, so no slot is taken and the
+            // snapshot this one replaces stays.
+            Err(IntoSnapshotError::Stopped(_)) => return,
+        };
+        let id = match gozler_winfs::random_u128() {
+            Ok(bits) => ResultSnapshotId(bits),
+            Err(e) => return self.reply(refusal(format!("no id for a result snapshot: {e}"))),
+        };
+        let snapshot = Arc::new(snapshot);
+        self.snapshots.keep(
+            Kept {
+                id,
+                user: self.user.to_vec(),
+                last_read: Instant::now(),
+                snapshot: snapshot.clone(),
+                volumes: volumes.iter().map(Arc::downgrade).collect(),
+            },
+            replaces,
+            cap,
+        );
+        let total = snapshot.total();
+        let mut made_frame = Vec::new();
+        encode_response_frame(&Response::ResultSnapshot { id, total }, &mut made_frame);
+        if !(self.emit)(made_frame) {
+            return;
+        }
+        let read = SnapshotRowsRequest {
+            id,
+            offset: rows.offset,
+            limit: rows.limit,
+            wants: rows.wants.clone(),
+        };
+        self.stream_snapshot(&snapshot, volumes, &read, viewer);
+    }
+
+    /// Streams the rows of the result snapshot that `read` names, as `viewer`
+    /// sees them, or says it is gone.
+    fn read_snapshot(&mut self, read: &SnapshotRowsRequest, viewer: Viewer<'_>) {
+        let found = self.snapshots.get(read.id, Instant::now());
+        let Some((snapshot, held)) = found else {
+            return self.reply(snapshot_gone());
+        };
+        let Some(held) = live_volumes(&held, self.volumes) else {
+            return self.reply(snapshot_gone());
+        };
+        self.stream_snapshot(&snapshot, held, read, viewer);
+    }
+
+    /// Sorts the result snapshot that `sort` names again with no search, as
+    /// `viewer` sees its rows, keeps the sorted one in its place, answers its id,
+    /// and streams the rows that `sort.rows`' offset and limit ask for; or says
+    /// it is gone.
+    fn sort_snapshot(&mut self, sort: &SortSnapshotRequest, viewer: Viewer<'_>) {
+        let found = self.snapshots.get(sort.id, Instant::now());
+        let Some((snapshot, held)) = found else {
+            return self.reply(snapshot_gone());
+        };
+        let Some(held) = live_volumes(&held, self.volumes) else {
+            return self.reply(snapshot_gone());
+        };
+        let sorted = match snapshot.sort_again(held, sort.rows.sort, viewer, self.stop) {
+            Ok(sorted) => sorted,
+            Err(SortAgainError::Gone(_)) => return self.reply(snapshot_gone()),
+            // The client left: no one reads an answer.
+            Err(SortAgainError::Stopped(_)) => return,
+        };
+        self.make_snapshot(sorted, &sort.rows, Some(sort.id), viewer);
+    }
+
+    /// Streams the rows of `snapshot` that `read` asks for, from `volumes`, its
+    /// volumes, as `viewer` sees them and as [`Self::stream_rows`] streams a search's;
+    /// each page carries the search's sums when `read` asks for them. An index
+    /// replaced meanwhile ends the reply with the gone error.
+    fn stream_snapshot(
+        &mut self,
+        snapshot: &ResultSnapshot,
+        volumes: Vec<Arc<VolumeState>>,
+        read: &SnapshotRowsRequest,
+        viewer: Viewer<'_>,
+    ) {
+        let sums = (read.wants.contains(&Want::Sums))
+            .then(|| snapshot.sums())
+            .flatten();
+        let mut rows = snapshot.read(volumes, read.offset, read.limit, viewer);
+        let mut sent = SentFolders::default();
+        loop {
+            match encode_snapshot_page(&mut rows, &read.wants, sums, &mut sent) {
+                Ok((page, more)) => {
+                    if !(self.emit)(page) || !more {
+                        return;
+                    }
+                }
+                Err(_) => return self.reply(snapshot_gone()),
+            }
+        }
+    }
+
+    /// Encodes one tagged reply frame and hands it to `emit`.
+    fn reply(&mut self, response: Response) {
+        let mut out = Vec::new();
+        encode_response_frame(&response, &mut out);
+        let _ = (self.emit)(out);
+    }
+
+    /// Streams `rows` as one or more binary results-page frames (paged by
+    /// [`ResultsPage::push`](gozler_core::proto::ResultsPage::push), `more` set
+    /// on all but the last). An empty result set still emits one `more: false`
+    /// page so the client always sees a terminal frame. No full path is built:
+    /// each page sends the folders its rows need that no earlier page sent, and
+    /// each row its folder and its name. A page releases the volumes' locks
+    /// before it is sent, so the pipe and a slow client never hold a lock.
+    fn stream_rows(&mut self, mut rows: ResultRows<Arc<VolumeState>>, wanted: &Rows) {
+        let mut sent = SentFolders::default();
+        loop {
+            let (page, more) = encode_page(&mut rows, &wanted.wants, &mut sent);
+            if !(self.emit)(page) || !more {
+                return;
+            }
+        }
+    }
+
+    /// The reply to a [`Returns::Totals`] search, of the matches `viewer` sees,
+    /// or of every entry below a folder for every viewer ([`search_totals`]).
+    fn totals(
+        &self,
+        volumes: Vec<Arc<VolumeState>>,
+        query: &CompiledQuery,
+        scope: Option<&str>,
+        viewer: Viewer<'_>,
+    ) -> Response {
+        match search_totals(volumes, query, scope, viewer, self.stop) {
+            Ok(totals) => Response::Totals(totals.into()),
+            Err(TotalsError::NotIndexed(not_indexed)) => refusal(not_indexed.to_string()),
+            Err(TotalsError::Overflow(overflow)) => Response::Error {
+                code: ProtoError::Overflow,
+                message: overflow.to_string(),
+            },
+        }
     }
 }
 
@@ -1011,7 +985,7 @@ mod optimizations;
 
 #[cfg(test)]
 mod tests {
-    use super::{Snapshots, build_status, serve};
+    use super::{Serving, Snapshots, build_status};
     use crate::access::{Access, Refusal, Visibility};
     use crate::include::Include;
     use crate::result_snapshots::ResultSnapshots;
@@ -1277,19 +1251,18 @@ mod tests {
         frame: &[u8],
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        serve(
+        Serving {
             volumes,
-            &defaults(),
+            include: &defaults(),
             snapshots,
-            b"",
-            access,
-            decode_request(frame),
-            &AtomicBool::new(false),
-            &mut |reply| {
+            user: b"",
+            stop: &AtomicBool::new(false),
+            emit: &mut |reply: Vec<u8>| {
                 out.extend_from_slice(&reply);
                 true
             },
-        );
+        }
+        .serve(access, decode_request(frame));
         out
     }
 
@@ -1546,18 +1519,20 @@ mod tests {
     fn a_malformed_request_returns_an_error_frame_not_an_empty_page() {
         let vols = set(&[live_volume(r"C:\")]);
         let mut replies = Vec::new();
-        serve(
-            &vols,
-            &defaults(),
-            &ResultSnapshots::new(),
-            b"",
-            &Access::Sees(Visibility::Everything),
-            decode_request(br#"{"t":"Search","query":"#),
-            &AtomicBool::new(false),
-            &mut |reply| {
+        Serving {
+            volumes: &vols,
+            include: &defaults(),
+            snapshots: &ResultSnapshots::new(),
+            user: b"",
+            stop: &AtomicBool::new(false),
+            emit: &mut |reply: Vec<u8>| {
                 replies.extend_from_slice(&reply);
                 true
             },
+        }
+        .serve(
+            &Access::Sees(Visibility::Everything),
+            decode_request(br#"{"t":"Search","query":"#),
         );
         let frames = decode_frames(&replies);
         assert_eq!(frames.len(), 1);
@@ -1882,19 +1857,18 @@ mod tests {
         };
         let serve_with = |frame: &[u8], stop: bool| {
             let mut out = Vec::new();
-            serve(
-                &vols,
-                &defaults(),
-                &snapshots,
-                b"",
-                &Access::Sees(Visibility::Everything),
-                decode_request(frame),
-                &AtomicBool::new(stop),
-                &mut |reply| {
+            Serving {
+                volumes: &vols,
+                include: &defaults(),
+                snapshots: &snapshots,
+                user: b"",
+                stop: &AtomicBool::new(stop),
+                emit: &mut |reply: Vec<u8>| {
                     out.extend_from_slice(&reply);
                     true
                 },
-            );
+            }
+            .serve(&Access::Sees(Visibility::Everything), decode_request(frame));
             decode_frames(&out)
         };
         let frames = serve_with(&make(None), false);
@@ -1979,15 +1953,13 @@ mod tests {
         let vol = volume(r"C:\", paging_index(), VolumePhase::Live);
         let vols = set(&[Arc::clone(&vol)]);
         let mut out = Vec::new();
-        serve(
-            &vols,
-            &defaults(),
-            &ResultSnapshots::new(),
-            b"",
-            &Access::Sees(Visibility::Everything),
-            decode_request(&request_frame(&search(query("hit")))),
-            &AtomicBool::new(false),
-            &mut |reply| {
+        Serving {
+            volumes: &vols,
+            include: &defaults(),
+            snapshots: &ResultSnapshots::new(),
+            user: b"",
+            stop: &AtomicBool::new(false),
+            emit: &mut |reply: Vec<u8>| {
                 if out.is_empty() {
                     let mut index = vol.index_mut();
                     let mut gone = dir_record(1000, 100, "");
@@ -1998,6 +1970,10 @@ mod tests {
                 out.extend_from_slice(&reply);
                 true
             },
+        }
+        .serve(
+            &Access::Sees(Visibility::Everything),
+            decode_request(&request_frame(&search(query("hit")))),
         );
         let pages = results(&out);
         assert_eq!(pages.len(), 2);
@@ -2076,18 +2052,20 @@ mod tests {
         let vols = set(&[volume(r"C:\", index, VolumePhase::Live)]);
 
         let mut emitted = 0usize;
-        serve(
-            &vols,
-            &defaults(),
-            &ResultSnapshots::new(),
-            b"",
-            &Access::Sees(Visibility::Everything),
-            decode_request(&request_frame(&search(query("hit")))),
-            &AtomicBool::new(false),
-            &mut |_page| {
+        Serving {
+            volumes: &vols,
+            include: &defaults(),
+            snapshots: &ResultSnapshots::new(),
+            user: b"",
+            stop: &AtomicBool::new(false),
+            emit: &mut |_page: Vec<u8>| {
                 emitted += 1;
                 false // consumer gone after the first page
             },
+        }
+        .serve(
+            &Access::Sees(Visibility::Everything),
+            decode_request(&request_frame(&search(query("hit")))),
         );
         assert_eq!(
             emitted, 1,
