@@ -87,6 +87,7 @@ fn size_query(folder: &str) -> Option<ChunkAsk> {
         start: 0,
         len: SIZE_ROWS,
         snapshot: FromSnapshot::No,
+        writes: false,
     })
 }
 
@@ -4430,6 +4431,7 @@ pub(crate) mod tests {
                 attributes: None,
                 counts: None,
                 identity: None,
+                writes: None,
             })
             .collect();
         let chunk = super::super::fetch::Chunk {
@@ -4438,6 +4440,7 @@ pub(crate) mod tests {
             total: 1,
             volumes_incomplete: false,
             metadata_pending: false,
+            writes_partial: false,
             sums: None,
             skipped: Vec::new(),
             rest_follows: false,

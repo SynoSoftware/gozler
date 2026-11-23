@@ -12,6 +12,7 @@
 
 use super::*;
 use crate::index::NTFS_ROOT_FRN;
+use crate::index::settle::Batch;
 use crate::index::store::NameRef;
 use crate::links::FolderLink;
 use crate::query::parse::{ParseOptions, parse_query, parse_query_with};
@@ -188,7 +189,7 @@ fn dirty_volume() -> VolumeIndex {
         })
         .collect();
     for batch in churn.chunks(4096) {
-        index.apply_batch(batch);
+        index.apply_batch(&Batch::of(batch));
     }
     index
 }
@@ -200,6 +201,7 @@ fn usn_record(frn: Frn, parent: Frn, name: &str, is_dir: bool, reason: u32) -> P
         reason,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
+        time: 0,
     }
 }
 
@@ -883,7 +885,15 @@ fn matches_sort_by_packed_number_keys() {
     // sorts run on this thread.
     records.truncate(90_000);
     let by_rank = |records| {
-        let matches = key_found(index, MOUNT, records, None, None, SortSpec::default());
+        let matches = key_found(
+            index,
+            MOUNT,
+            records,
+            None,
+            None,
+            SortSpec::default(),
+            &SeenBy::Everything,
+        );
         matches.order().records
     };
     let by_name = |mut records: Vec<SortRecord>| {
@@ -912,7 +922,17 @@ fn a_page_sorts_only_its_rows() {
     let index = &VOLUME.index;
     let records = every_record(index);
     let by_size = SortSpec::default_for(SortKey::Size);
-    let keyed = || key_found(index, MOUNT, records.clone(), None, None, by_size);
+    let keyed = || {
+        key_found(
+            index,
+            MOUNT,
+            records.clone(),
+            None,
+            None,
+            by_size,
+            &SeenBy::Everything,
+        )
+    };
     assert_saves(
         "a page of 100 rows by size",
         || {
@@ -939,7 +959,17 @@ fn a_long_page_sorts_in_parallel() {
     let index = &VOLUME.index;
     let records = every_record(index);
     let by_size = SortSpec::default_for(SortKey::Size);
-    let keyed = || key_found(index, MOUNT, records.clone(), None, None, by_size);
+    let keyed = || {
+        key_found(
+            index,
+            MOUNT,
+            records.clone(),
+            None,
+            None,
+            by_size,
+            &SeenBy::Everything,
+        )
+    };
     assert_saves(
         "a page of all but 5 rows by size, on the calling thread",
         || {

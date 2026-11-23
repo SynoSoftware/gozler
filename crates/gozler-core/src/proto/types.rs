@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::attributes::Attributes;
 use crate::include::IndexSettings;
 use crate::index::Counts;
+use crate::index::writes::Marks;
 use crate::links::Links;
 use crate::query::{MatchSums, ParsedQuery, RowsSpec, SearchTotals};
 use crate::scope::VolumeMounts;
@@ -88,6 +89,67 @@ pub enum Request {
     /// new result snapshot of them, answered as a
     /// [`Returns::ResultSnapshot`] search is, which replaces the one named.
     SortResultSnapshot(SortSnapshotRequest),
+    /// Waits until the service holds something to warn about that is newer
+    /// than the request's `after`, and answers [`Response::Wear`] then.
+    Wear(WearRequest),
+}
+
+/// What a [`Request::Wear`] waits for. A struct of its own, so an unknown
+/// field refuses the request, as in every request but `Hello` and `Status`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WearRequest {
+    pub after: RepeatsAfter,
+    /// The fewest copies of a folder copied into itself that warn, which
+    /// travel with each request, because the service cannot read the
+    /// window's settings.
+    pub copies: u32,
+}
+
+/// What the client has seen of the service's events: the
+/// `run` and `highest` of its last [`Response::Wear`], or a `run` of 0 for
+/// its first request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepeatsAfter {
+    pub run: u64,
+    pub number: u64,
+}
+
+/// A folder tree copied into itself, as a [`Response::Wear`] sends it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepeatingFolder {
+    /// The service's sequence number of the tree's last change.
+    pub number: u64,
+    /// The full path of the highest folder that the repeat reaches.
+    pub top: String,
+    /// The full path of the folder whose create last changed the tree;
+    /// `None` when it is gone or the client may not see its name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deepest: Option<String>,
+    /// How many folder names the repeated group holds.
+    pub period: u32,
+    /// How many whole times the group repeats.
+    pub copies: u32,
+    /// When the service found the tree, as a FILETIME.
+    pub time: i64,
+}
+
+/// What the service holds to warn about, newer than a [`Request::Wear`]'s
+/// `after`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WearReply {
+    /// The id of this run of the service: 64 random bits, never 0. A client
+    /// that sees another id than before knows that the numbers started again.
+    pub run: u64,
+    /// The highest sequence number the service has given so far, which the
+    /// client's next request names as [`RepeatsAfter::number`].
+    pub highest: u64,
+    /// The folders copied into themselves that the client has not seen and
+    /// whose copies reach its limit.
+    pub events: Vec<RepeatingFolder>,
+    /// How many events the service's lists dropped.
+    pub dropped: u64,
 }
 
 /// The id of a result snapshot: 128 random bits, which only the client that
@@ -221,6 +283,8 @@ pub enum Want {
     Sums,
     /// [`ResultItem::counts`].
     Counts,
+    /// [`ResultItem::writes`]. An addition within protocol 22.
+    Writes,
 }
 
 /// A server→client message.
@@ -263,6 +327,8 @@ pub enum Response {
         /// settings add is not indexed yet, so it adds none.
         entries: u64,
     },
+    /// Reply to [`Request::Wear`].
+    Wear(WearReply),
     /// The request failed.
     Error {
         /// Machine-readable failure class.
@@ -288,6 +354,11 @@ pub struct QueryResults {
     /// `true` → the size and date pass failed or stopped on at least one
     /// volume in scope; requested size and date columns may be `None`.
     pub metadata_pending: bool,
+    /// `true` → the writes of a volume in scope cover only part of the last
+    /// hour, so a test of them can leave matches out. `false` from an older
+    /// service.
+    #[serde(default)]
+    pub writes_partial: bool,
     /// Always 0: gozlerd sends no index generation. The field stays because
     /// `--json` prints it and scripts may read it.
     pub generation: u64,
@@ -308,6 +379,7 @@ impl QueryResults {
         self.more = page.more;
         self.volumes_incomplete |= page.volumes_incomplete;
         self.metadata_pending |= page.metadata_pending;
+        self.writes_partial |= page.writes_partial;
         self.generation = page.generation;
         self.sums = page.sums;
     }
@@ -333,6 +405,9 @@ pub struct QueryTotals {
     pub volumes_incomplete: bool,
     /// As [`QueryResults::metadata_pending`]: some sizes may be unknown.
     pub metadata_pending: bool,
+    /// As [`QueryResults::writes_partial`].
+    #[serde(default)]
+    pub writes_partial: bool,
 }
 
 impl From<SearchTotals> for QueryTotals {
@@ -344,6 +419,7 @@ impl From<SearchTotals> for QueryTotals {
             size: found.totals.size,
             volumes_incomplete: found.volumes_incomplete,
             metadata_pending: found.metadata_pending,
+            writes_partial: found.writes_partial,
         }
     }
 }
@@ -379,10 +455,26 @@ pub struct ResultItem {
     /// and `folders`; `None` = a file, unknown or not requested.
     #[serde(flatten)]
     pub counts: Option<Counts>,
+    /// The writes of the last hour, as `writes` and `written`; `None` =
+    /// unknown or not requested.
+    #[serde(flatten)]
+    pub writes: Option<ItemWrites>,
     /// `None` = not requested, or a gone row. Boxed, so the items of a
     /// search that does not ask for it stay small.
     #[serde(flatten)]
     pub identity: Option<Box<FileIdentity>>,
+}
+
+/// The writes of the last hour of a file's name or a folder's files
+/// (`docs/DESIGN.md`, "Writes").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemWrites {
+    pub writes: u32,
+    /// The bytes those writes put on the disk.
+    pub written: u64,
+    /// The kinds of write and whether Written is "up to" or "at least".
+    #[serde(skip)]
+    pub marks: Marks,
 }
 
 /// Which file a result is: the same file on the same volume however it is
@@ -407,6 +499,7 @@ impl ResultItem {
             is_dir: false,
             attributes: None,
             counts: None,
+            writes: None,
             identity: None,
         }
     }
@@ -508,6 +601,13 @@ pub struct VolumeMemory {
     pub dir_children: MemPair,
     /// The folder security descriptors, each distinct one once.
     pub descriptors: MemPair,
+    /// The table of writes of the last hour; `None` from an older service.
+    #[serde(default)]
+    pub writes: Option<MemPair>,
+    /// The list of folders copied into themselves; `None` from an older
+    /// service.
+    #[serde(default)]
+    pub repeats: Option<MemPair>,
     /// Which FRN-map backing is in use ("dense" / "sparse").
     pub frn_map_kind: String,
 }
@@ -523,6 +623,8 @@ impl VolumeMemory {
             self.name_tables,
             self.dir_children,
             self.descriptors,
+            self.writes.unwrap_or_default(),
+            self.repeats.unwrap_or_default(),
         ];
         MemPair {
             used: parts.iter().map(|p| p.used).sum(),
@@ -578,6 +680,28 @@ pub struct VolumeStatus {
     /// Per-component index memory breakdown. `None` from daemons predating it.
     #[serde(default)]
     pub memory: Option<VolumeMemory>,
+    /// The volume's writes of the last hour; `None` for a volume without a
+    /// journal, and from daemons predating the field.
+    #[serde(default)]
+    pub writes: Option<WritesStatus>,
+}
+
+/// What a client reads of a volume's table of writes
+/// ([`Writes`](crate::index::writes::Writes)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WritesStatus {
+    /// From when the values are complete, as a FILETIME: when the build that
+    /// installed the table took its journal cursor, or when the clock was
+    /// set back.
+    pub counted_since: i64,
+    /// The rows in use.
+    pub rows: u32,
+    /// The most rows the table holds.
+    pub size: u32,
+    /// "May be low by": every value on the volume may be up to this many
+    /// writes and `low_bytes` bytes higher than the table says.
+    pub low_writes: u64,
+    pub low_bytes: u64,
 }
 
 impl VolumeStatus {
@@ -644,6 +768,34 @@ mod tests {
         }));
     }
 
+    /// A run id takes all 64 bits. Read back wrong inside the tagged request
+    /// or reply, every reply would look like a service that started again:
+    /// every event, so the window would warn in a loop.
+    #[test]
+    fn a_run_id_round_trips_in_the_wear_request_and_reply() {
+        let run = u64::MAX - 5;
+        rt_request(&Request::Wear(WearRequest {
+            after: RepeatsAfter {
+                run,
+                number: u64::MAX - 7,
+            },
+            copies: 4,
+        }));
+        rt_response(&Response::Wear(WearReply {
+            run,
+            highest: 12,
+            events: vec![RepeatingFolder {
+                number: 12,
+                top: r"C:\build\out".into(),
+                deepest: Some(r"C:\build\out\out\out\out".into()),
+                period: 1,
+                copies: 4,
+                time: 133_500_000_000_000_000,
+            }],
+            dropped: 0,
+        }));
+    }
+
     fn sample_items() -> Vec<ResultItem> {
         vec![
             ResultItem {
@@ -656,6 +808,7 @@ mod tests {
                 attributes: None,
                 counts: None,
                 identity: None,
+                writes: None,
             },
             ResultItem {
                 path: r"C:\src".into(),
@@ -667,6 +820,7 @@ mod tests {
                 attributes: None,
                 counts: None,
                 identity: None,
+                writes: None,
             },
         ]
     }
@@ -704,6 +858,7 @@ mod tests {
             more: true,
             volumes_incomplete: true,
             metadata_pending: true,
+            writes_partial: false,
             generation: 42,
             sums: Some(MatchSums {
                 files: 3,
@@ -721,6 +876,7 @@ mod tests {
             more: false,
             volumes_incomplete: false,
             metadata_pending: false,
+            writes_partial: false,
             generation: 0,
             sums: None,
         }));
@@ -764,6 +920,13 @@ mod tests {
                     },
                     frn_map_kind: "sparse".into(),
                     ..VolumeMemory::default()
+                }),
+                writes: (i % 2 == 0).then_some(WritesStatus {
+                    counted_since: 133_800_000_000_000_000,
+                    rows: 1204,
+                    size: 65536,
+                    low_writes: 3,
+                    low_bytes: 40 << 20,
                 }),
             })
             .collect();
@@ -814,6 +977,7 @@ mod tests {
             attributes: None,
             counts: None,
             identity: None,
+            writes: None,
         };
         let json = serde_json::to_string(&item).expect("serialize");
         assert!(!json.contains("path_u16"), "json: {json}");
@@ -848,6 +1012,7 @@ mod tests {
             attributes: None,
             counts: None,
             identity: None,
+            writes: None,
         };
         assert!(item.path.contains('\u{FFFD}'));
         let json = serde_json::to_string(&item).expect("serialize");

@@ -226,6 +226,7 @@ mod tests {
                 link_reconciles_dropped: 0,
                 unread_folders: 0,
                 memory: None,
+                writes: None,
             }],
             volumes_incomplete: false,
             process_working_set: 0,

@@ -210,17 +210,24 @@ struct ReadPosition {
     /// volume, a build's or a missed folder's, up to this USN. `None` once
     /// they passed it or a read found nothing new.
     replay_until: Option<i64>,
+    /// The reads replay the changes made during the last build, of any
+    /// filesystem, up to this USN. `None` once a read starts at or past it
+    /// or finds nothing new. A field apart from `replay_until`, which a walk
+    /// of missed folders starts again.
+    build_end: Option<i64>,
 }
 
 impl ReadPosition {
     /// Where the tail reads after a build of `filesystem` that took `cursor`
     /// and has just ended.
     fn at(cursor: JournalInfo, filesystem: Filesystem, handle: &VolumeHandle) -> Self {
+        let end = changes_end(handle);
         Self {
             start_usn: cursor.next_usn,
             journal_id: cursor.journal_id,
             failures: None,
-            replay_until: filesystem.builds_by_walk().then(|| walk_end(handle)),
+            replay_until: filesystem.builds_by_walk().then_some(end),
+            build_end: Some(end),
         }
     }
 
@@ -228,12 +235,21 @@ impl ReadPosition {
     fn replaying_walk(&self) -> bool {
         self.replay_until.is_some_and(|end| self.start_usn < end)
     }
+
+    /// Whether the next read starts before the end of the build's changes.
+    /// Once it does not, the replay of the build is over for good.
+    fn replaying_build(&mut self) -> bool {
+        if self.build_end.is_some_and(|end| self.start_usn >= end) {
+            self.build_end = None;
+        }
+        self.build_end.is_some()
+    }
 }
 
-/// The journal's next USN now, so the end of the changes made during a folder
-/// walk that has just ended. When the journal cannot say, the end is unknown,
-/// and only a read that finds nothing new ends the replay.
-fn walk_end(handle: &VolumeHandle) -> i64 {
+/// The journal's next USN now, so the end of the changes made during a build
+/// or a folder walk that has just ended. When the journal cannot say, the end
+/// is unknown, and only a read that finds nothing new ends the replay.
+fn changes_end(handle: &VolumeHandle) -> i64 {
     match query_usn_journal(handle) {
         Ok(JournalQuery::Active(journal)) => journal.next_usn,
         _ => i64::MAX,
@@ -377,20 +393,30 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         Ok(w) => w,
                         Err(e) => break 'rescan (RescanReason::ParserAnomaly, format!("{e:?}")),
                     };
+                    // Only a record that counts moves the hour of writes, so
+                    // a volume whose records count nothing, or that is idle,
+                    // would show the writes of an hour long past. The read
+                    // hold keeps the write hold to once a step.
+                    let now = gozler_winfs::system_time();
+                    if state.index().writes().needs_move(now) {
+                        state.index_mut().writes_mut().move_to(now);
+                    }
                     if walk.records.is_empty() {
                         // Caught up (or only filtered-out records): advance and idle.
                         if bytes <= size_of::<i64>() {
                             // Nothing past the next USN: the reads have passed
-                            // every change made during a walk.
+                            // every change made during a build or a walk.
                             pos.replay_until = None;
+                            pos.build_end = None;
                         }
                         pos.start_usn = walk.next_usn;
                         std::thread::sleep(IDLE_POLL);
                         continue 'tail;
                     }
                     let batch = Batch {
-                        records: &walk.records,
                         replaying_walk: pos.replaying_walk(),
+                        detects_repeats: !pos.replaying_build(),
+                        ..Batch::of(&walk.records)
                     };
                     // The settle asks before each folder and file it reads.
                     // Teardown must not wait behind a long batch: each read is
@@ -403,7 +429,16 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         pulse.beat();
                         stop.load(Ordering::Relaxed)
                     };
-                    let settled = match settle_batch(state, &mut disk, batch, cancelled) {
+                    let numbered = crate::wear::NUMBERS.load(Ordering::Acquire);
+                    let settled = settle_batch(state, &mut disk, batch, cancelled);
+                    // A changed counter means that a batch made or updated a
+                    // folder copied into itself: this one, also when the
+                    // settle failed, or another volume's, which costs the
+                    // held requests one more read for nothing.
+                    if crate::wear::NUMBERS.load(Ordering::Acquire) != numbered {
+                        crate::wear::wake();
+                    }
+                    let settled = match settled {
                         Ok(settled) => settled,
                         Err(e) => break 'rescan (RescanReason::WalkFailed, e.to_string()),
                     };
@@ -420,7 +455,7 @@ fn tail_loop(state: &VolumeState, handle: VolumeHandle, stop: &AtomicBool, pulse
                         );
                         // That listing was a walk too, and the next batches
                         // replay the changes made during it.
-                        pos.replay_until = Some(walk_end(handle));
+                        pos.replay_until = Some(changes_end(handle));
                     }
                     if settled.wants_compact {
                         state.compact_index();
@@ -553,6 +588,8 @@ fn rescan(
     } else {
         ask()
     };
+    // The writes count from the cursor: the records before it are never read.
+    let since = gozler_winfs::system_time();
 
     // The rebuild stamps no pulse; `Busy` tells the supervisor that silence
     // is legitimate.
@@ -598,7 +635,7 @@ fn rescan(
     let entries = built.index.len();
     let descriptor_reads = built.descriptor_reads;
     let unread_folders = built.index.unread_folder_count();
-    building.finish(built, &journal);
+    building.finish(built, &journal, since);
     // The entries the rules removed left their names behind.
     state.compact_index();
 
@@ -791,6 +828,7 @@ mod tests {
             reason,
             attributes: 0,
             name: b"f.txt".to_vec(),
+            time: 0,
         }
     }
 

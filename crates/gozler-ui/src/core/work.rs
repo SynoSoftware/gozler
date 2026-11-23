@@ -33,6 +33,10 @@ pub(crate) fn waiting(strings: &super::text::Strings, path: Option<&str>) -> Str
 pub(crate) enum Interest {
     Awaited,
     Background,
+    /// A request that the service holds until it has an answer, such as the
+    /// wear request: it never turns slow, never expires and shows nothing,
+    /// so it keeps no timer of the window running.
+    Held,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,12 +47,15 @@ pub(crate) enum Waiting {
 }
 
 impl Interest {
-    pub(crate) fn after(self, elapsed: Duration) -> Waiting {
-        match self {
+    /// How a task of this interest waits after `elapsed`; `None` for a held
+    /// task, which shows no wait.
+    pub(crate) fn after(self, elapsed: Duration) -> Option<Waiting> {
+        Some(match self {
+            Self::Held => return None,
             Self::Background if elapsed >= BACKGROUND_LIMIT => Waiting::Expired,
             Self::Awaited if elapsed >= SLOW => Waiting::Slow,
             _ => Waiting::Working,
-        }
+        })
     }
 }
 
@@ -229,21 +236,29 @@ mod tests {
     fn only_background_work_expires_while_awaited_work_stays_slow() {
         assert_eq!(
             Interest::Awaited.after(SLOW - Duration::from_nanos(1)),
-            Waiting::Working
+            Some(Waiting::Working)
         );
-        assert_eq!(Interest::Awaited.after(SLOW), Waiting::Slow);
+        assert_eq!(Interest::Awaited.after(SLOW), Some(Waiting::Slow));
         assert_eq!(
             Interest::Background.after(BACKGROUND_LIMIT - Duration::from_nanos(1)),
-            Waiting::Working
+            Some(Waiting::Working)
         );
         assert_eq!(
             Interest::Background.after(BACKGROUND_LIMIT),
-            Waiting::Expired
+            Some(Waiting::Expired)
         );
         assert_eq!(
             Interest::Awaited.after(Duration::from_secs(3_600)),
-            Waiting::Slow
+            Some(Waiting::Slow)
         );
+    }
+
+    /// A held request waits for hours. Any wait it showed would keep the
+    /// window's work timer waking it for as long as it runs,
+    /// which nothing on screen shows.
+    #[test]
+    fn a_held_task_shows_no_wait_after_an_hour() {
+        assert_eq!(Interest::Held.after(Duration::from_secs(3_600)), None);
     }
 
     #[test]

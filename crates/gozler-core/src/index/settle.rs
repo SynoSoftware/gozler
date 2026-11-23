@@ -19,7 +19,8 @@
 //!    everything under them, with each one's descriptor, which step 1 then
 //!    leaves out; a listing that fails fails the settle, and the tail answers
 //!    with a rescan;
-//! 3. the size and date of each changed file;
+//! 3. the size and date of each changed file, and from the sizes the bytes
+//!    of the batch's writes (`Writes::add_sizes`);
 //! 4. the link set of each file whose links changed.
 //!
 //! Such a folder's entries are hidden until its descriptor is read, and the
@@ -37,6 +38,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use crate::index::volume::{Room, make_room};
+use crate::index::writes;
 use crate::index::{Anomaly, ApplyOutcome, LinkTarget, VolumeIndex};
 use crate::layout::LayoutFile;
 use crate::types::Frn;
@@ -175,6 +177,27 @@ pub struct Batch<'a> {
     /// listed the volume: a ReFS build's walk, or the walk of folders the
     /// index missed.
     pub replaying_walk: bool,
+    /// The reads have passed every change made during the volume's last
+    /// build, so a folder this batch creates is created now, and the batch
+    /// checks it for a copy into itself.
+    pub detects_repeats: bool,
+    /// The key of each record's name in the table of writes, made here
+    /// rather than in the write lock's hold, because folding the names is
+    /// most of what counting costs.
+    pub name_keys: Vec<u64>,
+}
+
+impl<'a> Batch<'a> {
+    /// A batch of `records` that replays no build and no walk, as most
+    /// batches do.
+    pub fn of(records: &'a [ParsedUsnRecord]) -> Self {
+        Batch {
+            records,
+            replaying_walk: false,
+            detects_repeats: true,
+            name_keys: writes::name_keys(records),
+        }
+    }
 }
 
 /// What a settled batch leaves for the caller to log and do.
@@ -290,7 +313,10 @@ pub fn settle_batch<R: VolumeReads>(
         needs_descriptor,
         anomalies,
         wants_compact,
-    } = index.write(|i| i.apply_batch(batch.records));
+        mut writes,
+    } = index.write(|i| i.apply_batch(&batch));
+    // Stable, so each file's writes keep the order of their records.
+    writes.sort_by_key(|w| w.frn);
     let mut settled = Settled {
         anomalies,
         missed_folders: 0,
@@ -338,10 +364,19 @@ pub fn settle_batch<R: VolumeReads>(
         });
     }
 
+    // The files the walk lists, whose sizes it stores before the size step.
+    let mut walked = Vec::new();
     if !needs_walk.is_empty() {
         let mut events = Vec::new();
         let walk = walk_folders(reads, &needs_walk, &mut cancelled, |listed| {
             events.push(listed);
+        })
+        .inspect_err(|_| {
+            // The rebuild that follows keeps the table, and the size step
+            // that would add these writes' bytes never runs.
+            if !writes.is_empty() {
+                index.write(|i| i.writes_mut().mark_at_least(&writes));
+            }
         })?;
         if walk == Walk::Cancelled {
             return Ok(settled);
@@ -357,6 +392,10 @@ pub fn settle_batch<R: VolumeReads>(
             Listed::Page(files) => files.as_slice(),
             Listed::Folder { .. } => &[],
         });
+        if !writes.is_empty() {
+            walked = listed.clone().map(|file| file.frn).collect();
+            walked.sort_unstable();
+        }
         make_room(index, &Room::of_listed(listed));
         index.write(|i| {
             for event in &events {
@@ -384,8 +423,17 @@ pub fn settle_batch<R: VolumeReads>(
             stats.push((frn, stat));
         }
     }
-    if !stats.is_empty() {
+    if !stats.is_empty() || !writes.is_empty() {
         index.write(|i| {
+            // Before `set_stat`, which replaces the sizes before.
+            if !writes.is_empty() {
+                i.add_write_sizes(&writes, &walked, |frn| {
+                    stats
+                        .binary_search_by_key(&frn, |(frn, _)| *frn)
+                        .ok()
+                        .map(|at| stats[at].1.size)
+                });
+            }
             for (frn, stat) in &stats {
                 i.set_stat(*frn, stat.size, stat.mtime);
                 i.set_created(*frn, stat.created);
@@ -454,12 +502,14 @@ mod tests {
         walk_folders,
     };
     use crate::index::volume::{Room, make_room};
+    use crate::index::writes::Writes;
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::layout::{LayoutFile, LayoutName};
     use crate::types::Frn;
     use crate::usn::record::{
-        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, ParsedUsnRecord,
-        USN_REASON_FILE_CREATE, USN_REASON_HARD_LINK_CHANGE, USN_REASON_RENAME_NEW_NAME,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, ParsedUsnRecord, USN_REASON_CLOSE,
+        USN_REASON_DATA_EXTEND, USN_REASON_FILE_CREATE, USN_REASON_HARD_LINK_CHANGE,
+        USN_REASON_RENAME_NEW_NAME,
     };
     use std::cell::RefCell;
     use std::collections::{BTreeSet, HashMap};
@@ -485,6 +535,7 @@ mod tests {
             reason,
             attributes: attributes(is_dir),
             name: name.as_bytes().to_vec(),
+            time: 0,
         }
     }
 
@@ -532,6 +583,7 @@ mod tests {
         listings: HashMap<Frn, Result<Vec<LayoutFile>, &'static str>>,
         links: HashMap<Frn, Result<Vec<FileLink>, &'static str>>,
         descriptors: HashMap<Frn, Result<Option<Vec<u8>>, &'static str>>,
+        sizes: HashMap<Frn, u64>,
     }
 
     fn descriptor(frn: Frn) -> Vec<u8> {
@@ -571,8 +623,12 @@ mod tests {
                 .unwrap_or_else(|| Ok(Some(descriptor(frn))))
         }
 
-        fn stat(&mut self, _: Frn) -> Result<Option<FileStat>, Self::Error> {
-            Ok(None)
+        fn stat(&mut self, frn: Frn) -> Result<Option<FileStat>, Self::Error> {
+            Ok(self.sizes.get(&frn).map(|&size| FileStat {
+                size,
+                mtime: 0,
+                created: 0,
+            }))
         }
 
         fn links(&mut self, frn: Frn) -> Result<Option<Vec<FileLink>>, Self::Error> {
@@ -590,8 +646,8 @@ mod tests {
         replaying_walk: bool,
     ) -> Result<(), WalkFailed<&'static str>> {
         let batch = Batch {
-            records,
             replaying_walk,
+            ..Batch::of(records)
         };
         settle_batch(index, reads, batch, || false).map(|_| ())
     }
@@ -782,6 +838,35 @@ mod tests {
         assert_eq!(paths(&index), set(&["a.txt"]));
         assert_eq!(index.borrow().stats().link_reconciles_dropped, 1);
     }
+
+    /// The size step adds a write's growth from the size the index held
+    /// before it stores the size it read. Added after the store, the growth
+    /// of every append would be 0.
+    #[test]
+    fn a_write_adds_its_growth_from_the_size_the_index_held() {
+        let index = index_of(&[(id(10), ROOT, "log.txt", false)]);
+        {
+            let mut i = index.borrow_mut();
+            i.set_stat(id(10), 10 << 20, 0);
+            let mut table = Writes::for_entries(0);
+            table.keep(i.writes_mut(), 0);
+            *i.writes_mut() = table;
+        }
+        let mut reads = Fake::default();
+        reads.sizes.insert(id(10), 12 << 20);
+        let append = USN_REASON_DATA_EXTEND | USN_REASON_CLOSE;
+        let write = record(id(10), ROOT, "log.txt", false, append);
+
+        settle(&index, &mut reads, &[write], false).expect("nothing to walk");
+
+        let index = index.borrow();
+        let values = index
+            .writes()
+            .of_name(ROOT, b"log.txt")
+            .expect("the write counted");
+        assert_eq!((values.writes, values.written), (1, 2 << 20));
+    }
+
     /// After `make_room`, the batch grows no buffer under the write lock.
     /// A buffer missing from an owner's list, or a `Room` that counts too
     /// little, would grow it here, and the hold would copy it again. The
@@ -835,7 +920,7 @@ mod tests {
 
         make_room(&index, &Room::of(&batch));
         let made = allocated(&index.borrow());
-        index.borrow_mut().apply_batch(&batch);
+        index.borrow_mut().apply_batch(&Batch::of(&batch));
 
         let after = allocated(&index.borrow());
         assert!(

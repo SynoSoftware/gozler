@@ -7,10 +7,11 @@ use gozler_core::proto::ResultItem;
 
 /// The labels of the inspector's fields: one entry's, in the pane's order,
 /// then the several entries' Size of files.
-pub(super) const FIELD_LABELS: [&str; 5] = [
+pub(super) const FIELD_LABELS: [&str; 6] = [
     "inspector.folder",
     "inspector.size",
     "inspector.date_modified",
+    "inspector.writes",
     "inspector.attributes",
     "inspector.total_size",
 ];
@@ -178,12 +179,21 @@ fn entry(
             words.join(", ")
         }
     });
+    // Empty for none or unknown, as in the first hour after the service
+    // starts; the row stays, so the rows and buttons below it never move.
+    let writes = text::any_writes(entry.writes)
+        .map(|w| {
+            let written = text::written(strings, w, text::bytes(strings, numbers, w.written));
+            strings.count("inspector.written", w.writes.into(), numbers, &[&written])
+        })
+        .unwrap_or_default();
     let values = [
         gozler_core::winpath::parent_of(&entry.path),
         size,
         entry
             .mtime_ft
             .map_or_else(unknown, |ft| numbers.date_time_seconds(ft)),
+        writes,
         attributes,
     ];
     InspectorCaptions {

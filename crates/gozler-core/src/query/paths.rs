@@ -676,6 +676,7 @@ mod tests {
             reason: USN_REASON_FILE_CREATE,
             attributes: if dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
             name: name.into_bytes(),
+            time: 0,
         };
         for level in 0..(MAX_PATH_HOPS as u64 + 4) {
             let dir = rec(100 + 2 * level, parent, format!("folder{level:06}"), true);

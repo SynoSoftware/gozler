@@ -127,7 +127,7 @@ impl Reader {
 
     pub(in crate::app) fn waiting(&self, now: Instant) -> Option<Waiting> {
         let (_, since) = self.pending?;
-        Some(Interest::Awaited.after(now.saturating_duration_since(since)))
+        Interest::Awaited.after(now.saturating_duration_since(since))
     }
 
     /// Cancels the command that runs; `false` when none runs. A cancelled

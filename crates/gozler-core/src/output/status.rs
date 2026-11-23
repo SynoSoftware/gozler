@@ -1,16 +1,18 @@
 //! The `gozler --status` report.
 
 use super::table::grouped;
-use crate::proto::{DaemonStatus, MemPair};
+use crate::output::filetime::filetime_to_unix_ms;
+use crate::proto::{DaemonStatus, MemPair, WritesStatus};
+use jiff::tz::TimeZone;
 use std::io::{self, Write};
 
 /// Writes the `--status` report: whether every volume is ready first, then
-/// each volume with its details under labels.
+/// each volume with its details under labels, its times in `tz`.
 ///
 /// # Errors
 ///
 /// The error of writing to `out`.
-pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
+pub fn write_status(s: &DaemonStatus, tz: &TimeZone, out: &mut impl Write) -> io::Result<()> {
     let ready = s.volumes.iter().filter(|v| v.phase.is_complete()).count();
     let entries: u64 = s.volumes.iter().map(|v| v.entries).sum();
     writeln!(
@@ -71,6 +73,9 @@ pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
         if let Some(max) = v.journal_max_bytes {
             detail(out, "Journal", &format!("{} MiB", max / (1024 * 1024)))?;
         }
+        if let Some(writes) = &v.writes {
+            detail(out, "Writes", &writes_line(writes, tz))?;
+        }
         // `allocated` above `used` is capacity slack.
         if let Some(m) = &v.memory {
             let total = m.total();
@@ -91,18 +96,24 @@ pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
                         part("folded names", &m.arena_folded)
                     ),
                 )?;
-                detail(
-                    out,
-                    "",
-                    &format!(
-                        "{} ({}), {}, {}, {}",
-                        part("file IDs", &m.frn_map),
-                        m.frn_map_kind,
-                        part("name tables", &m.name_tables),
-                        part("folders", &m.dir_children),
-                        part("permissions", &m.descriptors)
-                    ),
-                )?;
+                let mut line = format!(
+                    "{} ({}), {}, {}, {}",
+                    part("file IDs", &m.frn_map),
+                    m.frn_map_kind,
+                    part("name tables", &m.name_tables),
+                    part("folders", &m.dir_children),
+                    part("permissions", &m.descriptors)
+                );
+                // An older service does not report them.
+                for (name, p) in [
+                    ("writes", &m.writes),
+                    ("copies into themselves", &m.repeats),
+                ] {
+                    if let Some(p) = p {
+                        line.push_str(&format!(", {}", part(name, p)));
+                    }
+                }
+                detail(out, "", &line)?;
             }
         }
         // The drift counters are the only outward sign that the index and
@@ -141,6 +152,35 @@ pub fn write_status(s: &DaemonStatus, out: &mut impl Write) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// From when a volume's writes are counted, how full its table is, and how
+/// low its values may be: `counted since 2026-11-22 10:42, 1,204 of 65,536
+/// rows, values may be up to 3 writes and 40.0 MB low`.
+fn writes_line(writes: &WritesStatus, tz: &TimeZone) -> String {
+    let since = jiff::Timestamp::from_millisecond(filetime_to_unix_ms(writes.counted_since))
+        .map(|ts| {
+            ts.to_zoned(tz.clone())
+                .strftime("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| "an unknown time".into());
+    let mut line = format!(
+        "counted since {since}, {} of {} rows",
+        grouped(writes.rows.into()),
+        grouped(writes.size.into()),
+    );
+    let mut low = Vec::new();
+    if writes.low_writes > 0 {
+        low.push(plural(writes.low_writes, "write", "writes"));
+    }
+    if writes.low_bytes > 0 {
+        low.push(bytes(writes.low_bytes));
+    }
+    if !low.is_empty() {
+        line.push_str(&format!(", values may be up to {} low", low.join(" and ")));
+    }
+    line
 }
 
 /// One labelled line under a volume in the `--status` report.

@@ -285,13 +285,15 @@ impl IndexCaptions {
 }
 
 /// The text that `gozler --status` prints for the service's latest status,
-/// which Show report shows; `None` while the service does not answer.
-pub(crate) fn service_report(model: &Model) -> Option<String> {
+/// with its times in `tz`, which Show report shows; `None` while the service
+/// does not answer.
+pub(crate) fn service_report(model: &Model, tz: &jiff::tz::TimeZone) -> Option<String> {
     let (Some(status), None) = model.service() else {
         return None;
     };
     let mut report = Vec::new();
-    gozler_core::output::write_status(status, &mut report).expect("writing to memory cannot fail");
+    gozler_core::output::write_status(status, tz, &mut report)
+        .expect("writing to memory cannot fail");
     Some(String::from_utf8_lossy(&report).into_owned())
 }
 

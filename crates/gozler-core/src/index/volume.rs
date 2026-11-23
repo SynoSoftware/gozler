@@ -26,12 +26,14 @@
 //!   user sees its entries by another folder's rights.
 
 use super::descriptors::{DescriptorTable, Listable, SeenBy};
-use super::settle::SharedIndex;
+use super::repeats::RepeatEvents;
+use super::settle::{Batch, SharedIndex};
 use super::store::{
     CompactedNames, ComponentBytes, Counts, EntryFlags, EntryTable, FrnMap, Grow, IdWidth,
     MTIME_UNKNOWN, NameId, NamePair, NameRanks, NameStore, SIZE_UNKNOWN, grown_map, hash_bytes,
     moved, shrink_vec,
 };
+use super::writes::{PendingWrite, Writes};
 use crate::attributes::{Attributes, PackedAttributes};
 use crate::fold::{fold, fold_accents};
 use crate::include::VolumeRules;
@@ -39,7 +41,7 @@ use crate::layout::LayoutFile;
 use crate::links::{FolderLink, ReparseTarget};
 use crate::types::{EntryIdx, Frn, NIL};
 use crate::usn::record::{
-    FILE_ATTRIBUTE_REPARSE_POINT, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
+    FILE_ATTRIBUTE_REPARSE_POINT, USN_REASON_CLOSE, USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE,
     USN_REASON_RENAME_NEW_NAME,
 };
 use crate::usn::{ParsedUsnRecord, UsnOp, moves_folder_date, ops_for};
@@ -170,6 +172,10 @@ pub struct IndexMemory {
     pub dir_children: ComponentBytes,
     /// Each distinct folder descriptor's bytes and their lookup table.
     pub descriptors: ComponentBytes,
+    /// The table of writes of the last hour, allocated at its full size.
+    pub writes: ComponentBytes,
+    /// The list of folders copied into themselves and its test's buffers.
+    pub repeats: ComponentBytes,
     /// "dense" / "sparse" / "wide" (which `FrnMap` backing is in use).
     pub frn_map_kind: &'static str,
 }
@@ -183,6 +189,8 @@ impl IndexMemory {
             + self.name_tables
             + self.dir_children
             + self.descriptors
+            + self.writes
+            + self.repeats
     }
 }
 
@@ -223,6 +231,9 @@ pub struct ApplyOutcome {
     /// [`VolumeIndex::plan_compaction`] off the write lock and then
     /// [`VolumeIndex::apply_compaction`].
     pub wants_compact: bool,
+    /// The writes of the batch whose bytes the size step adds
+    /// (`Writes::add_sizes`), in the order of their records.
+    pub writes: Vec<PendingWrite>,
 }
 
 /// What a journal batch or a folder walk can add to the index, counted from
@@ -344,6 +355,38 @@ impl<I: SharedIndex, S> Grow<S> for Part<'_, I, S> {
     }
 }
 
+/// The chain-head entry for `frn` in `entries`, if present and not stale;
+/// a function of the two fields, so a caller can read them while it changes
+/// another field of the index.
+fn head_in(by_frn: &FrnMap, entries: &EntryTable, frn: Frn) -> Option<EntryIdx> {
+    let head = by_frn.get(frn)?;
+    (entries.frn(head) == frn).then_some(head)
+}
+
+/// An index with its list of folders copied into themselves taken out, so a
+/// check reads the index while it changes the list. Dropping it puts the
+/// list back, also when a check panics, so the placeholder, which keeps no
+/// event, never stays in the index.
+struct RepeatsOut<'a> {
+    index: &'a mut VolumeIndex,
+    repeats: RepeatEvents,
+}
+
+impl<'a> RepeatsOut<'a> {
+    /// Takes the list out of `index`; the placeholder allocates nothing
+    /// under the write lock.
+    fn take(index: &'a mut VolumeIndex) -> Self {
+        let repeats = std::mem::replace(&mut index.repeats, RepeatEvents::PLACEHOLDER);
+        RepeatsOut { index, repeats }
+    }
+}
+
+impl Drop for RepeatsOut<'_> {
+    fn drop(&mut self) {
+        std::mem::swap(&mut self.index.repeats, &mut self.repeats);
+    }
+}
+
 /// Whether the index keeps a size for each folder yet, and whether that
 /// size can be short.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -443,6 +486,12 @@ pub struct VolumeIndex {
     /// Where each folder link on the volume leads, by its file ID, as gozlerd
     /// read it from the disk ([`crate::links`]).
     folder_links: FxHashMap<Frn, ReparseTarget>,
+    /// The folder trees copied into themselves that journal batches found.
+    /// A rebuild moves them into the new index.
+    repeats: RepeatEvents,
+    /// The writes of the last hour, which journal batches count. A rebuild
+    /// moves them into the new index.
+    writes: Writes,
 }
 
 impl VolumeIndex {
@@ -511,6 +560,8 @@ impl VolumeIndex {
             left_out: FxHashSet::default(),
             descriptors: DescriptorTable::default(),
             folder_links: FxHashMap::default(),
+            repeats: RepeatEvents::allocate(),
+            writes: Writes::none(),
         };
         this.link_same_name(root_idx, root_name);
         this.link_same_name(lost_found, lf_name);
@@ -662,11 +713,20 @@ impl VolumeIndex {
     /// Applies a batch of journal records, returning the side effects the
     /// daemon must service. Bumps the generation once and reports through
     /// [`ApplyOutcome::wants_compact`] whether the arenas need compacting or
-    /// the name ranks need a merge.
-    pub fn apply_batch(&mut self, records: &[ParsedUsnRecord]) -> ApplyOutcome {
+    /// the name ranks need a merge. Unless the batch replays a build, each
+    /// folder it creates is checked for a copy into itself
+    /// ([`Self::repeats`]). Each record that the Include rules keep is
+    /// counted in [`Self::writes`], and [`ApplyOutcome::writes`] holds what
+    /// the size step adds to it.
+    pub fn apply_batch(&mut self, batch: &Batch<'_>) -> ApplyOutcome {
         let mut outcome = ApplyOutcome::default();
+        if self.writes.is_kept() {
+            // Most records of a batch count a write, so it never grows.
+            outcome.writes.reserve(batch.records.len());
+        }
         let mut screening = self.include.clone().map(include::Screening::new);
-        for rec in records {
+        self.writes.begin_batch();
+        for (at, rec) in batch.records.iter().enumerate() {
             let frn = rec.frn;
             let mut ops = ops_for(rec);
             let mut security_changed = false;
@@ -691,6 +751,8 @@ impl VolumeIndex {
                 }
                 Screen::Missed => ops.insert(0, UsnOp::Upsert),
             }
+            self.writes
+                .count(rec, batch.name_keys[at], &mut outcome.writes);
             for op in ops {
                 match op {
                     UsnOp::Upsert => {
@@ -721,6 +783,19 @@ impl VolumeIndex {
                             // A folder that moved brings what is below it to
                             // a place the rules may decide differently.
                             self.recheck_below(screening, frn);
+                        }
+                        // Only the open that created the folder has
+                        // FILE_CREATE, and it writes one CLOSE record, so
+                        // this counts each create once, whatever bits the
+                        // tool added on the same handle.
+                        let created = USN_REASON_FILE_CREATE | USN_REASON_CLOSE;
+                        if batch.detects_repeats
+                            && rec.is_dir()
+                            && rec.reason & created == created
+                            && let Some(folder) = self.head_of(frn)
+                        {
+                            let mut out = RepeatsOut::take(self);
+                            out.repeats.check(out.index, folder, rec.time);
                         }
                     }
                     UsnOp::Delete => {
@@ -754,6 +829,7 @@ impl VolumeIndex {
                 }
             }
         }
+        self.writes.add_writes(&outcome.writes);
         // Reason bits accumulate, so one change reaches a batch in several
         // records, and each FRN reported costs the daemon a link walk.
         outcome.needs_link_reconcile.sort_unstable();
@@ -772,6 +848,50 @@ impl VolumeIndex {
         // the expensive part off the write lock, where it would block queries.
         outcome.wants_compact = self.names.should_compact() || self.names.ranks_stale();
         outcome
+    }
+
+    /// The folder trees copied into themselves that journal batches found.
+    pub fn repeats(&self) -> &RepeatEvents {
+        &self.repeats
+    }
+
+    /// The list of [`Self::repeats`], to give it the service's counter, or
+    /// to move it into a rebuilt index.
+    pub fn repeats_mut(&mut self) -> &mut RepeatEvents {
+        &mut self.repeats
+    }
+
+    /// The writes of the last hour that journal batches counted.
+    pub fn writes(&self) -> &Writes {
+        &self.writes
+    }
+
+    /// The table of [`Self::writes`], to install it when a build ends, to
+    /// move the hour while the journal is quiet, and to mark a batch's
+    /// writes "at least".
+    pub fn writes_mut(&mut self) -> &mut Writes {
+        &mut self.writes
+    }
+
+    /// Adds the bytes of a batch's `writes` to [`Self::writes`] by rule 4,
+    /// from the size each file has in the index, before the size step
+    /// stores the size it `read`. A file in `walked`, sorted, has no size
+    /// before: a walk of its folder stored the size it has now, so its
+    /// Written reads "up to".
+    pub fn add_write_sizes(
+        &mut self,
+        writes: &[PendingWrite],
+        walked: &[Frn],
+        read: impl Fn(Frn) -> Option<u64>,
+    ) {
+        let (by_frn, entries) = (&self.by_frn, &self.entries);
+        self.writes.add_sizes(writes, |frn| {
+            let before = head_in(by_frn, entries, frn)
+                .filter(|_| walked.binary_search(&frn).is_err())
+                .map(|head| entries.size(head))
+                .filter(|&size| size != SIZE_UNKNOWN);
+            (before, read(frn))
+        });
     }
 
     /// Records that `n` hard-link walks could not complete and so were not
@@ -1213,8 +1333,7 @@ impl VolumeIndex {
 
     /// The chain-head entry for `frn`, if present and not stale.
     pub fn head_of(&self, frn: Frn) -> Option<EntryIdx> {
-        let head = self.by_frn.get(frn)?;
-        (self.entries.frn(head) == frn).then_some(head)
+        head_in(&self.by_frn, &self.entries, frn)
     }
 
     /// Looks up the child directory `name` of `parent` via the persistent
@@ -2013,6 +2132,8 @@ impl VolumeIndex {
             name_tables: self.names.tables_mem(),
             dir_children,
             descriptors: self.descriptors.memory(),
+            writes: self.writes.memory(),
+            repeats: self.repeats.memory(),
             frn_map_kind: self.by_frn.kind(),
         }
     }

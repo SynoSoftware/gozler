@@ -12,6 +12,7 @@
 //! result set.
 
 use super::{Answer, Command, Count, EsPlan, build_search, parse_argv};
+use crate::index::writes::{STEP_TICKS, Writes};
 use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
 use crate::layout::{LayoutFile, LayoutName};
 use crate::proto::{
@@ -865,6 +866,7 @@ fn dir_record(frn: u128, parent: u128, name: &str) -> ParsedUsnRecord {
         reason: USN_REASON_FILE_CREATE,
         attributes: FILE_ATTRIBUTE_DIRECTORY,
         name: name.as_bytes().to_vec(),
+        time: 0,
     }
 }
 
@@ -1189,4 +1191,42 @@ fn a_size_or_date_query_on_a_volume_with_unknown_sizes_exits_2() {
         outcome(&["report", "-size", "-n", "all"]),
         (vec![sizes_short.to_string()], 0)
     );
+}
+
+/// A volume counts writes from when its index was built, so in the first
+/// hour a write test can leave out a file written before; such a query
+/// warns and exits 2, where its answer would otherwise look complete. Once
+/// the writes cover the hour it exits 0, and a sort by writes, which tests
+/// nothing, never warns.
+#[test]
+fn a_write_test_in_the_first_hour_exits_2() {
+    const HOUR: i64 = 12 * STEP_TICKS;
+    const BUILT: i64 = 44_600_000 * STEP_TICKS;
+    let counted_until = |now: i64| {
+        let mut volumes = fixture();
+        for volume in &mut volumes {
+            let mut table = Writes::for_entries(0);
+            table.keep(volume.index.writes_mut(), BUILT);
+            table.move_to(now);
+            *volume.index.writes_mut() = table;
+        }
+        volumes
+    };
+    let warning = "results may be incomplete: the writes of a volume in scope cover only part \
+                   of the last hour, so write tests leave out files written before that";
+    let outcome = |volumes: &[Volume], args: &[&str]| match print(volumes, args) {
+        Printed::Paths { warnings, exit, .. } => (warnings, exit),
+        other => panic!("{args:?}: {other:?}"),
+    };
+    let first_hour = counted_until(BUILT + HOUR / 2);
+    assert_eq!(
+        outcome(&first_hour, &["writes:0", "-n", "all"]),
+        (vec![warning.to_string()], 2)
+    );
+    assert_eq!(
+        outcome(&first_hour, &["report", "-sort", "writes"]),
+        (vec![], 0)
+    );
+    let full_hour = counted_until(BUILT + 2 * HOUR);
+    assert_eq!(outcome(&full_hour, &["writes:0", "-n", "all"]), (vec![], 0));
 }

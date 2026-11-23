@@ -48,10 +48,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetFocus, INPUT, INPUT_0, INPUT_MOUSE, IsWindowEnabled, MOUSEINPUT, SendInput, SetFocus,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BeginDeferWindowPos, DeferWindowPos, DestroyWindow, EndDeferWindowPos, GWL_EXSTYLE, GWL_STYLE,
-    GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
-    GetWindowTextLengthW, GetWindowTextW, IsChild, IsIconic, IsWindowVisible, PostMessageW,
-    SET_WINDOW_POS_FLAGS, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMINNOACTIVE,
+    BeginDeferWindowPos, DeferWindowPos, DestroyWindow, EndDeferWindowPos, FLASHW_TIMERNOFG,
+    FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GWL_EXSTYLE, GWL_STYLE, GetClassNameW, GetClientRect,
+    GetParent, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, IsChild, IsIconic, IsWindowVisible, PostMessageW, SET_WINDOW_POS_FLAGS,
+    SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWDEFAULT, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE,
     SW_SHOWNORMAL, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOCOPYBITS, SWP_NOMOVE, SWP_NOREDRAW,
     SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetWindowPos,
     SetWindowTextW, ShowWindow, UIS_CLEAR, UISF_HIDEFOCUS, WINDOW_EX_STYLE, WINDOW_STYLE,
@@ -237,6 +238,27 @@ impl Hwnd {
     pub(crate) fn show_minimized(self) {
         // SAFETY: plain values.
         let _ = unsafe { ShowWindow(self.0, SW_SHOWMINNOACTIVE) };
+    }
+
+    /// Shows the hidden window without taking the focus from the program
+    /// in front, and flashes its taskbar button until the person brings it
+    /// to the front, as a window that asks for attention does. A window
+    /// already shown, also one the person minimized, stays as it is.
+    pub(crate) fn show_and_flash(self) {
+        let flash = FLASHWINFO {
+            cbSize: size_of::<FLASHWINFO>() as u32,
+            hwnd: self.0,
+            dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+            uCount: 0,
+            dwTimeout: 0,
+        };
+        // SAFETY: plain values, and a complete structure the call reads.
+        unsafe {
+            if !IsWindowVisible(self.0).as_bool() {
+                let _ = ShowWindow(self.0, SW_SHOWNOACTIVATE);
+            }
+            let _ = FlashWindowEx(&flash);
+        }
     }
 
     pub(crate) fn is_visible(self) -> bool {

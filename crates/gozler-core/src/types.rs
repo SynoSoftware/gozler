@@ -102,6 +102,11 @@ pub enum SortKey {
     /// Unknown, also while Dates created is off, sorts last, as an unknown
     /// date modified does. From protocol 13.
     DateCreated,
+    /// The writes of the last hour; unknown sorts last, as an unknown size
+    /// does. An addition within protocol 22, so an older gozlerd refuses it.
+    Writes,
+    /// The bytes those writes put on the disk, as for [`SortKey::Writes`].
+    Written,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,7 +128,11 @@ impl SortSpec {
     pub fn default_for(key: SortKey) -> Self {
         let dir = match key {
             SortKey::Name | SortKey::Path | SortKey::Extension => SortDir::Asc,
-            SortKey::Size | SortKey::DateModified | SortKey::DateCreated => SortDir::Desc,
+            SortKey::Size
+            | SortKey::DateModified
+            | SortKey::DateCreated
+            | SortKey::Writes
+            | SortKey::Written => SortDir::Desc,
         };
         Self { key, dir }
     }
@@ -155,6 +164,10 @@ pub enum EsColumn {
     Files,
     /// For a folder, how many folders are below it.
     Folders,
+    /// The writes of the last hour of a file's name or a folder's files.
+    Writes,
+    /// The bytes those writes put on the disk.
+    Written,
 }
 
 /// Progress of a volume's private build, separate from its published index.

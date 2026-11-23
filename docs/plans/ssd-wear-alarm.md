@@ -35,6 +35,27 @@ This plan is the "concrete incremental-monitoring task" that
 `docs/research/cli-gap-comparison.md` ("Recent changes") waited for. It does
 not add a recent-changes list: it keeps counts, not events.
 
+## Scope cut (owner, 2026-11-22: "maybe we're overthinking this")
+
+Stages 1 and 4 are built. What remains is cut to what shows the numbers
+and warns about a folder copied into itself; the rest waits until the owner
+has used the window:
+
+- **Stage 2:** `writes:`, `written:`, `-sort writes`, `-sort written`,
+  `--writes`, and the JSON fields `writes` and `written`. No `written_is`
+  and no `write_steps`.
+- **Stage 3:** the Writes and Written columns, and one inspector line,
+  such as "412 writes, up to 1.9 GB in the last hour". No steps, no "how
+  written", and no status bar text.
+- **Stage 5:** one setting, "Warn me when a folder is copied into itself",
+  and the "SSD wear" window for those events, pushed through the held
+  `Wear` request. No wear warning, no 5-minute check, no GB limits and no
+  ignore list.
+- **Tests:** only where a wrong value would go unseen. The owner decides
+  how to test after seeing the window.
+
+Where the stages below say more, this section wins.
+
 ## Schedule
 
 **Scheduled:** approved on 2026-11-22, after a Fable review found no
@@ -86,12 +107,15 @@ part named, so the owner can decide while stages 1 to 4 are built.
    plan. The limits are provisional, and a warning about normal work on
    every PC costs more trust than a warning that a person has to turn on.
    When "After install" has set the limits, the owner decides whether a new
-   install starts with it on. The other choice, on from the start, makes the
-   window ask the service every 5 minutes on every PC and shows the first
-   wrong warning to people who never asked for the watch.
+   install starts with it on. The other choice, on from the start, makes
+   every window hold a watch request on every PC and shows the first wrong
+   warning to people who never asked for the watch.
 
 Settled by the owner (2026-11-22): appends count as writes, and the bytes
 they add count in Written; the limits read Written, not writes times size.
+gozlerd counts writes always, whether or not anyone turned the watch on,
+because the person also wants to see and sort by Writes and Written
+without the warning; the setting turns on only the warning.
 
 ## What a person sees, and what the warning reads
 
@@ -472,6 +496,28 @@ stage 1 starts, not after an install.
 | `robocopy C:\weartest\a C:\weartest\a\a /e` | the reasons of the record with Close of each new folder `a` and `sub` | file create and Close in one record, with or without other reasons | stage 4, item 2: the test for both bits; other reasons here show why "no other bit" would have failed |
 | Copy the folder `a` in File Explorer and paste it into `a\a` | the same | the same | the same |
 
+**Result (owner's `C:`, 2026-11-22):** every action matched "Expected", so
+rule 1 and stage 4 item 2 stand as written.
+- An in-place save (a program's own write of the whole file, done for the
+  check instead of Notepad) wrote `Data truncation`, then
+  `Data extend | Data truncation`, then the same with `Close`, and no file
+  create.
+- The append wrote `Data extend`, then `Data extend | Close`.
+- git's second save of `index` wrote, in one second and next to each other:
+  `index.lock` created and closed, then `index` `File delete | Close` with
+  the name `index` and the folder's ID, then `index.lock`
+  `Rename: old name` and `index` `Rename: new name`, then
+  `Rename: new name | Close`. The delete comes before the rename. The first
+  save, with no `index` yet, wrote only the rename.
+- robocopy and File Explorer's copy engine both wrote, for each new folder,
+  `File create` and then `File create | Close`, and later, in a separate
+  open, `Basic info change | Close` (Explorer also `Object ID change`). So
+  the record with both bits holds no other bit on these two tools, and the
+  test of item 2 that allows other bits also fits a tool that adds them.
+
+Notepad's own save and the owner's editor were not checked, so "After
+install" checks them.
+
 On a ReFS volume, such as a Dev Drive, the same five actions with that
 drive's letter show whether ReFS writes the same reasons; the plan assumes
 it does. The check of NVIDIA's file stays in "After install", because no PC
@@ -526,7 +572,8 @@ record with no Close after it means that the container holds the file open.
    takes up to four write holds; the step; the kinds; and whether the open
    created the file. The `Vec` grows under the write lock as `needs_stat`
    does: by at most one value of about 40 bytes for each record of the
-   batch, and a batch is one read of at most 512 KiB (`READ_BUFFER_BYTES`),
+   batch (56 bytes as built, because the value carries the folder's file
+   ID), and a batch is one read of at most 512 KiB (`READ_BUFFER_BYTES`),
    so it stays under a few hundred KiB. That is the only allocation the
    counting adds under the lock; the fold, the rows and the lists allocate
    nothing. One open can put several values for one file in a batch, because
@@ -574,6 +621,14 @@ Tests, each with literal times, sizes and counts:
 - Rule 8: a rebuild keeps the values and moves "counted since"; into a
   smaller table it keeps the rows with the most Written and adds the rest to
   "may be low by".
+
+The cost of counting is measured, not only estimated, because it runs for
+every journal record on every PC, whether or not the person turned the
+watch on. A criterion bench in `crates/gozler-core/benches` applies a batch
+of 5,000 records (creates, writes with `CLOSE`, renames and deletes) to an
+index of 2 million entries. It runs it in matched pairs, before and after
+stage 1, and reports the CPU cycles that counting adds for each record. Its
+numbers go in the stage's report and in `docs/DESIGN.md`.
 
 ## Stage 2: searches, sorts and the command line
 
@@ -690,10 +745,11 @@ Tests:
    what the warning's rule reads, and the last part names the kinds of rule
    4: added to the end, replaced, written over in place, or several of them. It is where a person learns how a file was
    written; no column holds it.
-3. **The window asks for the values** while either column or the inspector
-   line is shown, as it asks for Date created only while that column is
-   shown (`fetch.rs`, `want_created`): 14 bytes a row and one lookup a row
-   sent.
+3. **The window asks for the values on every page,** as it asks for Date
+   created (`fetch.rs`, `ChunkAsk::request`), so showing a column or the
+   inspector line needs no second request: 13 bytes a row and one lookup a
+   row sent. An export asks for them only when it has one of the two
+   columns, as for Date created (`ExportAsk`).
 4. **A row shows the values of the moment its chunk was read,** as it shows
    the size of that moment. The order is the search's, and `F5` searches
    again (see "Not planned" in `docs/DESIGN.md`).
@@ -845,35 +901,81 @@ trees by hand, and never warns.
    that are not 0 (`BCryptGenRandom`, as the result snapshot ids use). The
    counter and the events are not saved (rule 9), so the run id is what
    tells a client that the numbers started again.
-6. **Travel,** as folder links travel (`Request::Status { links_held }` and
-   the reply's `links: Option<Links>`, `proto/types.rs`). A `Status` request
-   gains `repeats_after: Option<RepeatsAfter>`, with the fields `run` and
-   `number`, an addition by rule 4 of "Additions and breaks"; `None` means
-   that the client does not use it. The reply gains `repeats: Option<...>`,
-   an addition by rule 1 of "Additions and breaks", with the service's run
-   id, the counter's value now (the highest number given so far), the events
-   to send and how many events were dropped. "After" is the service's
+6. **Travel: gozlerd tells the window; the window does not ask on a
+   timer.** A copy into itself writes gigabytes in minutes, so the warning
+   must come when the event is made, not at the next check of a timer. A
+   new request, `Request::Wear { after: RepeatsAfter, copies }`, is an
+   addition by rule 5 of "Additions and breaks", and its reply by rule 6.
+   `RepeatsAfter` has the fields `run` and `number`. The request carries
+   the person's copies because gozlerd cannot read `ui.json`. Wear itself
+   is not pushed: its rule needs writes over 10 minutes anyway, so the
+   window checks it with a search every 5 minutes (stage 5, item 3).
+
+   gozlerd answers the request at once when it holds something newer than
+   `after`, and otherwise holds it until it does. The reply is
+   `Wear { run, highest, events, dropped }`: the service's run id, the
+   counter's value now (the highest number given so far), the events to
+   send, and how many events the lists dropped. "After" is the service's
    sequence number, not a time, because the clock can be set back (rule 5).
    Which events the reply holds:
-   - **`run` is 0:** none. This is a client's first check. It learns the run
-     id and the highest number, and warns about nothing older.
+   - **`run` is 0:** none, answered at once. This is a client's first
+     request. It learns the run id and the highest number, and warns about
+     nothing older.
    - **`run` is the service's run id:** the events whose number is above
-     `number`.
-   - **any other `run`:** every event the service holds. The service
-     started again after that client's last check, so each of its events is
-     newer than what the client has seen. Without the run id, a client that
-     had seen number 12 would miss the new service's events 1 to 12.
+     `number` and whose copies reach `copies`. When there is none, the
+     request waits.
+   - **any other `run`:** every event the service holds, answered at once.
+     The service started again after that client's last request, so each
+     of its events is newer than what the client has seen. Without the run id, a client that had seen number
+     12 would miss the new service's events 1 to 12.
+
+   **The wait, in the service.** After a batch that made or updated an
+   event, the tail's thread wakes the held requests (a
+   `tokio::sync::Notify` that the pipe server owns; `notify_waiters` may be
+   called from any thread). A request first registers for the wake (an
+   enabled `Notified`) and only then reads the lists, so an event made
+   between its read and its wait still wakes it. It then answers, or waits
+   again when nothing newer is for it, such as an event below its copies
+   or one its caller may not see. `Wear` waits in `handle_connection`, as
+   an async task, and uses the blocking pool only to read the lists; every
+   other request runs in `serve` on the blocking pool, where a wait would
+   park one pool thread for each window. While it waits, the server also
+   reads that pipe, as `handle_connection` does while a request runs, so a
+   window that closes frees its pipe instance at once. A held `Wear` is
+   exempt from `IDLE_TIMEOUT` and keeps one of the `MAX_CONNECTIONS` (64)
+   for as long as its window runs; only the first window of each signed-in
+   person holds one, so the cap leaves room unless dozens of people are
+   signed in at once, and then a refused connection is retried as below.
+   An event's copies grow once for each whole group, not for each create,
+   and the tail wakes at most once per batch, so even a copy that runs
+   away answers a window at most once per batch.
+
+   **The wait, in the window.** `Client::next_response` waits by checking
+   the pipe every 5 ms (`POLL_INTERVAL`) and gives up after 30 s with no
+   byte (`READ_DEADLINE`), so it cannot hold a request. `gozler-client`
+   gains a wait for this reply alone: a blocking read of the pipe, with no
+   check every 5 ms and no deadline. It runs on a `win::work` thread, which
+   the work owner ends with `CancelSynchronousIo` at Exit, when the setting
+   is turned off, and before the request that a changed limit sends, as it
+   ends the
+   threads that read a folder (`docs/DESIGN.md`, "No disk call holds the
+   window or Exit"); the read then returns, and the wait reports
+   `Cancelled`. So Exit never waits for it, and the thread uses no CPU while
+   it waits. A service that stops breaks the pipe, the read fails, and the
+   window tries again (stage 5, item 3).
 
    The client then keeps the reply's run id and highest number for its next
-   check. It keeps the highest number, not the highest among the events it
-   got, because a filtered user does not get every event. The service reads
-   the counter before it reads any volume's list: an event takes its number
-   inside its volume's write hold, so every event up to that value is in a
-   list by the time the reply reads it under the read hold, and an event
-   numbered later is sent again at the next check, where the window updates
-   the row it already shows (stage 5, item 4). A
-   filtered user gets only the events whose top's parent they may
-   list, as `folder_links` filters by `may_list` (`volume.rs`).
+   request. It keeps the highest number, not the highest among the events
+   it got, because a filtered user does not get every event. The service
+   reads the counter before it reads any volume's list: an event takes its
+   number inside its volume's write hold, so every event up to that value
+   is in a list by the time the reply reads it under the read hold. An
+   event numbered later, also one made while the window handled the last
+   reply, is above the highest number and answers the next request at
+   once, so none is missed; the window updates the row it already shows
+   (stage 5, item 4). A filtered user gets only the events whose top's
+   parent they may list, as `folder_links` filters by `may_list`
+   (`volume.rs`).
 7. **`repeats:`** stays as a search function, for looking by hand: `repeats:4`
    finds each folder whose path ends in the same group of folder names, of
    any length, at least 4 times in a row. It calls the test of item 1. It takes
@@ -920,10 +1022,14 @@ Tests:
   tree already at 6 copies with no event gets one at its next create; a
   create whose record also holds `USN_REASON_BASIC_INFO_CHANGE` counts; and
   a create during the replay makes none.
-- Which events a `Status` reply holds: none for run 0, the events above
+- Which events a `Wear` reply holds: none for run 0, the events above
   `number` for the service's own run id, and every event for another run
   id. It watches a window that misses the events of a service that started
   again, which no other test and no compiler sees.
+- A held `Wear` request answers when the tail makes an event, keeps waiting
+  for an event below its copies, and an event made between two requests
+  answers the second at once. It watches a warning that never comes, or a
+  request that answers in a loop.
 
 ## Stage 5: Watch SSD wear
 
@@ -941,41 +1047,86 @@ Tests:
    The check box starts off (owner decision 4). The two GB boxes' tooltip
    says "Bytes written in the last hour, for a file or folder written at
    least 5 times over more than 5 minutes", with the two 5s from the
-   constants that the check uses: the least writes, and the length of a
-   step. The copies box's lowest value is the daemon's
+   constants that the watch uses: the least writes, and the length of a
+   step. The two GB boxes take whole numbers from 1. The copies box's
+   lowest value is the daemon's
    constant (stage 4, item 5). The number boxes, the list and Remove are
    disabled while the check box is off, and Remove while no row is selected.
 2. **The rules.** A file or a folder warns when it has at least 5 writes in
    the last hour, at least 3 steps with a write, and a Written that reaches
    its limit (owner decision 3). The 5 and the 3 are constants beside the
-   function, not settings. The steps come with each row (stage 2, item 4);
-   while values may be low they are a lower bound, so the rule can warn
-   later but never wrongly (rule 13). A fault that starts now so warns
-   at the first check after its third step begins, 5 to 15 minutes later. A
-   folder copied into itself warns when its event (stage 4, item 5) has at
-   least the number of copies set. One function in `gozler-ui`'s `core`
-   decides all three from the rows and events of the check, the limits, the
-   ignore list and the paths already warned, so unit tests cover it without
-   a window.
-3. **The check.** While the setting is on, the first window (the one with
-   the tray icon) asks gozlerd every 5 minutes, through `app::work`, also
-   while it is hidden: the search `writes:>=5 written:>=` the smaller limit,
-   asking for the values (`Want::Writes`), and `Status` with `repeats_after`
-   set to the run id and the highest number of the last reply (stage 4, item
-   6). The first check after the window starts, or after the setting is
-   turned on, sends run 0: it gets no events, keeps the reply's run id and
-   highest number, and so warns about no copy made before it. The window
-   keeps the two values in memory only. The search has no row limit: the
-   table's size bounds it, and a limit would cut before the check's own
-   rules, so ignored and already warned rows would fill the cut and hide the
-   rest. It visits only the table's rows (stage 2, item 3), at most 65,536,
-   so milliseconds are suspected, not measured. A row or an event under an ignored path is left out. A new
-   event warns as "Copied into itself" with its copies. The window polls
-   `Status` only while waiting can change the answer (`core/model.rs`), so
-   this request adds the only periodic status traffic while the setting is
-   on. A check that fails, because the service does not answer, shows nothing; the next one runs 5
-   minutes later, and the window's own notice says what is wrong with the
-   service when the person opens it.
+   function, not settings. A GB is 2^30 bytes, as the query parser reads
+   `gb` (`query/parse.rs`), in the search and in the function alike, so
+   the two never disagree by a whole GB. The steps come with each row
+   (stage 2, item 4); while values may be low they are a lower bound, so
+   the rule can warn later but never wrongly (rule 13). A fault that starts
+   now has writes in a third step 5 to 10 minutes later, and warns at the
+   next check after that, at most 5 minutes later. A folder
+   copied into itself warns when its event (stage 4, item 5) has at least
+   the number of copies set, within a batch of the create that made it.
+   One function in `gozler-ui`'s `core` decides all three from the rows of
+   the search and the events of a reply, the limits, the ignore list and
+   the paths already warned, so unit tests cover it without a window.
+3. **The watch.** While the setting is on, the first window (the one with
+   the tray icon) does two things through `app::work`, also while it is
+   hidden:
+   - **Copies, pushed.** It holds one `Wear` request (stage 4, item 6) with
+     the person's copies, so a folder copied into itself warns within a
+     batch of the create.
+   - **Wear, checked every 5 minutes.** A window timer runs the search
+     `writes:>=5 written:>=` the smaller limit, asking for the values
+     (`Want::Writes`), and applies item 2 to its rows. The wear rule needs
+     writes in 3 of the hour's 5-minute steps, so it cannot fire sooner
+     than 5 to 10 minutes after a fault starts; a check every 5 minutes
+     adds at most 5 minutes to that, at the cost of one search of the
+     table's rows (stage 2, item 3), at most 65,536, a few milliseconds
+     (suspected, not measured). The first check runs at once when the
+     window starts, when the setting is turned on, and when a limit or the
+     ignore list changes. The search has no row limit: the table's size
+     bounds it, and a limit would cut before the watch's own rules, so
+     ignored and already warned rows would fill the cut and hide the rest.
+   - **A held task in the work owner.** A task in `app::work` today has
+     one of two interests (`core/work.rs`): `Awaited` turns slow after 3 s
+     (`SLOW`), and `Background` expires after 10 s and is cancelled. While
+     any task runs, `tick` reports active, and the window wakes every
+     250 ms (`Timer::Work`). A held request fits neither, so `core::work`,
+     the one owner of what a slow task shows, gains a third interest,
+     `Held`: it never turns slow, never expires, and does not make `tick`
+     report active, so the window's work timer stops while only held tasks
+     run.
+   - **A change of the copies does not wait for the old read.** The cancel
+     can arrive just before the old thread enters its read, and then that
+     read blocks until the service sends something. So the request that a
+     change sends runs at once on its own connection, and the reply of the old
+     one, if it ever comes, is dropped because a newer request replaced it.
+     This differs from a `win::work` slot today, which starts its pending
+     input only when the running task completes: a held task's slot starts
+     a new thread and connection at once and discards an old thread's reply
+     by its id. An old thread whose cancel was lost keeps its connection,
+     one of the 64, until the service next sends something or the pipe
+     closes.
+   - **Which events.** The window sends run 0 when it starts and when the
+     setting is turned on, so it warns about no older copy. When the copies
+     or the ignore list change, it sends the service's run id with number
+     0: the reply holds every event that reaches the new copies, so a tree
+     at 6 copies warns at once when the person lowers the copies from 8 to
+     4. The window's memory of the paths warned today keeps this from
+     repeating a warning.
+   - **An older service** that cannot read `Wear` refuses it. The window
+     then stops the watch and shows "Needs a newer Gozler service" in the
+     SSD wear section, built from the refusal as the search's own message
+     for a newer service is (`docs/DESIGN.md`, "Requests"), and starts it
+     again when a status reply shows another service.
+   - **What the window does with a reply.** A row or an event under an
+     ignored path is left out. A new event warns as "Copied into itself"
+     with its copies. Then the window sends the next `Wear` with the
+     reply's run id and highest number, which it keeps in memory only. An
+     event made while it handled the reply is above that number and
+     answers the next request at once.
+   - **A request or a check that fails,** because the service does not
+     answer or stopped, shows nothing. A failed `Wear` is sent again at the
+     next 5-minute check, and the window's own notice says what is wrong
+     with the service when the person opens it.
 4. **The warning** (owner decision 1) is one window of its own with a
    taskbar button (`WS_EX_APPWINDOW`, no owner, as a Viewer has), so it can
    show while the main window is hidden in the tray. It shows without taking
@@ -993,13 +1144,13 @@ Tests:
      selected row. Ignore adds the selected row's path to the ignore list and
      removes the row. Show and Ignore are disabled while no row is selected.
 
-   While the window is open, a later check adds its rows in place, updates
+   While the window is open, a later reply adds its rows in place, updates
    the copies of a row it already shows, and flashes the button again;
    nothing is cleared and filled again.
 5. **Each path warns at most once a day,** while Gozler runs, so a file that
-   stays busy is not reported every 5 minutes.
+   stays busy is not reported at every check.
 6. **The ignore list** (owner decision 2). A folder ignores everything below
-   it. The check compares full paths in `core`, without case, so it adds no
+   it. The watch compares full paths in `core`, without case, so it adds no
    term to its searches.
 7. **What the watch cannot see is said where the person turns it on.** When
    Apply turns the setting on:
@@ -1030,6 +1181,15 @@ warning with one file and one folder.
 
 ## After install
 
+**No check writes more than a few KB to the disk** (owner, 2026-11-22: "use
+synthetic data"). The wear rule, the limits, one copy that must not warn,
+and the warning's content are proven by unit tests over synthetic journal
+records and rows. A check here only confirms that the installed build
+follows those tests, with tiny files and empty folders.
+
+- **Notepad's own save, and the owner's editor:** save a small file twice and see
+  Writes 2 on it, with no row for a temporary name that the program renames
+  over the file only once.
 - **On a PC with an affected NVIDIA driver (621.14 or 621.24):** whether
   `nvlog.nvlgstg` shows writes, and how Written reads. Writes and a Written
   near what Resource Monitor shows means the plan finds it. Few writes and a
@@ -1037,27 +1197,34 @@ warning with one file and one folder.
   file open, and the next step is in "Ideas considered".
 - **The counts, once, with the installed build.** "Before stage 1" already
   read the journal's records for these actions, so this checks only that
-  the values follow them: save a 1 MB file twice from Notepad and see Writes
+  the values follow them: save a 4 KB file twice from Notepad and see Writes
   go 1, 2 and Written read "up to"; add a line with `echo x>>file` and see
   Writes go up by one and Written by 1 KiB, exact (rule 6 rounds up); save a
   file from a program that saves through a temporary file and see the name's
   Writes go up by one.
 - **On a ReFS volume, such as a Dev Drive:** the same three steps, when
   "Before stage 1" was not run there.
-- **A folder copied into itself:** run `robocopy a a\a /e` four times in a
-  test folder while Gozler runs. The warning appears once and updates. An old
-  copied tree made before the service started never warns, and
-  `gozler folder: repeats:4` finds it.
+- **A folder copied into itself,** with empty folders only: in a test
+  folder that holds the empty folders `a\sub`, run
+  `robocopy a a\a /e /lev:6` while Gozler runs and the setting is on. It
+  makes a few folders and no file data; `/lev:6` stops robocopy, which
+  would otherwise copy its own copies until the path is too long. The
+  warning appears once, in the "SSD wear" window, with Windows
+  notifications turned off and the main window hidden in the tray. A
+  second run updates the same row. `gozler folder: repeats:4` finds the
+  tree. Delete the test folder afterwards.
 - **The limits:** `gozler -sort written --writes --json -n 30` a few times
-  over a day on the owner's PC, and the defaults of owner decision 3, the
-  least steps with a write included (`write_steps`), set from what it shows.
-  Then the owner decides whether the setting starts on (owner decision 4).
-- **One copy does not warn:** copy 10 large files into one folder while the
-  setting is on, and see no warning.
-- **The warning** with Windows notifications turned off and the window
-  hidden in the tray.
-- **The 5-minute check** while the window is hidden, with Task Manager open:
-  no CPU between checks.
+  over a day of the owner's normal work, which writes nothing extra, and
+  the defaults of owner decision 3, the least steps with a write included
+  (`write_steps`), set from what it shows. Then the owner decides whether
+  the setting starts on (owner decision 4).
+- **The watch** while the window is hidden, with Task Manager open: no CPU
+  in the window between its 5-minute checks, and the copy warning above
+  within a second of robocopy's fourth level.
+
+"One copy does not warn" and a file that does warn are unit tests of stage
+5, item 2, over synthetic rows, so no check copies large files or writes a
+file for 10 minutes to see a warning.
 
 ## Ideas considered
 
@@ -1084,6 +1251,16 @@ Kept:
   made before gozlerd started; it never warns.
 
 Not in this plan, and why:
+
+- **A check every 5 minutes for copies into themselves.** Such a copy
+  writes gigabytes in the minutes before the check, so the held `Wear`
+  request (stage 4, item 6) pushes it within a batch.
+- **Pushing wear warnings too** (owner, 2026-11-22: simplify). The wear
+  rule needs writes in 3 of the hour's 5-minute steps, so it fires 5 to 10
+  minutes after a fault starts; a check every 5 minutes adds at most 5
+  minutes. Pushing it needed a list of crossings in gozlerd, a rule for
+  when a value passes a limit, a `crossed` flag and special requests for
+  changed limits: about half of stage 5's hard code, for those 5 minutes.
 
 - **A folder's count summed up to the root, as its size is.** `C:\`,
   `Users` and `AppData` would lead every list and every warning, each record

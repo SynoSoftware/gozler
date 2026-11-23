@@ -35,6 +35,7 @@ fn results() -> QueryResults {
         attributes: Some(Attributes::from_letters(letters).expect("attribute letters")),
         counts: None,
         identity: None,
+        writes: None,
     };
     QueryResults {
         total: 4,
@@ -47,6 +48,7 @@ fn results() -> QueryResults {
         more: false,
         volumes_incomplete: false,
         metadata_pending: false,
+        writes_partial: false,
         generation: 0,
         sums: None,
     }
@@ -136,6 +138,7 @@ const ROWS: &[Row] = &[
   "more": false,
   "volumes_incomplete": false,
   "metadata_pending": false,
+  "writes_partial": false,
   "generation": 0
 }
 "#,

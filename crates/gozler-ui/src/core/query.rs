@@ -667,13 +667,15 @@ pub(crate) const ATTRIBUTES: [(char, &str); 6] = [
 ];
 
 /// The sort keys in View > Sort by's order.
-pub(crate) const SORT_KEYS: [SortKey; 6] = [
+pub(crate) const SORT_KEYS: [SortKey; 8] = [
     SortKey::Name,
     SortKey::Path,
     SortKey::Size,
     SortKey::DateModified,
     SortKey::DateCreated,
     SortKey::Extension,
+    SortKey::Writes,
+    SortKey::Written,
 ];
 
 pub(crate) const SORT_DIRECTIONS: [SortDir; 2] = [SortDir::Asc, SortDir::Desc];
@@ -686,6 +688,8 @@ pub(crate) fn sort_key_label(key: SortKey) -> &'static str {
         SortKey::DateModified => "sort.date_modified",
         SortKey::DateCreated => "sort.date_created",
         SortKey::Extension => "sort.extension",
+        SortKey::Writes => "sort.writes",
+        SortKey::Written => "sort.written",
     }
 }
 

@@ -129,6 +129,7 @@ mod tests {
             reason,
             attributes: 0x20,
             name: b"a.txt".to_vec(),
+            time: 0,
         }
     }
 

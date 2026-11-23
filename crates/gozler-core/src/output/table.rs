@@ -33,6 +33,7 @@
 //!   and TSV, and empty for a file and for unknown counts.
 //! - A folder's full path carries no trailing backslash.
 
+use crate::index::writes::Bound;
 use crate::output::format_date_local;
 use crate::proto::ResultItem;
 use crate::query::extension;
@@ -82,6 +83,9 @@ pub struct TableWriter {
 
 /// Width of the plain-text Size column: `99,999,999,999` fits, as in es.
 const PLAIN_SIZE_WIDTH: usize = 14;
+/// Width of the plain-text Written column: a size that is `>=` or `<=` a
+/// bound, as `<=99,999,999,999`, fits.
+const PLAIN_WRITTEN_WIDTH: usize = 16;
 /// Width of the plain-text Date Modified column, es's width for a date:
 /// `2026-10-17T12:34:56` fits, so an unknown date is as wide as a known one.
 const PLAIN_DATE_WIDTH: usize = 19;
@@ -168,6 +172,23 @@ impl TableWriter {
                 },
                 EsColumn::Files => count_cell(item.counts.map(|c| c.files), plain),
                 EsColumn::Folders => count_cell(item.counts.map(|c| c.folders), plain),
+                EsColumn::Writes => count_cell(item.writes.map(|w| w.writes), plain),
+                EsColumn::Written => match item.writes {
+                    Some(w) => {
+                        let bytes = if plain {
+                            grouped(w.written)
+                        } else {
+                            w.written.to_string()
+                        };
+                        match w.marks.bound() {
+                            Bound::Exact => bytes,
+                            Bound::UpTo => format!("<={bytes}"),
+                            Bound::AtLeast => format!(">={bytes}"),
+                        }
+                        .into()
+                    }
+                    None => "".into(),
+                },
             };
             if i > 0 {
                 // Plain text ends a line at its last value, without padding.
@@ -183,7 +204,10 @@ impl TableWriter {
                 EsColumn::Size if plain => {
                     out.extend_from_slice(format!("{cell:>PLAIN_SIZE_WIDTH$}").as_bytes());
                 }
-                EsColumn::Files | EsColumn::Folders if plain => {
+                EsColumn::Written if plain => {
+                    out.extend_from_slice(format!("{cell:>PLAIN_WRITTEN_WIDTH$}").as_bytes());
+                }
+                EsColumn::Files | EsColumn::Folders | EsColumn::Writes if plain => {
                     out.extend_from_slice(format!("{cell:>PLAIN_COUNT_WIDTH$}").as_bytes());
                 }
                 EsColumn::DateModified | EsColumn::DateCreated if plain && !last => {
@@ -197,7 +221,9 @@ impl TableWriter {
                 | EsColumn::DateCreated
                 | EsColumn::Attributes
                 | EsColumn::Files
-                | EsColumn::Folders => {
+                | EsColumn::Folders
+                | EsColumn::Writes
+                | EsColumn::Written => {
                     out.extend_from_slice(cell.as_bytes());
                 }
             }
@@ -245,6 +271,8 @@ fn column_name(column: EsColumn) -> &'static str {
         EsColumn::Attributes => "Attributes",
         EsColumn::Files => "Files",
         EsColumn::Folders => "Folders",
+        EsColumn::Writes => "Writes",
+        EsColumn::Written => "Written",
     }
 }
 
@@ -308,6 +336,7 @@ mod tests {
             attributes: None,
             counts: None,
             identity: None,
+            writes: None,
         }
     }
 
@@ -370,6 +399,55 @@ mod tests {
         assert_eq!(
             write(options(Format::Plain, false), &[folder]),
             b" 9,175,986,261    48,211     3,120 C:\\Users\\user\\.cache\n"
+        );
+    }
+
+    /// `--writes` prints a Written that is "up to" after `<=` and one that is
+    /// "at least" after `>=`, also when it has both marks, so a script can
+    /// tell a bound from an exact number of bytes.
+    #[test]
+    fn written_prints_its_bound_before_the_bytes() {
+        use crate::index::writes::Marks;
+        use crate::proto::ItemWrites;
+        let wrote = |path, written, marks| ResultItem {
+            writes: Some(ItemWrites {
+                writes: 412,
+                written,
+                marks,
+            }),
+            ..item(path, Some(1), None, false)
+        };
+        let items = [
+            wrote(r"C:\a.log", 1_234_567, Marks::default()),
+            wrote(r"C:\b.db", 2_048, Marks::UP_TO),
+            wrote(r"C:\c.tmp", 4_096, Marks::AT_LEAST),
+            wrote(
+                r"C:\d.tmp",
+                8_192,
+                Marks(Marks::UP_TO.0 | Marks::AT_LEAST.0),
+            ),
+        ];
+        let options = |format, header| TableOptions {
+            format,
+            columns: vec![EsColumn::Writes, EsColumn::Written],
+            bom: false,
+            header,
+            double_quote: false,
+        };
+        assert_eq!(
+            write(options(Format::Csv, true), &items),
+            b"Writes,Written,Filename\r\n\
+              412,1234567,C:\\a.log\r\n\
+              412,<=2048,C:\\b.db\r\n\
+              412,>=4096,C:\\c.tmp\r\n\
+              412,>=8192,C:\\d.tmp\r\n"
+        );
+        assert_eq!(
+            write(options(Format::Plain, false), &items),
+            b"      412        1,234,567 C:\\a.log\n\
+              \x20     412          <=2,048 C:\\b.db\n\
+              \x20     412          >=4,096 C:\\c.tmp\n\
+              \x20     412          >=8,192 C:\\d.tmp\n"
         );
     }
 

@@ -57,6 +57,7 @@ pub struct ResultSnapshot {
     total: u64,
     volumes_incomplete: bool,
     metadata_pending: bool,
+    writes_partial: bool,
     sums: Option<MatchSums>,
 }
 
@@ -104,7 +105,7 @@ pub enum SortAgainError {
 }
 
 /// A row of a result snapshot as a read finds it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub enum SnapshotRow<'a> {
     /// The row's file now.
     Row(RowView<'a>),
@@ -143,6 +144,7 @@ impl<V: IndexedVolume> ResultRows<V> {
             order,
             volumes_incomplete: self.volumes_incomplete(),
             metadata_pending: self.metadata_pending(),
+            writes_partial: self.writes_partial(),
             sums: self.sums,
             answers: self.reply.volumes.into_iter().map(|v| v.answer).collect(),
         };
@@ -208,6 +210,12 @@ impl ResultSnapshot {
         self.metadata_pending
     }
 
+    /// Whether the writes covered only part of the last hour when it was
+    /// made.
+    pub fn writes_partial(&self) -> bool {
+        self.writes_partial
+    }
+
     /// Every match's sums, when the search asked for them.
     pub fn sums(&self) -> Option<MatchSums> {
         self.sums
@@ -269,6 +277,7 @@ impl ResultSnapshot {
                     answer.scope,
                     answer.sums,
                     sort,
+                    &seen_by,
                 );
                 (matches, seen_by)
             };
@@ -284,6 +293,7 @@ impl ResultSnapshot {
             coverage: Coverage {
                 volumes_incomplete: self.volumes_incomplete,
                 metadata_pending: self.metadata_pending,
+                writes_partial: self.writes_partial,
             },
         })
     }
@@ -404,6 +414,10 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
         self.snapshot.metadata_pending
     }
 
+    pub fn writes_partial(&self) -> bool {
+        self.snapshot.writes_partial
+    }
+
     /// Reads the next page under the read lock of each volume it reads, in
     /// the order the volumes were given, and hands each row to `push` with
     /// the folders it names, until `push` refuses one, the read has no row
@@ -477,6 +491,9 @@ impl<V: IndexedVolume> SnapshotRows<'_, V> {
                         attributes: entry.attributes(),
                         counts: entry.counts(),
                         file_id,
+                        index,
+                        idx,
+                        seen_by,
                     })
                 }
                 None => SnapshotRow::Gone,

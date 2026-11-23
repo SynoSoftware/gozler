@@ -35,11 +35,12 @@ pub(super) struct Inspector {
 }
 
 /// The controls of each inspector field row's label and value.
-const FIELD_CONTROLS: [(ControlId, ControlId); 4] = [
+const FIELD_CONTROLS: [(ControlId, ControlId); 5] = [
     (ControlId::InspectorLabel1, ControlId::InspectorValue1),
     (ControlId::InspectorLabel2, ControlId::InspectorValue2),
     (ControlId::InspectorLabel3, ControlId::InspectorValue3),
     (ControlId::InspectorLabel4, ControlId::InspectorValue4),
+    (ControlId::InspectorLabel5, ControlId::InspectorValue5),
 ];
 
 impl Inspector {

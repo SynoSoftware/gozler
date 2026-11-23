@@ -1033,7 +1033,7 @@ pub(crate) struct InspectorLayout {
 
 impl InspectorLayout {
     /// The rows of one entry, the most that any selection shows.
-    const FIELD_ROWS: usize = 4;
+    const FIELD_ROWS: usize = 5;
 
     /// The controls of a pane `area`, with the splitter above it.
     fn compute(

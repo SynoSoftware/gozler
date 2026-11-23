@@ -36,20 +36,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DBT_DEVTYP_HANDLE, DEV_BROADCAST_HANDLE, DEV_BROADCAST_HDR, DefWindowProcW, DispatchMessageW,
     EndMenu, GA_ROOT, GWLP_USERDATA, GetAncestor, GetCursorPos, GetMessageW, GetScrollInfo,
     GetSystemMetrics, GetWindowLongPtrW, GetWindowThreadProcessId, HHOOK, HICON, HTCLIENT,
-    IDC_ARROW, IDC_IBEAM, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW, KillTimer, LR_DEFAULTCOLOR,
-    LoadCursorW, LoadImageW, MINMAXINFO, MSG, MSGF_DIALOGBOX, MSGF_MESSAGEBOX, MWMO_INPUTAVAILABLE,
-    MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostQuitMessage, PostThreadMessageW,
-    QS_ALLINPUT, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN, SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP,
-    SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT, SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS,
-    SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SendMessageW,
-    SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPlacement, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WA_INACTIVE, WH_MSGFILTER, WINDOWPLACEMENT,
-    WINDOWPLACEMENT_FLAGS, WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND,
-    WM_CONTEXTMENU, WM_COPYDATA, WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY,
-    WM_DEVICECHANGE, WM_DPICHANGED, WM_DROPFILES, WM_ENABLE, WM_ENDSESSION, WM_ENTERSIZEMOVE,
-    WM_EXITMENULOOP, WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN,
-    WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY,
-    WM_NOTIFY, WM_QUERYENDSESSION, WM_QUIT, WM_SETCURSOR, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
+    ICON_BIG, ICON_SMALL, IDC_ARROW, IDC_IBEAM, IDC_SIZENS, IMAGE_ICON, IsDialogMessageW,
+    KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MINMAXINFO, MSG, MSGF_DIALOGBOX,
+    MSGF_MESSAGEBOX, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW,
+    PostQuitMessage, PostThreadMessageW, QS_ALLINPUT, RegisterClassExW, SB_BOTTOM, SB_LINEDOWN,
+    SB_LINEUP, SB_PAGEDOWN, SB_PAGEUP, SB_THUMBPOSITION, SB_THUMBTRACK, SB_TOP, SB_VERT,
+    SC_KEYMENU, SCROLLINFO, SIF_TRACKPOS, SM_CXICON, SM_CXSMICON, SW_SHOWMAXIMIZED,
+    SW_SHOWMINNOACTIVE, SW_SHOWNORMAL, SYSTEM_METRICS_INDEX, SendMessageW, SetCursor, SetTimer,
+    SetWindowLongPtrW, SetWindowPlacement, SetWindowsHookExW, TranslateMessage,
+    UnhookWindowsHookEx, WA_INACTIVE, WH_MSGFILTER, WINDOWPLACEMENT, WINDOWPLACEMENT_FLAGS,
+    WM_ACTIVATE, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CONTEXTMENU, WM_COPYDATA,
+    WM_CREATE, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DEVICECHANGE, WM_DPICHANGED,
+    WM_DROPFILES, WM_ENABLE, WM_ENDSESSION, WM_ENTERSIZEMOVE, WM_EXITMENULOOP, WM_EXITSIZEMOVE,
+    WM_GETMINMAXINFO, WM_HOTKEY, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCCREATE, WM_NCDESTROY, WM_NOTIFY,
+    WM_QUERYENDSESSION, WM_QUIT, WM_SETCURSOR, WM_SETICON, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCHAR,
     WM_SYSCOLORCHANGE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_VSCROLL,
     WM_WINDOWPOSCHANGED, WNDCLASSEXW, WPF_RESTORETOMAXIMIZED, WS_CHILD, WS_CLIPCHILDREN,
     WS_CLIPSIBLINGS, WS_EX_CONTROLPARENT, WS_EX_LEFT, WS_OVERLAPPEDWINDOW,
@@ -234,6 +235,45 @@ pub(crate) enum Background {
     Dialog,
 }
 
+/// The executable's icon resource `icon`, at the size of the system metric
+/// `metric`; none when the resource is missing.
+fn load_icon(icon: u16, metric: SYSTEM_METRICS_INDEX) -> HICON {
+    // SAFETY: the icon is a resource of this module, loaded at the size of
+    // a system metric; a missing one is an error, not a crash.
+    unsafe {
+        let size = GetSystemMetrics(metric);
+        LoadImageW(
+            GetModuleHandleW(PCWSTR::null()).ok().map(Into::into),
+            PCWSTR(usize::from(icon) as *const u16),
+            IMAGE_ICON,
+            size,
+            size,
+            LR_DEFAULTCOLOR,
+        )
+    }
+    .map(|handle| HICON(handle.0))
+    .unwrap_or_default()
+}
+
+/// Gives `window` the executable's icon resource `icon`, for its title bar,
+/// taskbar button and Alt+Tab entry, as [`register_class`] gives a class.
+/// A window of a dialog template has the generic icon without it.
+pub(crate) fn set_icons(window: Hwnd, icon: u16) {
+    for (size, metric) in [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)] {
+        let icon = load_icon(icon, metric);
+        // SAFETY: WM_SETICON takes an icon handle, which the window keeps
+        // using; the icon is never destroyed.
+        unsafe {
+            SendMessageW(
+                window.0,
+                WM_SETICON,
+                Some(WPARAM(size as usize)),
+                Some(LPARAM(icon.0 as isize)),
+            )
+        };
+    }
+}
+
 /// Registers the class `name`, whose windows run `W`'s handler, with the
 /// executable's icon and `background`.
 pub(crate) fn register_class<W: WindowProc>(
@@ -243,30 +283,13 @@ pub(crate) fn register_class<W: WindowProc>(
 ) -> windows::core::Result<()> {
     // SAFETY: a null name asks for the executable's own module.
     let instance = unsafe { GetModuleHandleW(PCWSTR::null()) }?;
-    let load_icon = |metric| {
-        // SAFETY: the icon is a resource of this module, loaded at the size
-        // of a system metric; a missing one is an error, not a crash.
-        unsafe {
-            let size = GetSystemMetrics(metric);
-            LoadImageW(
-                Some(instance.into()),
-                PCWSTR(usize::from(icon) as *const u16),
-                IMAGE_ICON,
-                size,
-                size,
-                LR_DEFAULTCOLOR,
-            )
-        }
-        .map(|handle| HICON(handle.0))
-        .unwrap_or_default()
-    };
     let name = wide(name);
     let class = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(procedure::<W>),
         hInstance: instance.into(),
-        hIcon: load_icon(SM_CXICON),
-        hIconSm: load_icon(SM_CXSMICON),
+        hIcon: load_icon(icon, SM_CXICON),
+        hIconSm: load_icon(icon, SM_CXSMICON),
         // SAFETY: IDC_ARROW is a predefined cursor.
         hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }?,
         // The documented way to name a system colour as a class brush.
@@ -483,6 +506,10 @@ const FOCUS_MOVED: u32 = super::wake::WAKE + 3;
 const CHAR: u32 = super::wake::WAKE + 7;
 
 const MODIFIERS_CHANGED: u32 = super::wake::WAKE + 8;
+
+/// The private message with which SSD wear's Show asks the main window to
+/// show the selected folder in Commander.
+pub(crate) const WEAR_SHOW: u32 = super::wake::WAKE + 15;
 
 thread_local! {
 

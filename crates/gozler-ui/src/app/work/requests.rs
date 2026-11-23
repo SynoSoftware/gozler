@@ -56,6 +56,7 @@ impl Requests {
                 let task = match purpose.interest() {
                     Interest::Awaited => task,
                     Interest::Background => task.background(),
+                    Interest::Held => task.held(),
                 };
                 Group {
                     task,
@@ -286,6 +287,7 @@ fn rows(
                             total: page.total,
                             volumes_incomplete: page.volumes_incomplete,
                             metadata_pending: page.metadata_pending,
+                            writes_partial: page.writes_partial,
                             sums: page.sums,
                             skipped: skipped.to_vec(),
                             rest_follows: true,
@@ -306,6 +308,7 @@ fn rows(
         total: all.total,
         volumes_incomplete: all.volumes_incomplete,
         metadata_pending: all.metadata_pending,
+        writes_partial: all.writes_partial,
         sums: all.sums,
         skipped,
         rest_follows: false,

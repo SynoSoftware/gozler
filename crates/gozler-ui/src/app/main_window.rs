@@ -130,6 +130,7 @@ mod settings;
 mod shortcuts;
 mod synchronize;
 mod tray;
+mod wear;
 
 #[cfg(test)]
 mod navigation_tests;
@@ -144,6 +145,7 @@ use settings::SettingsBridge;
 pub(in crate::app) use shortcuts::Prepared as PreparedShortcuts;
 use shortcuts::Shortcuts;
 use tray::Tray;
+use wear::Wear;
 
 mod timer;
 mod update;
@@ -476,6 +478,7 @@ pub(crate) struct MainWindow {
     /// ([`super::EXIT_MESSAGE`]).
     exit_message: u32,
     pub(super) tray: Tray,
+    pub(super) wear: Wear,
     pub(super) shortcuts: Shortcuts,
     pub(super) settings: SettingsBridge,
     /// A Paste whose thread reads the clipboard.
@@ -662,6 +665,7 @@ impl MainWindow {
             taskbar_button_created: win::instance::register_message("TaskbarButtonCreated"),
             exit_message: win::instance::register_message(super::EXIT_MESSAGE),
             tray: Tray::new(),
+            wear: Wear::new(),
             shortcuts: Shortcuts::new(),
             settings: SettingsBridge::new(),
             pasting: RefCell::new(HashMap::new()),
@@ -728,6 +732,7 @@ impl MainWindow {
             window.drop_target.replace(registration);
         }
         window.tray.update_tray(&window, hwnd);
+        window.follow_wear(hwnd);
         let keeps_running = window.model.borrow().choices().keep_running;
         // Showing the window activates it, and WM_ACTIVATE focuses the
         // search box.
@@ -978,6 +983,7 @@ impl MainWindow {
         }
         self.viewers.set_strings(&Strings::load(language));
         self.compare_windows.set_strings(&Strings::load(language));
+        self.wear.set_strings(&Strings::load(language));
     }
 
     fn apply_text(&self, hwnd: Hwnd, captions: &WindowCaptions) {
@@ -1411,7 +1417,7 @@ impl MainWindow {
 
     /// The service's report, which the Index page's Show report shows.
     pub(super) fn service_report(&self) -> Option<String> {
-        captions::service_report(&self.model.borrow())
+        captions::service_report(&self.model.borrow(), &gozler_winfs::local_time_zone())
     }
 
     fn update_message(&self) {
@@ -3267,6 +3273,7 @@ impl MainWindow {
         if !self.update_live() {
             return;
         }
+        self.follow_service(hwnd);
         let fixes = {
             let mut work = self.created().work.borrow_mut();
             let fixes = work.fixes.drain();
@@ -3323,6 +3330,7 @@ impl MainWindow {
                 return;
             }
         }
+        self.take_wear(hwnd);
         let releases = self.created().work.borrow_mut().take_releases();
         for release in releases {
             let accepted = match release {
@@ -5137,6 +5145,7 @@ impl MainWindow {
         // as it closes, so the save holds them.
         self.viewers.close_all();
         self.compare_windows.close_all();
+        self.wear.close();
         self.save_settings(true);
         self.ending.set(ending);
         hwnd.destroy();
@@ -5293,6 +5302,7 @@ impl MainWindow {
             Timer::Search(list) => self.search(hwnd, list),
             Timer::Searching(list) => self.name_search(hwnd, list),
             Timer::Calculating => self.show_calculating(hwnd),
+            Timer::WearRetry => self.retry_wear(hwnd),
             Timer::Selection(list) => self.fetch_selection(hwnd, list),
             Timer::ColumnFill(list) => self.fill_after_wait(hwnd, list),
             Timer::PanelSettle(side) => self.controls().panels.on_panel_settled(self, hwnd, side),
@@ -5807,6 +5817,7 @@ impl WindowProc for MainWindow {
                 }
                 self.compare_windows.close_all();
                 self.viewers.close_all();
+                self.wear.close();
                 hwnd.hide();
                 self.save_settings(false);
                 hwnd.destroy();
@@ -5863,9 +5874,11 @@ impl WindowProc for MainWindow {
                 let (settings_finished, cleanup) = self.created().work.borrow_mut().close();
                 let cleanup = win::work::spawn(cleanup);
                 self.shortcuts.close();
-                // No Viewer or compare window outlives the message loop.
+                // No Viewer, compare or SSD wear window outlives the message
+                // loop.
                 self.compare_windows.close_all();
                 self.viewers.close_all();
+                self.wear.close();
                 let error_log = self.settings_file.with_file_name("ui-error.log");
                 let shutdown = win::window::quit_after(move |worker| {
                     super::work::finish_shutdown(
@@ -5909,6 +5922,10 @@ impl WindowProc for MainWindow {
                     hwnd.post_deferred();
                 }
                 None
+            }
+            Message::Other(win::window::WEAR_SHOW) => {
+                self.show_repeat(hwnd);
+                Some(LRESULT(0))
             }
             Message::Other(msg) if msg == self.show_message => {
                 self.show_mode(hwnd, Mode::Search);

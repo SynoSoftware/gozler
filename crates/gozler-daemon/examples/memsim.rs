@@ -141,6 +141,7 @@ fn main() {
                 0
             },
             name: row.name.clone(),
+            time: 0,
         };
         idx.insert_enum(&r);
     }
@@ -164,6 +165,7 @@ fn main() {
             reason: USN_REASON_FILE_CREATE,
             attributes: 0,
             name,
+            time: 0,
         };
         idx.insert_enum(&r);
     }

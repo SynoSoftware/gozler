@@ -169,6 +169,7 @@ mod tests {
                 reason: USN_REASON_FILE_CREATE,
                 attributes: 0,
                 name: format!("{n}.txt").into_bytes(),
+                time: 0,
             });
         }
         let volume = Arc::new(Files {

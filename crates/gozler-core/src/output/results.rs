@@ -102,6 +102,7 @@ struct JsonResults<'a> {
     more: bool,
     volumes_incomplete: bool,
     metadata_pending: bool,
+    writes_partial: bool,
     generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     sums: Option<&'a MatchSums>,
@@ -138,6 +139,7 @@ impl<'a> JsonResults<'a> {
             more: all.more || all.total > all.items.len() as u64,
             volumes_incomplete: all.volumes_incomplete,
             metadata_pending: all.metadata_pending,
+            writes_partial: all.writes_partial,
             generation: all.generation,
             sums: all.sums.as_ref(),
         }

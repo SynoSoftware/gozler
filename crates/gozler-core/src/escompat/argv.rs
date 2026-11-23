@@ -430,6 +430,8 @@ pub(super) enum SwitchAction {
     Json,
     /// `--file-id`: name each result's volume and file ID in the JSON.
     FileId,
+    /// `--writes`: add the Writes and Written columns.
+    Writes,
     /// `--my-permissions`: show only what the caller's own token may list.
     MyPermissions,
     Report(Report),
@@ -472,6 +474,7 @@ impl SwitchAction {
             | SwitchAction::NoResultError
             | SwitchAction::Json
             | SwitchAction::FileId
+            | SwitchAction::Writes
             | SwitchAction::MyPermissions
             | SwitchAction::Report(_)
             | SwitchAction::InsecureNoServerCheck
@@ -658,6 +661,15 @@ pub(super) const SWITCHES: &[Switch] = &[
         },
         group: Group::Output,
         help: "With `--json`, add each result's volume and file ID",
+    },
+    Switch {
+        spelling: Spelling::Native {
+            name: "writes",
+            action: SwitchAction::Writes,
+        },
+        group: Group::Output,
+        help: "Add the Writes and Written columns: how often each file and folder was \
+               written in the last hour, and how many bytes",
     },
     Switch {
         spelling: Spelling::Es {
@@ -955,7 +967,24 @@ pub(super) const SORT_KEYS: &[SortKeyName] = &[
         key: SortKey::Extension,
         help: "Extension, A to Z; folders and names without one come first",
     },
+    SortKeyName {
+        names: &["writes"],
+        key: SortKey::Writes,
+        help: "Writes in the last hour, most first",
+    },
+    SortKeyName {
+        names: &["written"],
+        key: SortKey::Written,
+        help: "Bytes written in the last hour, most first",
+    },
 ];
+
+/// es `es_add_column`: removes an existing instance, then appends, so the
+/// last occurrence determines the column's position.
+fn add_column(plan: &mut EsPlan, column: EsColumn) {
+    plan.columns.retain(|existing| *existing != column);
+    plan.columns.push(column);
+}
 
 /// Parses an argv slice (excluding `argv[0]`) into a [`Command`].
 ///
@@ -1234,11 +1263,10 @@ fn apply_switch(
                 EsFatal::bad_param(token, value, "a sort key such as name, size or dm")
             })?;
         }
-        SwitchAction::Column(column) => {
-            // es `es_add_column`: remove an existing instance, then append,
-            // so the last occurrence determines the column's position.
-            plan.columns.retain(|existing| *existing != column);
-            plan.columns.push(column);
+        SwitchAction::Column(column) => add_column(plan, column),
+        SwitchAction::Writes => {
+            add_column(plan, EsColumn::Writes);
+            add_column(plan, EsColumn::Written);
         }
         SwitchAction::SortFixed(spec) => plan.sort = spec,
         SwitchAction::Utf8Bom => plan.bom = true,

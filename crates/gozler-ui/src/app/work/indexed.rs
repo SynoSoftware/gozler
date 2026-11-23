@@ -181,7 +181,7 @@ impl Work {
             })
             .min_by_key(|reading| reading.accepted)?;
         Some((
-            Interest::Awaited.after(now.saturating_duration_since(reading.accepted)),
+            Interest::Awaited.after(now.saturating_duration_since(reading.accepted))?,
             reading.folder.clone(),
         ))
     }

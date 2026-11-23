@@ -76,11 +76,13 @@ fn show_in_commander_gives_the_destination_panel_keyboard_focus() {
                 attributes: None,
                 counts: None,
                 identity: None,
+                writes: None,
             }]
             .into(),
             total: 1,
             volumes_incomplete: false,
             metadata_pending: false,
+            writes_partial: false,
             sums: None,
             skipped: Vec::new(),
             rest_follows: false,

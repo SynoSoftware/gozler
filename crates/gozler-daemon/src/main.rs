@@ -35,6 +35,8 @@ mod supervisor;
 mod tail;
 #[cfg(windows)]
 mod volume_state;
+#[cfg(windows)]
+mod wear;
 
 #[cfg(windows)]
 use anyhow::Context;

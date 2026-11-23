@@ -888,6 +888,7 @@ impl Model {
                 start: 0,
                 len: PROGRAM_ROWS,
                 snapshot: FromSnapshot::No,
+                writes: false,
             }),
         }
     }
@@ -1506,11 +1507,12 @@ impl Model {
 
     /// Shows or hides the inspector (DESIGN.md: C14).
     pub(crate) fn toggle_inspector(&mut self) -> Accepted {
+        let before = self.shows_writes();
         let window = &mut self.settings.window;
         window.inspector = self.inspector_content != super::layout::InspectorContent::Selection
             || !window.inspector;
         self.inspector_content = super::layout::InspectorContent::Selection;
-        Accepted {
+        let mut accepted = Accepted {
             touched: Areas::TITLE
                 | Areas::SEARCH
                 | Areas::INSPECTOR
@@ -1525,7 +1527,9 @@ impl Model {
                 Effect::Polling,
                 Effect::NoteSavedState,
             ],
-        }
+        };
+        self.search_again_for_writes(before, &mut accepted);
+        accepted
     }
 
     pub(crate) fn show_transfers(&mut self) -> Accepted {
@@ -1649,7 +1653,8 @@ impl Model {
         if !column.row().can_hide {
             return Accepted::default();
         }
-        match self.columns.iter().position(|c| *c == column) {
+        let before = self.shows_writes();
+        let mut accepted = match self.columns.iter().position(|c| *c == column) {
             Some(index) => {
                 self.columns.remove(index);
                 (self.settings.window.columns).retain(|saved| saved.column != column);
@@ -1680,6 +1685,29 @@ impl Model {
                     ],
                 }
             }
+        };
+        self.search_again_for_writes(before, &mut accepted);
+        accepted
+    }
+
+    /// Whether the search list's rows must carry their writes: a Writes or
+    /// Written column or the inspector shows them.
+    fn shows_writes(&self) -> bool {
+        let window = &self.settings.window;
+        self.columns
+            .iter()
+            .any(|column| matches!(column, Column::Writes | Column::Written))
+            || (window.inspector
+                && self.inspector_content == super::layout::InspectorContent::Selection)
+    }
+
+    /// Searches again when a change made [`Model::shows_writes`] true,
+    /// because the rows shown were asked for without their writes.
+    fn search_again_for_writes(&self, before: bool, accepted: &mut Accepted) {
+        if !before && self.shows_writes() {
+            accepted
+                .effects
+                .push(Effect::SearchAgain(vec![List::Search]));
         }
     }
 
@@ -1728,11 +1756,12 @@ impl Model {
             (Ok(search), None) => {
                 let generation = self.generation();
                 let sort = self.sort();
+                let writes = self.shows_writes();
                 let ask = self
                     .search
                     .list
                     .results
-                    .start_search(generation, search, sort);
+                    .start_search(generation, search, sort, writes);
                 return {
                     let mut accepted = Accepted {
                         touched: Areas::list(List::Search) | Areas::STATUS | Areas::KEY_BAR,
@@ -1821,7 +1850,7 @@ impl Model {
                     let sort = panel.sort();
                     let generation = self.generation();
                     let shown = self.list_mut(list).expect("the panel searches");
-                    let ask = shown.results.start_search(generation, search, sort);
+                    let ask = shown.results.start_search(generation, search, sort, false);
                     return {
                         let mut accepted = Accepted {
                             touched: Areas::list(list) | Areas::STATUS | Areas::KEY_BAR,
@@ -2388,6 +2417,8 @@ impl Model {
                     path,
                     want_attributes: plan.columns.contains(&EsColumn::Attributes),
                     want_created: plan.columns.contains(&EsColumn::DateCreated),
+                    want_writes: plan.columns.contains(&EsColumn::Writes)
+                        || plan.columns.contains(&EsColumn::Written),
                     format: plan.result_format(),
                 }),
             })));
@@ -3445,11 +3476,13 @@ pub(crate) enum Column {
     DateCreated,
     Extension,
     Attributes,
+    Writes,
+    Written,
 }
 
 impl Column {
     /// In View > Columns' order.
-    pub(crate) const ALL: [Column; 7] = [
+    pub(crate) const ALL: [Column; 9] = [
         Column::Name,
         Column::Path,
         Column::Size,
@@ -3457,6 +3490,8 @@ impl Column {
         Column::DateCreated,
         Column::Extension,
         Column::Attributes,
+        Column::Writes,
+        Column::Written,
     ];
 
     /// Its facts, in one match, so a new column chooses each on purpose.
@@ -3550,6 +3585,30 @@ impl Column {
                 // gozler has no attribute sort.
                 sort_key: None,
                 export_column: Some(EsColumn::Attributes),
+            },
+            Column::Writes => ColumnRow {
+                header: "header.writes",
+                short_header: None,
+                menu_label: "column.writes",
+                shown_by_default: false,
+                can_hide: true,
+                right_aligned: true,
+                can_shrink: false,
+                can_grow: false,
+                sort_key: Some(SortKey::Writes),
+                export_column: Some(EsColumn::Writes),
+            },
+            Column::Written => ColumnRow {
+                header: "header.written",
+                short_header: None,
+                menu_label: "column.written",
+                shown_by_default: false,
+                can_hide: true,
+                right_aligned: true,
+                can_shrink: false,
+                can_grow: false,
+                sort_key: Some(SortKey::Written),
+                export_column: Some(EsColumn::Written),
             },
         }
     }
@@ -4396,6 +4455,7 @@ pub(crate) mod tests {
                         link_reconciles_dropped: 0,
                         unread_folders: 0,
                         memory: None,
+                        writes: None,
                     }],
                     volumes_incomplete: false,
                     process_working_set: 0,
@@ -5424,6 +5484,7 @@ pub(crate) mod tests {
                 size: 2048,
                 volumes_incomplete: false,
                 metadata_pending: false,
+                writes_partial: false,
             }),
         }
     }

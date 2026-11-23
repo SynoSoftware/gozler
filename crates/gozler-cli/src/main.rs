@@ -354,7 +354,7 @@ mod win {
                 .map_err(|e| Failure::Internal(format!("JSON encoding failed: {e}")))?;
             writeln!(out, "{text}")
         } else {
-            write_status(&status, &mut out)
+            write_status(&status, &gozler_winfs::local_time_zone(), &mut out)
         };
         output(written.and_then(|()| out.flush()), "stdout")?;
         let warnings = status_warnings(&status);
@@ -406,6 +406,7 @@ mod win {
                 link_reconciles_dropped: 0,
                 unread_folders: 0,
                 memory: None,
+                writes: None,
             }
         }
 

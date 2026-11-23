@@ -20,7 +20,7 @@
 //! total:      u64 LE    match count less the rows left out so far; the last page's holds
 //! generation: u64 LE
 //! page_flags: u8        bit0 more, bit1 volumes_incomplete, bit2 metadata_pending,
-//!                       bit3 has_sums, bit4 identities
+//!                       bit3 has_sums, bit4 identities, bit5 writes_partial
 //! folder_count: u32 LE  folders this page adds to the reply's folders
 //! folder_count folders, each:
 //!   parent:   u32 LE    the reply's id of its parent folder; u32::MAX for a
@@ -39,13 +39,16 @@
 //!                       bit3 has_attributes, bit4 gone: a row of a result
 //!                       snapshot whose file is gone, whose folder is
 //!                       u32::MAX and whose name is empty, with no other bit;
-//!                       bit5 has_created, bit6 has_counts
+//!                       bit5 has_created, bit6 has_counts, bit7 has_writes
 //!   size:     u64 LE    iff has_size
 //!   mtime:    i64 LE    iff has_mtime
 //!   created:  i64 LE    iff has_created
 //!   attributes: u32 LE  iff has_attributes: `FILE_ATTRIBUTE_*` bits
 //!   files:    u32 LE    iff has_counts: the files below a folder
 //!   folders:  u32 LE    iff has_counts: the folders below a folder
+//!   writes:   u32 LE    iff has_writes: the writes of the last hour
+//!   written:  u64 LE    iff has_writes: the bytes those writes put on disk
+//!   write_marks: u8     iff has_writes: `index::writes::Marks`
 //!   file_id:  u128 LE   iff identities, and not a gone row
 //! sums, iff has_sums, after the items:
 //!   files:                u64 LE
@@ -70,9 +73,12 @@
 use smallvec::SmallVec;
 
 use super::frame::{begin_frame, end_frame};
-use super::types::{FileIdentity, MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Want};
+use super::types::{
+    FileIdentity, ItemWrites, MAX_SERVER_FRAME, PAGE_ROWS, QueryResults, ResultItem, Want,
+};
 use crate::attributes::Attributes;
 use crate::index::Counts;
+use crate::index::writes::Marks;
 use crate::query::{
     FolderId, IndexedVolume, MatchSums, ResultNames, ResultRows, ResultSnapshotGone, RowView,
     SnapshotRow, SnapshotRows,
@@ -90,6 +96,7 @@ const FLAG_VOLUMES_INCOMPLETE: u8 = 1 << 1;
 const FLAG_METADATA_PENDING: u8 = 1 << 2;
 const FLAG_SUMS: u8 = 1 << 3;
 const FLAG_IDENTITIES: u8 = 1 << 4;
+const FLAG_WRITES_PARTIAL: u8 = 1 << 5;
 
 /// The sums' bytes after the items.
 const SUMS_LEN: usize = 5 * 8 + 1;
@@ -102,6 +109,7 @@ const IFLAG_HAS_ATTRIBUTES: u8 = 1 << 3;
 const IFLAG_GONE: u8 = 1 << 4;
 const IFLAG_HAS_CREATED: u8 = 1 << 5;
 const IFLAG_HAS_COUNTS: u8 = 1 << 6;
+const IFLAG_HAS_WRITES: u8 = 1 << 7;
 
 /// A folder's parent field for a volume's root.
 const NO_PARENT: u32 = u32::MAX;
@@ -148,6 +156,7 @@ pub struct PageItem<'a> {
     pub created: Option<i64>,
     pub attributes: Option<Attributes>,
     pub counts: Option<Counts>,
+    pub writes: Option<ItemWrites>,
     /// Sent when the page carries identities.
     pub file_id: Frn,
 }
@@ -210,6 +219,14 @@ impl ResultsPage {
             sums: None,
             identities: false,
         }
+    }
+
+    /// Sets the page's [`QueryResults::writes_partial`].
+    pub fn with_writes_partial(mut self, writes_partial: bool) -> Self {
+        if writes_partial {
+            self.frame[self.flags_at] |= FLAG_WRITES_PARTIAL;
+        }
+        self
     }
 
     /// Makes the page carry `sums` after its items. Called before the first
@@ -304,6 +321,9 @@ impl ResultsPage {
         if item.counts.is_some() {
             iflags |= IFLAG_HAS_COUNTS;
         }
+        if item.writes.is_some() {
+            iflags |= IFLAG_HAS_WRITES;
+        }
         self.items.push(iflags);
         if let Some(s) = item.size {
             self.items.extend_from_slice(&s.to_le_bytes());
@@ -320,6 +340,11 @@ impl ResultsPage {
         if let Some(c) = item.counts {
             self.items.extend_from_slice(&c.files.to_le_bytes());
             self.items.extend_from_slice(&c.folders.to_le_bytes());
+        }
+        if let Some(w) = item.writes {
+            self.items.extend_from_slice(&w.writes.to_le_bytes());
+            self.items.extend_from_slice(&w.written.to_le_bytes());
+            self.items.push(w.marks.0);
         }
         if self.identities {
             self.items.extend_from_slice(&item.file_id.0.to_le_bytes());
@@ -402,6 +427,7 @@ pub fn encode_page<V: IndexedVolume>(
         rows.metadata_pending(),
         rows.rows_left(),
     )
+    .with_writes_partial(rows.writes_partial())
     .with_sums(rows.sums())
     .with_identities(wants.contains(&Want::Identity));
     let values = Values::of(wants);
@@ -433,6 +459,7 @@ pub fn encode_snapshot_page<V: IndexedVolume>(
     sent: &mut SentFolders,
 ) -> Result<(Vec<u8>, bool), ResultSnapshotGone> {
     let mut page = ResultsPage::new(0, rows.metadata_pending(), rows.rows_left())
+        .with_writes_partial(rows.writes_partial())
         .with_sums(sums)
         .with_identities(wants.contains(&Want::Identity));
     let values = Values::of(wants);
@@ -457,6 +484,7 @@ struct Values {
     created: bool,
     attributes: bool,
     counts: bool,
+    writes: bool,
 }
 
 impl Values {
@@ -467,6 +495,7 @@ impl Values {
             created: wants.contains(&Want::DateCreated),
             attributes: wants.contains(&Want::Attributes),
             counts: wants.contains(&Want::Counts),
+            writes: wants.contains(&Want::Writes),
         }
     }
 
@@ -481,6 +510,16 @@ impl Values {
             created: self.created.then_some(row.created).flatten(),
             attributes: self.attributes.then_some(row.attributes),
             counts: self.counts.then_some(row.counts).flatten(),
+            // Read only when asked: one lookup in the table for each row.
+            writes: self
+                .writes
+                .then(|| row.writes())
+                .flatten()
+                .map(|values| ItemWrites {
+                    writes: values.writes,
+                    written: values.written,
+                    marks: values.marks,
+                }),
             file_id: row.file_id,
         }
     }
@@ -621,6 +660,15 @@ pub fn decode_results_payload(
                 })
             })
             .transpose()?;
+        let writes = (iflags & IFLAG_HAS_WRITES != 0)
+            .then(|| -> Result<ItemWrites, BinError> {
+                Ok(ItemWrites {
+                    writes: r.u32()?,
+                    written: r.u64()?,
+                    marks: Marks(r.u8()?),
+                })
+            })
+            .transpose()?;
         let identity = identities
             .then(|| -> Result<Box<FileIdentity>, BinError> {
                 let file_id = Frn(r.u128()?);
@@ -644,6 +692,7 @@ pub fn decode_results_payload(
             is_dir: iflags & IFLAG_IS_DIR != 0,
             attributes,
             counts,
+            writes,
             identity,
         });
     }
@@ -665,6 +714,7 @@ pub fn decode_results_payload(
         more: flags & FLAG_MORE != 0,
         volumes_incomplete: flags & FLAG_VOLUMES_INCOMPLETE != 0,
         metadata_pending: flags & FLAG_METADATA_PENDING != 0,
+        writes_partial: flags & FLAG_WRITES_PARTIAL != 0,
         generation,
         sums,
     })
@@ -716,6 +766,7 @@ mod tests {
             attributes: None,
             counts: None,
             file_id: Frn::default(),
+            writes: None,
         }
     }
 
@@ -763,7 +814,9 @@ mod tests {
     fn mixed_items_round_trip() {
         let t = tree();
         let mut sent = SentFolders::default();
-        let mut page = ResultsPage::new(42, true, 3).with_identities(true);
+        let mut page = ResultsPage::new(42, true, 3)
+            .with_writes_partial(true)
+            .with_identities(true);
         let refs_id = Frn(0x0123_4567_89ab_cdef_0011_2233_4455_6677);
         assert!(page.push(
             PageItem {
@@ -825,6 +878,7 @@ mod tests {
                         attributes: Some(hidden_archive()),
                         counts: None,
                         identity: identity(C_VOLUME, refs_id),
+                        writes: None,
                     },
                     ResultItem {
                         path: r"D:\folder".into(),
@@ -839,6 +893,7 @@ mod tests {
                             folders: 3_120,
                         }),
                         identity: identity(D_VOLUME, Frn::ntfs(42, 5)),
+                        writes: None,
                     },
                     ResultItem {
                         path: "C:\\ünïcode 文件.txt".into(),
@@ -850,11 +905,13 @@ mod tests {
                         attributes: None,
                         counts: None,
                         identity: identity(C_VOLUME, Frn::ntfs(7, 1)),
+                        writes: None,
                     },
                 ],
                 more: true,
                 volumes_incomplete: true,
                 metadata_pending: true,
+                writes_partial: true,
                 generation: 42,
                 sums: None,
             }]
@@ -990,6 +1047,7 @@ mod tests {
                 attributes: None,
                 counts: None,
                 identity: None,
+                writes: None,
             }]
         );
     }

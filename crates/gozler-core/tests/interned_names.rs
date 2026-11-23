@@ -19,6 +19,7 @@ fn interned_shared_names_are_found() {
         reason: USN_REASON_FILE_CREATE,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
+        time: 0,
     };
     let root = NTFS_ROOT_FRN.record_number();
     idx.insert_enum(&rec(1000, root, "dir_a", true));
@@ -70,6 +71,7 @@ fn scoped_results_equal_prefix_filtered_unscoped_results() {
         reason: USN_REASON_FILE_CREATE,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
+        time: 0,
     };
     // root/{downloads,documents}/sub{0,1}/report-N.txt plus decoys at root.
     idx.insert_enum(&rec(1000, 0, "downloads", true));

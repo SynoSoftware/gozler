@@ -15,6 +15,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod measure;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use gozler_core::index::settle::Batch;
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::types::Frn;
 use gozler_core::usn::record::{
@@ -39,6 +40,7 @@ fn rec(f: Frn, parent: Frn, name: &str, is_dir: bool, reason: u32) -> ParsedUsnR
         reason,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
+        time: 0,
     }
 }
 
@@ -120,12 +122,12 @@ fn dirty_index() -> VolumeIndex {
             batch.push(rec(f, NTFS_ROOT_FRN, "", false, USN_REASON_FILE_DELETE));
         }
         if batch.len() >= 4096 {
-            idx.apply_batch(&batch);
+            idx.apply_batch(&Batch::of(&batch));
             batch.clear();
         }
     }
     if !batch.is_empty() {
-        idx.apply_batch(&batch);
+        idx.apply_batch(&Batch::of(&batch));
     }
     idx
 }

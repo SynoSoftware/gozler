@@ -47,4 +47,5 @@ pub(crate) mod typed;
 pub(crate) mod update;
 pub(crate) mod viewer;
 pub(crate) mod viewer_window;
+pub(crate) mod wear;
 pub(crate) mod work;

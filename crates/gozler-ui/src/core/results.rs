@@ -12,7 +12,7 @@ use super::fetch::{
 use super::work::{INLINE_ITEMS, Retirement};
 use gozler_client::Repair;
 use gozler_core::links::Links;
-use gozler_core::proto::{ResultItem, ResultSnapshotId, typed_parts};
+use gozler_core::proto::{ResultItem, ResultSnapshotId, Want, typed_parts};
 use gozler_core::query::{MatchSums, MatchedParts, ParsedQuery, QueryError};
 use gozler_core::search::Search;
 use gozler_core::types::SortSpec;
@@ -278,6 +278,9 @@ pub(crate) struct ShownRows {
     /// of its result snapshot names none, because the
     /// request that made the snapshot named them.
     skipped: Vec<String>,
+    /// The writes of a volume searched cover only part of the last hour, as
+    /// a reply of the search said.
+    writes_partial: bool,
     chunks: Vec<CachedChunk>,
     /// Only Search compiles bold ranges. `None` until its worker answers,
     /// and when terms do not compile, which the daemon refuses before rows.
@@ -462,6 +465,15 @@ impl Results {
         }
     }
 
+    /// Whether the writes of a volume the shown search read cover only part
+    /// of the last hour.
+    pub(crate) fn writes_partial(&self) -> bool {
+        match &self.shown {
+            Shown::Rows(rows) => rows.writes_partial,
+            Shown::Nothing | Shown::Message(_) => false,
+        }
+    }
+
     /// The rows the list has: every match.
     pub(crate) fn count(&self) -> u64 {
         self.total()
@@ -571,12 +583,14 @@ impl Results {
     /// asks for with the returned ask; the shown rows stay until it arrives.
     /// When only the sort changed and the list reads a result snapshot, the
     /// ask sorts that one again instead of searching, so the rows are of
-    /// the search's moment until `F5` (DESIGN.md: Result snapshots).
+    /// the search's moment until `F5` (DESIGN.md: Result snapshots). `writes`
+    /// says whether the rows carry their writes ([`ChunkAsk::writes`]).
     pub(crate) fn start_search(
         &mut self,
         generation: Generation,
         search: Search,
         sort: SortSpec,
+        writes: bool,
     ) -> ChunkAsk {
         let snapshot = match &self.shown {
             Shown::Rows(shown) if shown.ask.search == search && shown.ask.sort != sort => {
@@ -590,6 +604,7 @@ impl Results {
             start: 0,
             len: CHUNK_ROWS,
             snapshot,
+            writes,
         };
         self.in_flight = Some(InFlight::Search(generation, ask.clone(), false));
         ask
@@ -775,6 +790,7 @@ impl Results {
                     total: chunk.total,
                     sums,
                     skipped,
+                    writes_partial: chunk.writes_partial,
                     chunks: Vec::new(),
                     matched: None,
                     coverage_scope: None,
@@ -801,6 +817,7 @@ impl Results {
                 };
                 shown.total = chunk.total;
                 shown.sums = chunk.sums.or(shown.sums);
+                shown.writes_partial |= chunk.writes_partial;
                 shown.add_skipped(chunk.skipped);
                 shown.insert(chunk.start, chunk.rows, first_page, &mut self.retired);
                 RowsChange::Rows {
@@ -827,13 +844,17 @@ impl std::fmt::Debug for ShownRows {
 
 impl ShownRows {
     /// Adds the parts that a reply of the search skipped and that no
-    /// earlier reply named, as the person typed them.
+    /// earlier reply named, as the person typed them. A skipped want, which
+    /// an older service does not read, is no part of the search: it leaves
+    /// no match out, so the status does not report it.
     fn add_skipped(&mut self, parts: Vec<String>) {
         if parts.is_empty() {
             return;
         }
         for part in typed_parts(&self.ask.search.query, &parts) {
-            if !self.skipped.contains(&part) {
+            let is_want = part == "--writes"
+                || serde_json::from_value::<Want>(serde_json::Value::String(part.clone())).is_ok();
+            if !is_want && !self.skipped.contains(&part) {
                 self.skipped.push(part);
             }
         }
@@ -929,11 +950,13 @@ pub(crate) mod tests {
                     attributes: None,
                     counts: None,
                     identity: None,
+                    writes: None,
                 })
                 .collect(),
             total,
             volumes_incomplete: false,
             metadata_pending: false,
+            writes_partial: false,
             sums: None,
             skipped: Vec::new(),
             rest_follows: false,
@@ -944,7 +967,7 @@ pub(crate) mod tests {
     /// Results that show the first chunk of a search with `total` matches.
     fn showing(total: u64) -> Results {
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default());
+        results.start_search(Generation(1), search(), SortSpec::default(), false);
         let first = chunk(0, CHUNK_ROWS.min(total), total);
         results.accept(Generation(1), first);
         results
@@ -956,7 +979,7 @@ pub(crate) mod tests {
         let first = chunk(0, count, count);
         let replaced = Arc::clone(&first.rows);
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default());
+        results.start_search(Generation(1), search(), SortSpec::default(), false);
         results.accept(Generation(1), first);
         results.show_message(ListMessage::TypeToSearch);
         assert_eq!(Arc::strong_count(&replaced), 2);
@@ -993,7 +1016,7 @@ pub(crate) mod tests {
         assert_eq!(results.accept(Generation(2), replaced), RowsChange::Stale);
 
         let mut results = showing(50_000);
-        results.start_search(Generation(2), search(), SortSpec::default());
+        results.start_search(Generation(2), search(), SortSpec::default(), false);
         assert_eq!(results.next_chunk(far..far + 40, Generation(3)), None);
     }
 
@@ -1024,7 +1047,7 @@ pub(crate) mod tests {
         let asked = results.next_chunk(0..40, Generation(3));
         assert_eq!(asked.map(|a| a.snapshot), Some(FromSnapshot::Read(id)));
 
-        results.start_search(Generation(4), search(), SortSpec::default());
+        results.start_search(Generation(4), search(), SortSpec::default(), false);
         results.accept(Generation(4), chunk(0, CHUNK_ROWS, 200_000));
         let asked = results.next_chunk(150_000..150_040, Generation(5));
         assert_eq!(
@@ -1071,7 +1094,7 @@ pub(crate) mod tests {
     #[test]
     fn a_sort_change_sorts_the_result_snapshot_again() {
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default());
+        results.start_search(Generation(1), search(), SortSpec::default(), false);
         let sums = MatchSums {
             files: 200_000,
             ..MatchSums::default()
@@ -1090,7 +1113,7 @@ pub(crate) mod tests {
         results.accept(Generation(2), made);
 
         let by_size = SortSpec::default_for(SortKey::Size);
-        let asked = results.start_search(Generation(3), search(), by_size);
+        let asked = results.start_search(Generation(3), search(), by_size, false);
         assert_eq!(asked.snapshot, FromSnapshot::Sort(id));
         let sorted = ResultSnapshotId(8);
         let made = Chunk {
@@ -1102,7 +1125,7 @@ pub(crate) mod tests {
         let asked = results.next_chunk(150_000..150_040, Generation(4));
         assert_eq!(asked.map(|a| a.snapshot), Some(FromSnapshot::Read(sorted)));
 
-        let again = results.start_search(Generation(5), search(), by_size);
+        let again = results.start_search(Generation(5), search(), by_size, false);
         assert_eq!(again.snapshot, FromSnapshot::No, "F5");
     }
 
@@ -1157,7 +1180,7 @@ pub(crate) mod tests {
     fn a_first_page_shows_while_its_chunk_arrives() {
         let total = 3 * CHUNK_ROWS;
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default());
+        results.start_search(Generation(1), search(), SortSpec::default(), false);
         let first = Chunk {
             rest_follows: true,
             ..chunk(0, 4_096, total)
@@ -1184,7 +1207,7 @@ pub(crate) mod tests {
     fn a_selection_read_leaves_out_a_first_page() {
         let total = 3 * CHUNK_ROWS;
         let mut results = Results::new();
-        results.start_search(Generation(1), search(), SortSpec::default());
+        results.start_search(Generation(1), search(), SortSpec::default(), false);
         let first = Chunk {
             rest_follows: true,
             ..chunk(0, 4_096, total)

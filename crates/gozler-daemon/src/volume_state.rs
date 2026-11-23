@@ -43,6 +43,7 @@ use std::time::{Duration, Instant};
 
 use gozler_core::include::VolumeRules;
 use gozler_core::index::settle::SharedIndex;
+use gozler_core::index::writes::Writes;
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::scope::VolumeMounts;
 use gozler_core::types::{IndexProgress, VolumePhase};
@@ -163,11 +164,29 @@ impl Building<'_> {
     }
 
     /// Installs `built` with its build facts, then sets the phase that
-    /// `journal` leads to.
-    pub(crate) fn finish(self, built: BuiltIndex, journal: &JournalSetup) {
+    /// `journal` leads to. The new index takes the old one's folders copied
+    /// into themselves, and numbers its own from the service's counter.
+    /// With a journal, it also takes the old one's writes, counted from
+    /// `since`, when the build took its journal cursor; without one, it
+    /// counts none.
+    pub(crate) fn finish(self, built: BuiltIndex, journal: &JournalSetup, since: i64) {
         let metadata_pending = built.metadata_pending();
-        *self.state.indexed.write() = Indexed {
-            index: built.index,
+        let mut index = built.index;
+        let writes = match journal {
+            // Without a journal nothing counts writes, so a build that ends
+            // without one drops the values.
+            JournalSetup::Active(_) => Some(Writes::for_entries(index.len())),
+            JournalSetup::Refused | JournalSetup::Unavailable => None,
+        };
+        let mut indexed = self.state.indexed.write();
+        std::mem::swap(index.repeats_mut(), indexed.index.repeats_mut());
+        index.repeats_mut().number_from(&crate::wear::NUMBERS);
+        if let Some(mut writes) = writes {
+            writes.keep(indexed.index.writes_mut(), since);
+            *index.writes_mut() = writes;
+        }
+        *indexed = Indexed {
+            index,
             metadata_pending,
             journal_max_bytes: match journal {
                 JournalSetup::Active(c) => Some(c.maximum_size),
@@ -175,6 +194,7 @@ impl Building<'_> {
             },
             built: true,
         };
+        drop(indexed);
         self.state.apply(Event::Built(journal));
     }
 }
@@ -670,7 +690,7 @@ mod tests {
             })
         );
         drop(read);
-        building.finish(built(1, false), &JournalSetup::Refused);
+        building.finish(built(1, false), &JournalSetup::Refused, 0);
         assert_eq!(state.read().progress, None);
         let building = state.begin_build();
         assert_eq!(state.read().progress, None);
@@ -689,6 +709,7 @@ mod tests {
                 reason: USN_REASON_FILE_CREATE,
                 attributes: 0,
                 name: format!("{frn}.txt").into_bytes(),
+                time: 0,
             });
         }
         BuiltIndex {
@@ -724,7 +745,7 @@ mod tests {
             max_usn: i64::MAX,
             maximum_size: 32 << 20,
         });
-        first.finish(a, &journal);
+        first.finish(a, &journal, 0);
         {
             let read = volume.read();
             assert_eq!(read.phase(), &VolumePhase::Live);
@@ -744,7 +765,7 @@ mod tests {
         let b = built(2, true);
         let b_len = b.index.len();
         assert_ne!(a_len, b_len);
-        rebuild.finish(b, &JournalSetup::Unavailable);
+        rebuild.finish(b, &JournalSetup::Unavailable, 0);
         let read = volume.read();
         assert_eq!(read.phase(), &VolumePhase::Offline);
         assert_eq!(read.index().len(), b_len);
@@ -838,7 +859,7 @@ mod tests {
         let volume = snapshot();
         assert!(volume.take_owed_for_new_tail());
         let rebuild = volume.begin_build();
-        rebuild.finish(built(1, false), &JournalSetup::Refused);
+        rebuild.finish(built(1, false), &JournalSetup::Refused, 0);
         assert_eq!(volume.phase(), VolumePhase::Snapshot);
         assert!(!volume.take_owed_for_new_tail(), "the build applied them");
     }

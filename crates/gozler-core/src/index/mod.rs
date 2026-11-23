@@ -17,7 +17,9 @@ pub mod volume;
 
 mod descriptors;
 
+pub mod repeats;
 pub mod settle;
+pub mod writes;
 
 pub use descriptors::{DescriptorId, Listable, SeenBy};
 pub use store::{ComponentBytes, Counts, IdWidth};

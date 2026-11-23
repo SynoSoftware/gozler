@@ -111,6 +111,8 @@
     "date_modified": "&Fecha de modificación",
     "date_created": "Fec&ha de creación",
     "extension": "&Extensión",
+    "writes": "Escritura&s",
+    "written": "&Bytes escritos",
     "attributes": "&Atributos",
     "fit": "A&justar columna «{0}»",
     "fit_columns": "Ajustar &columnas",
@@ -125,6 +127,8 @@
     "modified": "Modificación",
     "created": "Creación",
     "extension": "Extensión",
+    "writes": "Escrituras",
+    "written": "Bytes escritos",
     "attributes": "Atributos",
     "folder": "Carpeta"
   },
@@ -135,6 +139,8 @@
     "date_modified": "&Fecha de modificación",
     "date_created": "Fec&ha de creación",
     "extension": "&Extensión",
+    "writes": "Escritura&s",
+    "written": "&Bytes escritos",
     "ascending": "&Ascendente",
     "descending": "&Descendente"
   },
@@ -200,6 +206,7 @@
     "volume_offline": "{0} está sin conexión. Puede que los resultados estén incompletos.",
     "volume_failed": "No se pudo indexar {0}. Puede que los resultados estén incompletos.",
     "metadata": "Se desconocen algunos tamaños y fechas de {0}.",
+    "writes_partial": "Las escrituras cubren solo parte de la última hora. Puede que los resultados estén incompletos.",
     "skipped": "El servicio omitió {0}, que solo lee una versión más reciente. Puede que los resultados estén incompletos.",
     "update_available": "Gozler {0} está disponible. Selecciona para actualizar.",
     "service_memory": "Servicio {0}",
@@ -288,6 +295,9 @@
     "date_modified": "Fecha de modificación:",
     "attributes": "Atributos:",
     "total_size": "Tamaño de los archivos:",
+    "writes": "Escrituras:",
+    "written_one": "{0}, {1} en la última hora",
+    "written_other": "{0}, {1} en la última hora",
     "size_exact": "{0} ({1})",
     "calculating": "Calculando…",
     "folder_size_one": "{1} en {0} elemento",
@@ -447,7 +457,9 @@
   },
   "cell": {
     "gone": "Ya no existe",
-    "unknown": "Desconocido"
+    "unknown": "Desconocido",
+    "up_to": "hasta {0}",
+    "at_least": "al menos {0}"
   },
   "size": {
     "bytes_one": "{0} byte",
@@ -470,6 +482,13 @@
     "license": "Licencia MIT",
     "credits": "Créditos"
   },
+  "wear": {
+    "title": "Desgaste del SSD",
+    "text": "Una carpeta que se copia dentro de sí misma una y otra vez llena el disco. Detén el programa o script que la copia.",
+    "folder": "Carpeta",
+    "copies_column": "Copias",
+    "show": "&Mostrar"
+  },
   "service_report": {
     "title": "Informe del servicio",
     "copy": "&Copiar"
@@ -482,7 +501,9 @@
     "close": "Cerrar",
     "ok": "Aceptar",
     "cancel": "Cancelar",
-    "continue": "Continuar"
+    "continue": "Continuar",
+    "yes": "Sí",
+    "no": "No"
   },
   "custom_date": {
     "title": "Fecha personalizada",
@@ -542,6 +563,9 @@
     "updates": "Buscar act&ualizaciones al iniciar",
     "keep_running": "&Mantener en ejecución en el área de notificación al cerrar la ventana",
     "one_window": "Permitir solo una &ventana a la vez",
+    "warn_repeats": "Avisarme cuando una carpeta se copie &dentro de sí misma",
+    "needs_newer": "Requiere un servicio más reciente",
+    "warn_question": "El aviso solo llega mientras la aplicación se ejecuta. ¿Activar también estas opciones?",
     "show_icons": "Mostrar i&conos en menús, botones y listas",
     "show_memory": "Mostrar el uso de memoria en la &barra de estado",
     "selection": "Selección (Num + / Num −)",

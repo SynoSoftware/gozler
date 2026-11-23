@@ -492,6 +492,10 @@ impl CaptionTable {
                         "settings_general.keep_running",
                     ),
                     (Control(C::GeneralOneWindow), "settings_general.one_window"),
+                    (
+                        Control(C::GeneralWarnRepeats),
+                        "settings_general.warn_repeats",
+                    ),
                     (Control(C::GeneralShowIcons), "settings_general.show_icons"),
                     (
                         Control(C::GeneralShowMemory),
@@ -829,6 +833,14 @@ impl CaptionTable {
                     (Cancel, "button.cancel"),
                 ],
             },
+            DialogId::Wear => CaptionTable {
+                title: "wear.title",
+                keyed: &[(Control(C::WearShow), "wear.show")],
+                plain: &[
+                    (Control(C::WearText), "wear.text"),
+                    (Cancel, "button.close"),
+                ],
+            },
             DialogId::ServiceReport => CaptionTable {
                 title: "service_report.title",
                 keyed: &[(Control(C::ServiceReportCopy), "service_report.copy")],
@@ -894,6 +906,7 @@ impl CaptionTable {
             | DialogId::Settings
             | DialogId::IndexedFolders
             | DialogId::ServiceReport
+            | DialogId::Wear
             | DialogId::FileOperationsFailed
             | DialogId::CommandShortcut => None,
         }
@@ -1260,6 +1273,35 @@ pub(crate) fn reset_all_question(strings: &Strings) -> Question {
         confirm: text::without_access_key(strings.text("settings.reset")),
         cancel: strings.text("button.cancel").to_owned(),
         guard: Guard::CancelFirst,
+        elevates: false,
+    }
+}
+
+/// The question when Apply turns on the copy warning while Gozler does not
+/// start at sign-in (`sign_in` off) or does not keep running after its
+/// window closes (`keep_running` off): it lists those check boxes, in their
+/// own words.
+pub(crate) fn keep_running_question(
+    strings: &Strings,
+    sign_in: bool,
+    keep_running: bool,
+) -> Question {
+    let off: Vec<String> = [
+        (sign_in, "settings_general.sign_in"),
+        (keep_running, "settings_general.keep_running"),
+    ]
+    .into_iter()
+    .filter(|(on, _)| !on)
+    .map(|(_, key)| text::without_access_key(strings.text(key)))
+    .collect();
+    Question {
+        title: text::without_access_key(strings.text("settings.apply")),
+        instruction: strings.text("settings_general.warn_question").to_owned(),
+        body: QuestionBody::Text(off.join("\n")),
+        footer: None,
+        confirm: strings.text("button.yes").to_owned(),
+        cancel: strings.text("button.no").to_owned(),
+        guard: Guard::None,
         elevates: false,
     }
 }

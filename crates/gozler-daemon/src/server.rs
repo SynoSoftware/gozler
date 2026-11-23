@@ -58,6 +58,7 @@ const QUERY_PAGE_BACKLOG: usize = 4;
 /// Idle/half-open connections are dropped after this long with no request, so a
 /// connected-but-silent client cannot block a task forever. The one-shot CLI
 /// client always writes immediately after connecting, well within this window.
+/// A held wear request is exempt (see `wear::hold`).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 /// A connection whose client takes none of a reply for this long is dropped,
 /// so a client that stops reading cannot hold its result set and its
@@ -363,6 +364,21 @@ async fn handle_connection(
             })
             .await
             .context("access task panicked")?;
+            // A wear request this client may make is held; a refused one
+            // takes the refusal below, as every request does.
+            let access = match (&decoded, access) {
+                (
+                    Ok(Decoded {
+                        request: Request::Wear(request),
+                        ..
+                    }),
+                    Access::Sees(visibility),
+                ) => match crate::wear::hold(server, &volumes, visibility, *request).await? {
+                    crate::wear::Held::Answered => continue,
+                    crate::wear::Held::Left => return Ok(()),
+                },
+                (_, access) => access,
+            };
             // Query execution plus result serialization is the heaviest CPU
             // work in the process and holds a read lock, so every request runs
             // on the blocking pool rather than stalling an async worker (and
@@ -453,7 +469,7 @@ async fn handle_connection(
 
 /// Writes reply bytes to the client, failing with `TimedOut` when the client
 /// has not taken them within [`WRITE_TIMEOUT`].
-async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) async fn write_reply(server: &mut NamedPipeServer, bytes: &[u8]) -> std::io::Result<()> {
     tokio::time::timeout(WRITE_TIMEOUT, server.write_all(bytes))
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "client stopped reading"))?
@@ -476,7 +492,7 @@ fn refusal(message: String) -> Response {
 }
 
 /// The reply that refuses a request this client may not make.
-fn unsupported(message: &str) -> Response {
+pub(crate) fn unsupported(message: &str) -> Response {
     Response::Error {
         code: ProtoError::Unsupported,
         message: message.into(),
@@ -579,6 +595,9 @@ impl Serving<'_> {
             }
             Request::Hello { .. } | Request::Status { .. } | Request::SettingsSaved => {
                 unreachable!("answered before the client's access is taken")
+            }
+            Request::Wear(_) => {
+                unreachable!("handle_connection holds a wear request it may answer")
             }
         };
         if let Err(off) = include.applied().allows(&search.query) {
@@ -881,8 +900,11 @@ fn build_status(
                     name_tables: pair(mem.name_tables),
                     dir_children: pair(mem.dir_children),
                     descriptors: pair(mem.descriptors),
+                    writes: Some(pair(mem.writes)),
+                    repeats: Some(pair(mem.repeats)),
                     frn_map_kind: mem.frn_map_kind.to_string(),
                 }),
+                writes: index.writes().status(),
             }
         })
         .collect();
@@ -991,6 +1013,7 @@ mod tests {
     use crate::result_snapshots::ResultSnapshots;
     use crate::volume_state::{Indexed, VolumeSet, VolumeState};
     use gozler_core::include::{DriveChoice, FolderChoice, IndexSettings};
+    use gozler_core::index::settle::Batch;
     use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
     use gozler_core::proto::{
         CallerSees, DaemonStatus, FileIdentity, FrameDecoder, MAX_SERVER_FRAME, PAGE_ROWS,
@@ -1033,6 +1056,7 @@ mod tests {
             reason: USN_REASON_FILE_CREATE,
             attributes: FILE_ATTRIBUTE_DIRECTORY,
             name: name.as_bytes().to_vec(),
+            time: 0,
         }
     }
 
@@ -1411,7 +1435,7 @@ mod tests {
         let mut rename = dir_record(movie.0, 102, "Film (2001).mkv");
         rename.attributes = 0;
         rename.reason = USN_REASON_RENAME_NEW_NAME;
-        vol.index_mut().apply_batch(&[rename]);
+        vol.index_mut().apply_batch(&Batch::of(&[rename]));
         assert_eq!(
             found(),
             (r"C:\Movies\Film (2001).mkv".to_string(), identity)
@@ -1964,7 +1988,7 @@ mod tests {
                     let mut index = vol.index_mut();
                     let mut gone = dir_record(1000, 100, "");
                     gone.reason = gozler_core::usn::record::USN_REASON_FILE_DELETE;
-                    index.apply_batch(&[gone]);
+                    index.apply_batch(&Batch::of(&[gone]));
                     index.optimize_storage();
                 }
                 out.extend_from_slice(&reply);

@@ -125,6 +125,8 @@
 #define IDC_INSPECTOR_VALUE_3 59
 #define IDC_INSPECTOR_LABEL_4 60
 #define IDC_INSPECTOR_VALUE_4 61
+#define IDC_INSPECTOR_LABEL_5 45
+#define IDC_INSPECTOR_VALUE_5 46
 // Hide inspector, the icon at the right end of the heading's row.
 #define IDC_INSPECTOR_HIDE 62
 // The hint under the heading while nothing is selected.
@@ -197,6 +199,8 @@
 #define IDC_GENERAL_SELECTION 1521
 #define IDC_GENERAL_SELECT_FILES 1522
 #define IDC_GENERAL_SELECT_FOLDERS 1523
+#define IDC_GENERAL_WARN_REPEATS 1524
+#define IDC_GENERAL_WARN_NOTE 1525
 
 #define IDD_SETTINGS_SEARCH 106
 #define IDC_SEARCH_HEADING 1601
@@ -473,6 +477,13 @@
 #define IDD_RESULT_LIST 133
 #define IDC_RESULT_LIST_TEXT 4191
 #define IDC_RESULT_LIST_COPY 4192
+
+// SSD wear: the folders that the service saw copied into themselves, with
+// Show and Close.
+#define IDD_WEAR 134
+#define IDC_WEAR_TEXT 4201
+#define IDC_WEAR_LIST 4202
+#define IDC_WEAR_SHOW 4203
 
 // Settings > File operations: the speed settings of copies, moves and
 // deletes.

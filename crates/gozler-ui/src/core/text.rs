@@ -11,7 +11,8 @@
 //! differ from English, shows its dotted key, so the gap is visible.
 
 use super::model::Column;
-use gozler_core::proto::ResultItem;
+use gozler_core::index::writes::Bound;
+use gozler_core::proto::{ItemWrites, ResultItem};
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -449,7 +450,9 @@ pub(crate) fn path_part(column: Column, path: &str) -> Option<Range<usize>> {
         | Column::DateModified
         | Column::DateCreated
         | Column::Extension
-        | Column::Attributes => None,
+        | Column::Attributes
+        | Column::Writes
+        | Column::Written => None,
     }
 }
 
@@ -575,8 +578,30 @@ pub(crate) fn cell(
             .map(|ext| String::from_utf8_lossy(ext).into_owned())
             .unwrap_or_default(),
         Column::Attributes => row.attributes.map(|a| a.letters()).unwrap_or_default(),
+        Column::Writes => any_writes(row.writes)
+            .map(|w| numbers.integer(w.writes.into()))
+            .unwrap_or_default(),
+        Column::Written => any_writes(row.writes)
+            .map(|w| written(strings, w, sizes.text(strings, numbers, w.written)))
+            .unwrap_or_default(),
     }
     .into()
+}
+
+/// `writes` when its entry had a write or bytes written in the last hour;
+/// `None` for none or unknown, which the list and the inspector leave empty.
+pub(crate) fn any_writes(writes: Option<ItemWrites>) -> Option<ItemWrites> {
+    writes.filter(|w| w.writes != 0 || w.written != 0)
+}
+
+/// `bytes`, the Written of `writes`, with "up to" or "at least" before it
+/// when it is a bound.
+pub(crate) fn written(strings: &Strings, writes: ItemWrites, bytes: String) -> String {
+    match writes.marks.bound() {
+        Bound::Exact => bytes,
+        Bound::UpTo => strings.format("cell.up_to", &[&bytes]),
+        Bound::AtLeast => strings.format("cell.at_least", &[&bytes]),
+    }
 }
 
 /// `text` without its access key's `&`, as a caption reads where it names a
@@ -825,6 +850,7 @@ pub(crate) mod tests {
                 attributes: None,
                 counts: None,
                 identity: None,
+                writes: None,
             };
             cell(
                 &strings,

@@ -29,6 +29,10 @@ pub struct Answer {
     /// The size and date pass failed or stopped on a volume in scope, so
     /// some sizes and dates are unknown.
     pub metadata_pending: bool,
+    /// The query tests the writes or the Written.
+    pub tests_writes: bool,
+    /// The writes of a volume in scope cover only part of the last hour.
+    pub writes_partial: bool,
 }
 
 impl Answer {
@@ -45,6 +49,8 @@ impl Answer {
                     || matches!(plan.result_format(), ResultFormat::Json)
                     || plan.sort.key == SortKey::Size),
             metadata_pending: false,
+            tests_writes: query.tests_writes(),
+            writes_partial: false,
         }
     }
 
@@ -54,6 +60,7 @@ impl Answer {
         self.shown += page.items.len() as u64;
         self.volumes_incomplete |= page.volumes_incomplete;
         self.metadata_pending |= page.metadata_pending;
+        self.writes_partial |= page.writes_partial;
     }
 
     /// Counts in the totals of a counting search, whose output covers every
@@ -63,6 +70,7 @@ impl Answer {
         self.shown = totals.count;
         self.volumes_incomplete |= totals.volumes_incomplete;
         self.metadata_pending |= totals.metadata_pending;
+        self.writes_partial |= totals.writes_partial;
     }
 
     /// The warnings to write after the rows, in order.
@@ -78,6 +86,9 @@ impl Answer {
             warnings.push(Warning::SizesOrDatesUnknown);
         } else if self.metadata_pending && self.shows_sizes {
             warnings.push(Warning::SizesShort);
+        }
+        if self.writes_partial && self.tests_writes {
+            warnings.push(Warning::WritesPartial);
         }
         // The daemon counts in `total` only matches a page can carry, so more
         // matches than rows means the limit cut the list.
@@ -128,6 +139,9 @@ pub enum Warning {
     /// unknown, so a folder's size counts only the files whose size is
     /// known. The rows are all there, so the exit code stays 0.
     SizesShort,
+    /// The query tests the writes, and those of a volume in scope cover only
+    /// part of the last hour, so a write before that is missing.
+    WritesPartial,
     /// The limit showed `shown` of `total` matches.
     Truncated { shown: u64, total: u64 },
 }
@@ -136,9 +150,10 @@ impl Warning {
     /// The code a search with this warning exits with.
     pub fn exit_code(self) -> ExitCode {
         match self {
-            Warning::Skipped(_) | Warning::Incomplete | Warning::SizesOrDatesUnknown => {
-                ExitCode::Incomplete
-            }
+            Warning::Skipped(_)
+            | Warning::Incomplete
+            | Warning::SizesOrDatesUnknown
+            | Warning::WritesPartial => ExitCode::Incomplete,
             Warning::Truncated { .. } => ExitCode::Truncated,
             Warning::SizesShort => ExitCode::Complete,
         }
@@ -161,6 +176,10 @@ impl fmt::Display for Warning {
             Warning::SizesOrDatesUnknown => f.write_str(
                 "results may be incomplete: some sizes and dates on a volume in scope are \
                  unknown, so size and date tests and size totals leave those files out",
+            ),
+            Warning::WritesPartial => f.write_str(
+                "results may be incomplete: the writes of a volume in scope cover only part of \
+                 the last hour, so write tests leave out files written before that",
             ),
             Warning::SizesShort => f.write_str(
                 "some sizes are unknown: those files on a volume in scope show no size, and \
@@ -189,6 +208,8 @@ mod tests {
             reads_size_or_date: false,
             shows_sizes: false,
             metadata_pending: false,
+            tests_writes: false,
+            writes_partial: false,
         }
     }
 
@@ -223,6 +244,7 @@ mod tests {
             size: 0,
             volumes_incomplete: false,
             metadata_pending: false,
+            writes_partial: false,
         });
         assert!(count.warnings().is_empty());
         assert_eq!(count.exit_code(false).code(), 0);

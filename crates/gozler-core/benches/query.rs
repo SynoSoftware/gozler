@@ -5,7 +5,8 @@
 //! for rare, medium, and wildcard needles, what a user who cannot list half
 //! the folders pays for a broad search, then what keeping folder sizes costs
 //! over the same tree, and what a sort change in the window asks. Over a
-//! volume shaped like a system drive, it measures a folder tree to a depth.
+//! volume shaped like a system drive, it measures a folder tree to a depth
+//! and the `repeats:` test, and what applying a journal batch costs.
 //! Run with `cargo bench -p gozler-core`.
 
 // Measure the effect of a thread-caching allocator on the alloc-heavy broad
@@ -16,8 +17,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod measure;
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use gozler_core::index::settle::SharedIndex;
+use gozler_core::index::settle::{Batch, SharedIndex};
 use gozler_core::index::volume::{Room, make_room};
+use gozler_core::index::writes::Writes;
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::links::{FolderLink, Links};
 use gozler_core::query::{
@@ -27,7 +29,8 @@ use gozler_core::query::{
 use gozler_core::scope::VolumeMounts;
 use gozler_core::types::{Frn, SortDir, SortKey, SortSpec};
 use gozler_core::usn::record::{
-    FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_CLOSE, USN_REASON_FILE_CREATE,
+    FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_CLOSE, USN_REASON_DATA_EXTEND,
+    USN_REASON_FILE_CREATE, USN_REASON_FILE_DELETE, USN_REASON_RENAME_NEW_NAME,
 };
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use std::hint::black_box;
@@ -55,6 +58,7 @@ fn enum_rec(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
         reason: USN_REASON_FILE_CREATE,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
+        time: 0,
     }
 }
 
@@ -699,6 +703,84 @@ fn bench_folder_tree(c: &mut Criterion<measure::Measure>) {
     group.finish();
 }
 
+/// `repeats:` over the same volume. Its generated folders repeat their
+/// names at each level, as nested `node_modules` folders do, so the test's
+/// second pass runs on many folders, and the profiles hold folders whose
+/// name repeats 4 times.
+fn bench_repeats(c: &mut Criterion<measure::Measure>) {
+    let (idx, _) = build_system_volume();
+    let mut group = c.benchmark_group("repeats_2.6M");
+    group.sample_size(10);
+    // `folder:` alone is the scan that the two others pay for too.
+    for text in ["folder:", "folder: repeats:4", "folder: repeats:"] {
+        let query = compiled(text);
+        let search = || search_rows(&idx, &query, None, Viewer::Everything);
+        eprintln!("repeats_2.6M/{text}: {} rows", search());
+        group.bench_function(text, |b| b.iter(|| black_box(search())));
+    }
+    group.finish();
+}
+
+/// What one journal batch costs to apply: 5,000 records over the index of
+/// 2.1 million entries. A batch of saves saves 1,250 names in one folder as
+/// a program does through a temporary file, in groups of 4 records with
+/// `CLOSE`: a new file is created and written, the file that holds the name
+/// is deleted, and the new file is renamed to the name. The next batch saves
+/// again with the two files of each name swapped, so the index keeps its
+/// size. The two batches are built before the timing, as `settle_batch`
+/// builds a batch before it takes the write lock, so the timing is the
+/// lock's hold. The batches run first with no table of writes and then with
+/// the table a build installs; the difference, divided by 5,000, is what
+/// counting costs a record.
+fn bench_journal_batch(c: &mut Criterion<measure::Measure>) {
+    let (mut idx, _) = build_index();
+    let folder = frn(1000);
+    let record = |file: u64, name: String, reason: u32| ParsedUsnRecord {
+        frn: frn(file),
+        parent_frn: folder,
+        reason: reason | USN_REASON_CLOSE,
+        attributes: 0,
+        name: name.into_bytes(),
+        time: 0,
+    };
+    let (first, second) = (50_000_000, 50_100_000);
+    let holders: Vec<ParsedUsnRecord> = (0..1_250)
+        .map(|n| record(first + n, format!("saved_{n}.dat"), USN_REASON_FILE_CREATE))
+        .collect();
+    idx.apply_batch(&Batch::of(&holders));
+    let save = |old: u64, new: u64| {
+        (0..1_250)
+            .flat_map(|n| {
+                let (temporary, name) = (format!("saved_{n}.tmp"), format!("saved_{n}.dat"));
+                [
+                    record(new + n, temporary.clone(), USN_REASON_FILE_CREATE),
+                    record(new + n, temporary, USN_REASON_DATA_EXTEND),
+                    record(old + n, name.clone(), USN_REASON_FILE_DELETE),
+                    record(new + n, name, USN_REASON_RENAME_NEW_NAME),
+                ]
+            })
+            .collect::<Vec<_>>()
+    };
+    let records = [save(first, second), save(second, first)];
+    let batches = [Batch::of(&records[0]), Batch::of(&records[1])];
+    // The two batches in turn, from the first, which replaces the holders.
+    let mut saved = 0;
+    let mut apply = |idx: &mut VolumeIndex| {
+        saved += 1;
+        idx.apply_batch(&batches[(saved - 1) % 2])
+    };
+    let mut group = c.benchmark_group("journal_batch_2.1M");
+    group.sample_size(20);
+    group.bench_function("5000 saves", |b| b.iter(|| black_box(apply(&mut idx))));
+    let mut table = Writes::for_entries(idx.len());
+    table.keep(idx.writes_mut(), 0);
+    *idx.writes_mut() = table;
+    group.bench_function("5000 saves counted", |b| {
+        b.iter(|| black_box(apply(&mut idx)))
+    });
+    group.finish();
+}
+
 /// The longest write lock a journal batch holds when it grows the index's
 /// storage, measured in matched pairs over the same batches: "in lock" grows
 /// the buffers in the batch's hold, as `apply_batch` alone does, and "room"
@@ -766,6 +848,7 @@ fn growth_run(run: usize, room: bool, readers: u64, commit: &CommitPeak) {
                         reason: USN_REASON_FILE_CREATE | USN_REASON_CLOSE,
                         attributes: 0,
                         name: format!("grown_{file}.log").into_bytes(),
+                        time: 0,
                     }
                 })
                 .collect();
@@ -773,9 +856,10 @@ fn growth_run(run: usize, room: bool, readers: u64, commit: &CommitPeak) {
             if room {
                 make_room(&locked, &Room::of(&records));
             }
+            let batch = Batch::of(&records);
             let hold = locked.write(|i| {
                 let cycles = measure::thread_cycles();
-                black_box(i.apply_batch(&records));
+                black_box(i.apply_batch(&batch));
                 measure::thread_cycles() - cycles
             });
             series.push((hold, commit.peak().saturating_sub(start)));
@@ -913,6 +997,6 @@ criterion_group! {
     name = benches;
     config = measure::criterion();
     targets = bench_query, bench_linked_release, bench_folder_sizes, bench_sort_change,
-        bench_folder_tree, bench_growth_hold
+        bench_folder_tree, bench_repeats, bench_journal_batch, bench_growth_hold
 }
 criterion_main!(benches);

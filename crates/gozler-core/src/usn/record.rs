@@ -80,6 +80,8 @@ pub struct ParsedUsnRecord {
     pub attributes: u32,
     /// File name in WTF-8.
     pub name: Vec<u8>,
+    /// When NTFS wrote the record, as a FILETIME; not a time of the file.
+    pub time: i64,
 }
 
 impl ParsedUsnRecord {
@@ -196,7 +198,7 @@ struct RawV2 {
     frn: U64,
     parent_frn: U64,
     usn: I64,
-    _timestamp: I64,
+    timestamp: I64,
     reason: U32,
     _source_info: U32,
     _security_id: U32,
@@ -216,7 +218,7 @@ struct RawV3 {
     frn: U128,
     parent_frn: U128,
     usn: I64,
-    _timestamp: I64,
+    timestamp: I64,
     reason: U32,
     _source_info: U32,
     _security_id: U32,
@@ -317,6 +319,7 @@ fn parse_v2(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
         reason: hdr.reason.get(),
         attributes: hdr.file_attributes.get(),
         name,
+        time: hdr.timestamp.get(),
     })
 }
 
@@ -337,6 +340,7 @@ fn parse_v3(rec: &[u8], offset: usize) -> Result<ParsedUsnRecord, WalkError> {
         reason: hdr.reason.get(),
         attributes: hdr.file_attributes.get(),
         name,
+        time: hdr.timestamp.get(),
     })
 }
 
@@ -401,6 +405,7 @@ mod tests {
         assert_eq!(r.parent_frn, Frn(0x0002_0000_0000_0005));
         assert_eq!(r.reason, USN_REASON_FILE_CREATE | USN_REASON_CLOSE);
         assert_eq!(r.name, b"report.pdf");
+        assert_eq!(r.time, 133_800_000_000_000_000);
         assert!(!r.is_dir());
     }
 
@@ -420,6 +425,7 @@ mod tests {
         assert_eq!(r.parent_frn, Frn(0x5));
         assert_eq!(r.reason, USN_REASON_RENAME_NEW_NAME);
         assert_eq!(r.name, b"photos");
+        assert_eq!(r.time, 42);
         assert!(r.is_dir());
     }
 
@@ -769,6 +775,7 @@ mod tests {
                         prop_assert_eq!(r.parent_frn, Frn(f.parent));
                         prop_assert_eq!(r.reason, f.reason);
                         prop_assert_eq!(r.attributes, f.attributes);
+                        prop_assert_eq!(r.time, f.timestamp);
                         // Names compare via exact WTF-8 <-> UTF-16 round-trip.
                         prop_assert_eq!(wtf8::to_utf16(&r.name), f.name_units.clone());
                         let mut expected = Vec::new();

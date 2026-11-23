@@ -69,6 +69,7 @@ fn row(path: String) -> ResultItem {
         attributes: None,
         counts: None,
         identity: None,
+        writes: None,
     }
 }
 

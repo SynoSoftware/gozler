@@ -8,6 +8,9 @@
 //! not exist, the error carries the state of the gozler service as Windows
 //! reports it. Each request waits for its reply by polling the pipe, so a
 //! [`CancelToken`] that another thread sets ends the wait at the next poll.
+//! The one exception is a wear request, which the service holds until it
+//! has something to warn about: it waits in a blocking read, which
+//! `CancelSynchronousIo` on the waiting thread ends.
 //! [`ClientError::repair`] says what makes a failed request work again, which
 //! `gozler` prints and the window runs. [`folder_is_missing`] is the rule that
 //! refuses a scope folder that does not exist, which both callers check before

@@ -16,7 +16,8 @@
 
 use super::dates::DateRange;
 use super::order::{
-    KeyValue, OrderFields, SortRecord, compare, folder_ranks, packed_folder_rank, primary_key,
+    KeyValue, OrderFields, SortRecord, compare, folder_ranks, known_value, packed_folder_rank,
+    primary_key,
 };
 use super::parse::{
     Kind, LengthTarget, Malformed, Metadata, ParsedQuery, QueryError, SizeRange, TermMatch, Test,
@@ -28,8 +29,10 @@ use super::through::{LinkPaths, Target as LinkTarget, Through};
 use super::wildcard::{CodePointBuf, OneName, Wildcard};
 use crate::attributes::PackedAttributes;
 use crate::fold::fold_accents;
+use crate::index::repeats::RepeatTest;
 use crate::index::store::{NameId, NamePair};
 use crate::index::volume::SubtreeWalk;
+use crate::index::writes::{Low, Values};
 use crate::index::{EntryView, SeenBy, VolumeIndex};
 use crate::links::{Links, Reached};
 use crate::types::{EntryIdx, Frn, SortKey, SortSpec};
@@ -293,6 +296,21 @@ pub(super) enum Check {
         kind: Option<Kind>,
         range: SizeRange,
     },
+    /// How many times a folder's path ends in the same group of names. The
+    /// test stops early on a folder whose name occurs fewer than `least`
+    /// times on its path, the fewest copies the range accepts, or 2 when it
+    /// accepts 1.
+    Repeats {
+        range: SizeRange,
+        least: u32,
+    },
+    /// The writes of the last hour of a file's name or a folder's files
+    /// ([`crate::index::writes::Writes::of_entry`]); unknown without a table,
+    /// and for a folder the
+    /// request may not list.
+    Writes(SizeRange),
+    /// The bytes those writes put on the disk, as for [`Check::Writes`].
+    Written(SizeRange),
     /// Folded whatever the query's case, as es compares extensions.
     Extension(Vec<Vec<u8>>),
     /// The folder's full path, without a trailing separator, which the full
@@ -878,12 +896,26 @@ struct Subject<'a> {
     seen_by: &'a SeenBy,
 }
 
-/// Buffers the checks reuse from one entry to the next.
+impl Subject<'_> {
+    /// The entry's writes as the request may read them.
+    fn writes(&self) -> Option<Values> {
+        self.index
+            .writes()
+            .of_entry(self.index, self.idx, self.seen_by)
+    }
+}
+
+/// Buffers the checks reuse from one entry to the next, and what they read
+/// once per scan.
 #[derive(Default)]
 struct Scratch {
     code_points: CodePointBuf,
     extension: Vec<u8>,
     folded_path: Vec<u8>,
+    /// Allocated at the first [`Check::Repeats`], so other scans pay nothing.
+    repeats: Option<RepeatTest>,
+    /// How far the volume's writes may be low, which [`Scan::new`] reads.
+    writes_low: Low,
 }
 
 impl Check {
@@ -993,6 +1025,12 @@ impl Check {
                 kind: *kind,
                 range: *range,
             },
+            Test::Repeats { range } => Check::Repeats {
+                range: *range,
+                least: u32::try_from(range.min.max(2)).unwrap_or(u32::MAX),
+            },
+            Test::Writes { range } => Check::Writes(*range),
+            Test::Written { range } => Check::Written(*range),
             Test::DateModified(range) => Check::DateModified(*range),
             Test::DateCreated(range) => Check::DateCreated(*range),
             Test::Kind(kind) => Check::Kind(*kind),
@@ -1011,8 +1049,11 @@ impl Check {
             Check::Size(_) | Check::DateModified(_) | Check::DateCreated(_) | Check::Unknown(_) => {
                 1
             }
-            Check::Length { .. } | Check::Depth(_) => 3,
-            Check::Child { .. } | Check::ChildCount { .. } => 6,
+            Check::Length { .. } | Check::Depth(_) | Check::Repeats { .. } => 3,
+            Check::Child { .. }
+            | Check::ChildCount { .. }
+            | Check::Writes(_)
+            | Check::Written(_) => 6,
             Check::Parent(_) | Check::Folders { .. } => 2,
             Check::Text(_, matcher) => match matcher {
                 Matcher::Contains(_)
@@ -1046,7 +1087,7 @@ impl Check {
             // A folder's size is the sum of its files, and unknown until the
             // size and date pass ends.
             Check::Size(range) if entry.is_dir() && subject.folder_sizes_at_least => {
-                return holds_from(*range, entry.size()?);
+                return holds_between(*range, entry.size()?, u64::MAX);
             }
             Check::Size(range) => range.contains(entry.size()?),
             Check::DateModified(range) => range.contains(entry.mtime()?),
@@ -1075,6 +1116,21 @@ impl Check {
                     })
             }
             Check::Depth(range) => range.contains(subject.index.depth(subject.idx)?.into()),
+            Check::Repeats { range, least } => {
+                let test = scratch.repeats.get_or_insert_with(RepeatTest::allocate);
+                entry.is_dir()
+                    && range.contains(test.most_copies(subject.index, subject.idx, *least).into())
+            }
+            Check::Writes(range) => {
+                let values = subject.writes()?;
+                let most = scratch.writes_low.most_writes(&values);
+                return holds_between(*range, values.writes.into(), most);
+            }
+            Check::Written(range) => {
+                let values = subject.writes()?;
+                let most = scratch.writes_low.most_written(&values);
+                return holds_between(*range, values.written, most);
+            }
             Check::ChildCount { kind, range } => {
                 if !entry.is_dir() {
                     return Some(false);
@@ -1143,15 +1199,20 @@ impl Check {
     }
 }
 
-/// Whether `range` holds a size that is at least `floor`, as a folder's after
-/// a size pass that stopped: `Some(true)` when it holds every size from
-/// `floor` up, `Some(false)` when it holds none, and unknown otherwise. So a
-/// folder whose unread files could take it out of the range never matches,
-/// negated or not, because a wrong row is worse than a missing one.
-fn holds_from(range: SizeRange, floor: u64) -> Option<bool> {
-    if range.max == u64::MAX && range.min <= floor {
+/// Whether `range` holds a value known to lie from `least` to `most`, such
+/// as a folder's size after a size pass that stopped, which is at least its
+/// sum, or a value of the writes table that may be low (rule 13):
+/// `Some(true)` when it holds every such value, `Some(false)` when it holds
+/// none, and unknown otherwise. So a value that could lie out of the range
+/// never matches, negated or not, because a wrong row is worse than a
+/// missing one.
+fn holds_between(range: SizeRange, least: u64, most: u64) -> Option<bool> {
+    // An empty range holds no value, whatever the value may be.
+    if range.min > range.max {
+        Some(false)
+    } else if range.min <= least && most <= range.max {
         Some(true)
-    } else if range.max < floor {
+    } else if range.max < least || most < range.min {
         Some(false)
     } else {
         None
@@ -1735,13 +1796,13 @@ pub(crate) fn find_matches(
         mount_prefix: mount_prefix.to_string(),
     };
     let folders = (folders, folder_names);
-    key_matches(index, records, folders, sort, limit, origin)
+    key_matches(index, records, folders, sort, limit, origin, seen_by)
 }
 
 /// Keys `records`, matches an earlier search found on `index` below the
 /// scope folder `scope`, under `sort`, as [`find_matches`] keys its own but
 /// with no scan: how a result snapshot is sorted again. `sums` are the
-/// search's.
+/// search's, and `seen_by` what its request sees.
 pub(crate) fn key_found(
     index: &VolumeIndex,
     mount_prefix: &str,
@@ -1749,6 +1810,7 @@ pub(crate) fn key_found(
     scope: Option<(EntryIdx, Frn)>,
     sums: Option<MatchSums>,
     sort: SortSpec,
+    seen_by: &SeenBy,
 ) -> Matches {
     let mut folder_names = ResultNames::default();
     let folders = FolderCopy::new(index, mount_prefix, None, &mut folder_names);
@@ -1760,11 +1822,12 @@ pub(crate) fn key_found(
         mount_prefix: mount_prefix.to_string(),
     };
     let folders = (folders, folder_names);
-    key_matches(index, records, folders, sort, None, origin)
+    key_matches(index, records, folders, sort, None, origin, seen_by)
 }
 
 /// Keys `records` under `sort` for [`Matches::order`], whose first `limit`
 /// become the rows; a path sort copies the records' folders into `folders`.
+/// A sort by writes reads them as `seen_by` may.
 fn key_matches(
     index: &VolumeIndex,
     mut records: Vec<SortRecord>,
@@ -1772,13 +1835,14 @@ fn key_matches(
     sort: SortSpec,
     limit: Option<u32>,
     origin: Origin,
+    seen_by: &SeenBy,
 ) -> Matches {
     let end = match limit {
         Some(n) => (n as usize).min(records.len()),
         None => records.len(),
     };
     let path_folders = (end > 0)
-        .then(|| key_records(index, &mut records, folders, sort))
+        .then(|| key_records(index, &mut records, folders, sort, seen_by))
         .flatten();
     Matches {
         records,
@@ -2348,7 +2412,10 @@ impl<'q, 'i> Scan<'q, 'i> {
         } else {
             NameForm::Folded
         };
-        let mut scratch = Scratch::default();
+        let mut scratch = Scratch {
+            writes_low: index.writes().low(),
+            ..Scratch::default()
+        };
         let mut query_paths = (query.path_clauses < query.clauses.len())
             .then(|| DirPaths::new(index, form, mount_prefix));
         if let Some(paths) = &mut query_paths {
@@ -2770,6 +2837,7 @@ fn key_records(
     records: &mut [SortRecord],
     (mut folders, mut names): (FolderCopy, ResultNames),
     sort: SortSpec,
+    seen_by: &SeenBy,
 ) -> Option<ResultNames> {
     let extensions = match sort.key {
         SortKey::Extension => extension_ranks(index, records),
@@ -2793,6 +2861,18 @@ fn key_records(
             SortKey::DateModified => KeyValue::DateModified(entry.mtime()),
             SortKey::DateCreated => KeyValue::DateCreated(entry.created()),
             SortKey::Extension => KeyValue::Extension(extensions[&folded_extension(index, idx)]),
+            SortKey::Writes => KeyValue::Writes(
+                index
+                    .writes()
+                    .of_entry(index, idx, seen_by)
+                    .map(|values| values.writes.into()),
+            ),
+            SortKey::Written => KeyValue::Written(
+                index
+                    .writes()
+                    .of_entry(index, idx, seen_by)
+                    .map(|values| values.written),
+            ),
         };
         *record = SortRecord::keyed(primary_key(sort.dir, value), name_key, idx);
     }
@@ -2876,6 +2956,14 @@ impl OrderFields for Ranked<'_> {
     fn created(&self) -> Option<i64> {
         self.entry().created()
     }
+    // A record of a sort by writes holds the value its request may read in
+    // its primary key, and the other sorts read neither.
+    fn writes(&self) -> Option<u64> {
+        known_value(self.sort.dir, self.record.primary())
+    }
+    fn written(&self) -> Option<u64> {
+        known_value(self.sort.dir, self.record.primary())
+    }
     fn volume(&self) -> &[u8] {
         b"" // one volume per query run
     }
@@ -2941,6 +3029,7 @@ mod optimizations;
 mod tests {
     use super::*;
     use crate::attributes::Attributes;
+    use crate::index::settle::Batch;
     use crate::index::{NTFS_ROOT_FRN, VolumeIndex};
     use crate::query::parse::{
         Clause, FolderChoice, ParseOptions, Term, TermMatch, parse_query, parse_query_with,
@@ -2967,6 +3056,7 @@ mod tests {
             reason: USN_REASON_FILE_CREATE,
             attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
             name: name.as_bytes().to_vec(),
+            time: 0,
         }
     }
 
@@ -4154,6 +4244,28 @@ mod tests {
         }
     }
 
+    /// `repeats:4` means at least 4 copies, as the help says, not exactly 4
+    /// as a plain number means in `depth:`, and `repeats:` alone at least 2.
+    /// A range that holds 1 matches a folder whose name occurs once, which
+    /// the test stops at early and answers as 1 copy. A file never matches.
+    #[test]
+    fn repeats_finds_folders_by_their_least_copies() {
+        let mut idx = VolumeIndex::new(NTFS_ROOT_FRN);
+        let mut parent = NTFS_ROOT_FRN;
+        for n in 0..5 {
+            idx.insert_enum(&enum_rec(frn(100 + n), parent, "a", true));
+            parent = frn(100 + n);
+        }
+        idx.insert_enum(&enum_rec(frn(200), parent, "a", false));
+        let found = |text: &str| paths_of(&idx, parse_query(text).unwrap());
+        assert_eq!(found("repeats:4"), [r"C:\a\a\a\a", r"C:\a\a\a\a\a"]);
+        assert_eq!(
+            found("repeats:"),
+            [r"C:\a\a", r"C:\a\a\a", r"C:\a\a\a\a", r"C:\a\a\a\a\a"]
+        );
+        assert_eq!(found("repeats:<2"), [r"C:\a"]);
+    }
+
     fn term(negated: bool, test: Test) -> Term {
         Term { negated, test }
     }
@@ -4631,6 +4743,9 @@ mod tests {
                 (any::<u64>(), any::<u64>())
                     .prop_map(|(min, max)| Test::Size(SizeRange { min, max })),
                 (0u64..5, 0u64..5).prop_map(|(min, max)| Test::Depth(SizeRange { min, max })),
+                (any::<u64>(), any::<u64>()).prop_map(|(min, max)| Test::Repeats {
+                    range: SizeRange { min, max }
+                }),
                 prop_oneof![Just(Kind::File), Just(Kind::Folder)].prop_map(Test::Kind),
                 (any::<i64>(), any::<i64>())
                     .prop_map(|(min, max)| Test::DateModified(DateRange { min, max })),
@@ -5078,7 +5193,7 @@ mod tests {
         idx.optimize_storage();
         assert!(kept.read_rows(&idx).is_ok(), "no entry moved");
         let ordered = matches(&idx);
-        idx.apply_batch(&[delete(frn(103))]);
+        idx.apply_batch(&Batch::of(&[delete(frn(103))]));
         idx.optimize_storage();
         assert_eq!(ordered.read_rows(&idx).err(), Some(IndexChanged));
     }
@@ -5104,7 +5219,7 @@ mod tests {
             &AtomicBool::new(false),
         )
         .order();
-        idx.apply_batch(&[delete(frn(103))]);
+        idx.apply_batch(&Batch::of(&[delete(frn(103))]));
         let answer = ordered
             .read_rows(&idx)
             .expect("the index kept its entry indexes");
@@ -5134,8 +5249,13 @@ mod tests {
         )
         .order();
         let notes = idx.head_of(frn(103));
-        idx.apply_batch(&[delete(frn(103))]);
-        idx.apply_batch(&[enum_rec(frn(300), NTFS_ROOT_FRN, "new.txt", false)]);
+        idx.apply_batch(&Batch::of(&[delete(frn(103))]));
+        idx.apply_batch(&Batch::of(&[enum_rec(
+            frn(300),
+            NTFS_ROOT_FRN,
+            "new.txt",
+            false,
+        )]));
         assert_eq!(idx.head_of(frn(300)), notes, "the new file took the slot");
         let answer = ordered.read_rows(&idx).expect("one reuse is kept");
         let (paths, total) = read_all(answer, &mut idx);
@@ -5167,8 +5287,13 @@ mod tests {
         let mut last = frn(103);
         for i in 0..=crate::index::store::REUSED_SLOTS_KEPT as u64 {
             let next = frn(1000 + i);
-            idx.apply_batch(&[delete(last)]);
-            idx.apply_batch(&[enum_rec(next, NTFS_ROOT_FRN, "churn.tmp", false)]);
+            idx.apply_batch(&Batch::of(&[delete(last)]));
+            idx.apply_batch(&Batch::of(&[enum_rec(
+                next,
+                NTFS_ROOT_FRN,
+                "churn.tmp",
+                false,
+            )]));
             last = next;
         }
         assert_eq!(ordered.read_rows(&idx).err(), Some(IndexChanged));
@@ -5213,13 +5338,13 @@ mod tests {
         .order()
         .read_rows(&idx)
         .expect("nothing changed");
-        idx.apply_batch(&[
+        idx.apply_batch(&Batch::of(&[
             delete(frn(101)),
             // A folder whose parent the index does not know sits under
             // lost+found.
             enum_rec(frn(500), frn(999), "orphan", true),
             rename(frn(103), frn(500), "c.txt", false),
-        ]);
+        ]));
         let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(
             paths,
@@ -5250,7 +5375,12 @@ mod tests {
         .order()
         .read_rows(&idx)
         .expect("nothing changed");
-        idx.apply_batch(&[rename(frn(102), NTFS_ROOT_FRN, "b.txt", false)]);
+        idx.apply_batch(&Batch::of(&[rename(
+            frn(102),
+            NTFS_ROOT_FRN,
+            "b.txt",
+            false,
+        )]));
         let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(
             paths,
@@ -5280,7 +5410,12 @@ mod tests {
         .order()
         .read_rows(&idx)
         .expect("nothing changed");
-        idx.apply_batch(&[rename(frn(104), NTFS_ROOT_FRN, "holiday.JPG", false)]);
+        idx.apply_batch(&Batch::of(&[rename(
+            frn(104),
+            NTFS_ROOT_FRN,
+            "holiday.JPG",
+            false,
+        )]));
         let (paths, total) = read_all(answer, &mut idx);
         assert_eq!(paths, ["holiday.JPG"]);
         assert_eq!(total, 1);
@@ -5319,13 +5454,13 @@ mod tests {
         let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 0, None);
         let (paths, total) = read_pages(&mut reply, &mut [&mut idx], 1, |_, indexes| {
             let idx = &mut *indexes[0];
-            idx.apply_batch(&[
+            idx.apply_batch(&Batch::of(&[
                 rename(frn(102), NTFS_ROOT_FRN, "f2.txt", false),
                 delete(frn(101)),
                 delete(frn(100)),
                 enum_rec(frn(200), NTFS_ROOT_FRN, "B", true),
                 rename(frn(102), frn(200), "f2.txt", false),
-            ]);
+            ]));
             assert_eq!(idx.head_of(frn(200)), a, "B took A's slot");
         });
         assert_eq!(paths, [r"C:\A\f1.txt", r"C:\B\f2.txt"]);
@@ -5365,10 +5500,15 @@ mod tests {
         .order()
         .read_rows(&idx)
         .expect("nothing changed");
-        idx.apply_batch(&[rename(frn(100), frn(999), "sub", true)]);
+        idx.apply_batch(&Batch::of(&[rename(frn(100), frn(999), "sub", true)]));
         let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 0, None);
         let (paths, total) = read_pages(&mut reply, &mut [&mut idx], 1, |_, indexes| {
-            indexes[0].apply_batch(&[enum_rec(frn(999), NTFS_ROOT_FRN, "found", true)]);
+            indexes[0].apply_batch(&Batch::of(&[enum_rec(
+                frn(999),
+                NTFS_ROOT_FRN,
+                "found",
+                true,
+            )]));
         });
         assert_eq!(paths, [r"C:\b.txt", r"C:\c.txt", r"C:\found\sub\d1.txt"]);
         assert_eq!(total, 3);
@@ -5396,7 +5536,7 @@ mod tests {
         .order()
         .read_rows(&idx)
         .expect("nothing changed");
-        idx.apply_batch(&[delete(frn(103))]);
+        idx.apply_batch(&Batch::of(&[delete(frn(103))]));
         idx.optimize_storage();
         let mut reply = Reply::new(vec![(answer, SeenBy::Everything)], 0, None);
         let (paths, total) = read_pages(&mut reply, &mut [&mut idx], usize::MAX, |_, _| {});
@@ -5489,7 +5629,7 @@ mod tests {
                     (answer, SeenBy::Everything)
                 })
                 .collect();
-            c.apply_batch(&[delete(frn(101))]);
+            c.apply_batch(&Batch::of(&[delete(frn(101))]));
             let mut reply = Reply::new(answers, 0, Some(3));
             let (paths, total) =
                 read_pages(&mut reply, &mut [&mut c, &mut d], usize::MAX, |_, _| {});
@@ -5596,7 +5736,7 @@ mod tests {
                     ..enum_rec(files[at.index(files.len())], NTFS_ROOT_FRN, "", false)
                 })
                 .collect();
-            idx.apply_batch(&deletes);
+            idx.apply_batch(&Batch::of(&deletes));
 
             let parsed = compiled("");
             for sort in all_sorts() {

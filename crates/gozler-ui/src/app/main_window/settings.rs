@@ -288,6 +288,9 @@ impl SettingsBridge {
             // The menus, the button widths and the Kind list follow.
             window.refresh_text(hwnd);
         }
+        if edited.warn_repeats != last.warn_repeats {
+            window.follow_wear(hwnd);
+        }
         if edited.show_memory != last.show_memory {
             // The group first shows the app's figure, read now, and the
             // service's from the latest status; the reply to this request

@@ -111,6 +111,8 @@
     "date_modified": "Gewijzigd &op",
     "date_created": "Gemaak&t op",
     "extension": "&Extensie",
+    "writes": "&Schrijfacties",
+    "written": "Geschre&ven",
     "attributes": "&Kenmerken",
     "fit": "Kolom ‘{0}’ passend &maken",
     "fit_columns": "Kolommen passend m&aken",
@@ -125,6 +127,8 @@
     "modified": "Gewijzigd",
     "created": "Gemaakt",
     "extension": "Extensie",
+    "writes": "Schrijfacties",
+    "written": "Geschreven",
     "attributes": "Kenmerken",
     "folder": "Map"
   },
@@ -135,6 +139,8 @@
     "date_modified": "Gewijzigd &op",
     "date_created": "Gemaak&t op",
     "extension": "&Extensie",
+    "writes": "&Schrijfacties",
+    "written": "Geschre&ven",
     "ascending": "Op&lopend",
     "descending": "&Aflopend"
   },
@@ -200,6 +206,7 @@
     "volume_offline": "{0} is offline. De resultaten zijn mogelijk onvolledig.",
     "volume_failed": "{0} kon niet worden geïndexeerd. De resultaten zijn mogelijk onvolledig.",
     "metadata": "Sommige grootten en datums op {0} zijn onbekend.",
+    "writes_partial": "Schrijfacties beslaan slechts een deel van het afgelopen uur. De resultaten zijn mogelijk onvolledig.",
     "skipped": "De service heeft {0} overgeslagen, want alleen een nieuwere versie leest dit. De resultaten zijn mogelijk onvolledig.",
     "update_available": "Gozler {0} is beschikbaar. Selecteer om bij te werken.",
     "service_memory": "Service {0}",
@@ -288,6 +295,9 @@
     "date_modified": "Gewijzigd op:",
     "attributes": "Kenmerken:",
     "total_size": "Bestandsgrootte:",
+    "writes": "Schrijfacties:",
+    "written_one": "{0}, {1} in het afgelopen uur",
+    "written_other": "{0}, {1} in het afgelopen uur",
     "size_exact": "{0} ({1})",
     "calculating": "Berekenen…",
     "folder_size_one": "{1} in {0} item",
@@ -447,7 +457,9 @@
   },
   "cell": {
     "gone": "Bestaat niet meer",
-    "unknown": "Onbekend"
+    "unknown": "Onbekend",
+    "up_to": "tot {0}",
+    "at_least": "minstens {0}"
   },
   "size": {
     "bytes_one": "{0} byte",
@@ -470,6 +482,13 @@
     "license": "MIT-licentie",
     "credits": "Credits"
   },
+  "wear": {
+    "title": "SSD-slijtage",
+    "text": "Een map die steeds opnieuw in zichzelf wordt gekopieerd, vult de schijf. Stop het programma of script dat hem kopieert.",
+    "folder": "Map",
+    "copies_column": "Kopieën",
+    "show": "&Tonen"
+  },
   "service_report": {
     "title": "Servicerapport",
     "copy": "&Kopiëren"
@@ -482,7 +501,9 @@
     "close": "Sluiten",
     "ok": "OK",
     "cancel": "Annuleren",
-    "continue": "Doorgaan"
+    "continue": "Doorgaan",
+    "yes": "Ja",
+    "no": "Nee"
   },
   "custom_date": {
     "title": "Aangepaste datum",
@@ -542,6 +563,9 @@
     "updates": "Bij het starten controleren op &updates",
     "keep_running": "Actief &houden in het systeemvak nadat ik het venster sluit",
     "one_window": "Slechts één &venster tegelijk toestaan",
+    "warn_repeats": "Waarschuwen wanneer een map in zichzelf wordt ge&kopieerd",
+    "needs_newer": "Vereist een nieuwere service",
+    "warn_question": "De waarschuwing komt alleen terwijl de app actief is. Deze ook inschakelen?",
     "show_icons": "P&ictogrammen tonen in menu's, knoppen en lijsten",
     "show_memory": "Geheugengebruik tonen in de status&balk",
     "selection": "Selectie (Num + / Num −)",

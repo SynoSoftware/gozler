@@ -17,6 +17,7 @@
 //! Usage: `cargo run --release -p gozler-daemon --example deep_export --
 //! <branches> <name|path|merge> [limit|all] [sums]`
 
+use gozler_core::index::settle::Batch;
 use gozler_core::index::{NTFS_ROOT_FRN, VolumeIndex};
 use gozler_core::proto::{Rows, SentFolders, Want, encode_page};
 use gozler_core::query::{
@@ -101,6 +102,7 @@ fn create(f: Frn, parent: Frn, name: &str, is_dir: bool) -> ParsedUsnRecord {
         reason: USN_REASON_FILE_CREATE,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
+        time: 0,
     }
 }
 
@@ -331,7 +333,7 @@ fn merge(index: &mut VolumeIndex, next: u64) {
     let batch: Vec<ParsedUsnRecord> = (0..added)
         .map(|i| create(frn(next + i), root, &format!("added-{i:08}.txt"), false))
         .collect();
-    let outcome = index.apply_batch(&batch);
+    let outcome = index.apply_batch(&Batch::of(&batch));
     assert!(
         outcome.wants_compact,
         "the added names make the ranks stale"

@@ -89,6 +89,11 @@ impl<I: Send + 'static, O: Send + 'static> Task<I, O> {
         self
     }
 
+    pub(crate) fn held(mut self) -> Self {
+        self.interest = Interest::Held;
+        self
+    }
+
     pub(crate) fn tick(&mut self, now: Instant) -> Option<Waiting> {
         let waiting = self.waiting(now)?;
         if waiting == Waiting::Expired {
@@ -99,7 +104,7 @@ impl<I: Send + 'static, O: Send + 'static> Task<I, O> {
 
     pub(crate) fn waiting(&self, now: Instant) -> Option<Waiting> {
         self.since
-            .map(|since| self.interest.after(now.saturating_duration_since(since)))
+            .and_then(|since| self.interest.after(now.saturating_duration_since(since)))
     }
 
     /// Call only for progress from the current input, after checking its identity.

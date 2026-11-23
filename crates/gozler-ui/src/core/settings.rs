@@ -58,6 +58,10 @@ pub(crate) struct Choices {
     /// another window (DESIGN.md: Window lifetime).
     #[serde(default = "on", deserialize_with = "on_or_default")]
     pub(crate) one_window: bool,
+    /// The first window warns when the service sees a folder copied into
+    /// itself.
+    #[serde(default, deserialize_with = "or_default")]
+    pub(crate) warn_repeats: bool,
     /// Icons before the text of menu items, buttons, list items, group
     /// captions and the status bar's totals (DESIGN.md: Look).
     #[serde(default = "on", deserialize_with = "on_or_default")]
@@ -148,6 +152,7 @@ impl Default for Choices {
             check_for_updates: false,
             keep_running: on(),
             one_window: on(),
+            warn_repeats: false,
             show_icons: on(),
             show_memory: false,
             select_folders: on(),
@@ -375,6 +380,7 @@ impl SettingsValues {
                 choices.check_for_updates = defaults.check_for_updates;
                 choices.keep_running = defaults.keep_running;
                 choices.one_window = defaults.one_window;
+                choices.warn_repeats = defaults.warn_repeats;
                 choices.show_icons = defaults.show_icons;
                 choices.show_memory = defaults.show_memory;
                 choices.select_folders = defaults.select_folders;

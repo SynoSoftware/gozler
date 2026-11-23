@@ -398,8 +398,8 @@ const NOTES: &[(&str, &[(Reader, &str)])] = &[
                      beside `mtime_ft` and `created_ft`. JSON leaves out an unknown date. `total` \
                      counts every match, and `more` is true when the limit left out \
                      matching rows, so `--json -n 0` counts matches without rows. Check \
-                     `volumes_incomplete`, `metadata_pending` and the exit code before \
-                     treating an answer as complete. Warnings and errors go to stderr, not \
+                     `volumes_incomplete`, `metadata_pending`, `writes_partial` and the exit \
+                     code before treating an answer as complete. Warnings and errors go to stderr, not \
                      into JSON. See ",
                     env!("CARGO_PKG_REPOSITORY"),
                     "/blob/main/docs/JSON.md for fields and script examples."

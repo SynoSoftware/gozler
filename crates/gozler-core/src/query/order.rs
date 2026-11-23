@@ -80,6 +80,10 @@ pub(crate) enum KeyValue {
     /// The place of the match's folded [`extension`] among the distinct
     /// extensions of the matches, `None` first.
     Extension(u32),
+    /// The writes of the last hour, `None` while unknown.
+    Writes(Option<u64>),
+    /// The bytes those writes put on the disk, `None` while unknown.
+    Written(Option<u64>),
 }
 
 /// The primary key of a match from the value its sort key reads. A
@@ -106,13 +110,25 @@ pub(crate) fn primary_key(dir: SortDir, value: KeyValue) -> u64 {
         } => directed((u64::from(folder_rank) << 32) | u64::from(name_key)),
         // The index stores an unknown size as u64::MAX, so a known one is
         // below it.
-        KeyValue::Size(size) => unknown_last(size),
+        KeyValue::Size(size) | KeyValue::Writes(size) | KeyValue::Written(size) => {
+            unknown_last(size)
+        }
         // Flipping the sign bit orders an `i64` as a `u64`. The index stores
         // an unknown date as i64::MIN, so a known one maps to 1 or more.
         KeyValue::DateModified(date) | KeyValue::DateCreated(date) => {
             unknown_last(date.map(|t| ((t as u64) ^ (1 << 63)) - 1))
         }
         KeyValue::Extension(rank) => directed(u64::from(rank)),
+    }
+}
+
+/// The value that [`primary_key`] packed into the primary key of a sort by
+/// writes or Written in direction `dir`; `None` for an unknown one.
+pub(crate) fn known_value(dir: SortDir, primary: u64) -> Option<u64> {
+    match (primary, dir) {
+        (u64::MAX, _) => None,
+        (key, SortDir::Asc) => Some(key),
+        (key, SortDir::Desc) => Some(u64::MAX - 1 - key),
     }
 }
 
@@ -137,6 +153,11 @@ pub(crate) trait OrderFields {
     fn size(&self) -> Option<u64>;
     fn mtime(&self) -> Option<i64>;
     fn created(&self) -> Option<i64>;
+    /// The writes of the last hour as the request may read them. Read only
+    /// by [`SortKey::Writes`].
+    fn writes(&self) -> Option<u64>;
+    /// Read only by [`SortKey::Written`], as [`Self::writes`].
+    fn written(&self) -> Option<u64>;
     /// Tells volumes apart; constant within one volume.
     fn volume(&self) -> &[u8];
     fn frn(&self) -> Frn;
@@ -160,6 +181,8 @@ pub(crate) fn compare<T: OrderFields>(sort: SortSpec, a: &T, b: &T) -> Ordering 
         SortKey::Size => unknown_last(sort.dir, a.size(), b.size()),
         SortKey::DateModified => unknown_last(sort.dir, a.mtime(), b.mtime()),
         SortKey::DateCreated => unknown_last(sort.dir, a.created(), b.created()),
+        SortKey::Writes => unknown_last(sort.dir, a.writes(), b.writes()),
+        SortKey::Written => unknown_last(sort.dir, a.written(), b.written()),
         // Folding keeps every `.` where it is, so the extension of the folded
         // name is the folded extension.
         SortKey::Extension => directed(

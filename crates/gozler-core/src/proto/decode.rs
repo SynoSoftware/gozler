@@ -143,7 +143,7 @@ pub fn decode_request(frame: &[u8]) -> Result<Decoded, DecodeError> {
     };
     for at in wants_at {
         if let Some(wants) = request.pointer_mut(at).and_then(Value::as_array_mut) {
-            wants.retain(|want| !skip::<Want>(Some(want), &mut skipped));
+            wants.retain(|want| !skip_want(want, &mut skipped));
         }
     }
     match Request::deserialize(&request) {
@@ -152,13 +152,18 @@ pub fn decode_request(frame: &[u8]) -> Result<Decoded, DecodeError> {
     }
 }
 
-/// Whether `part` fails to decode as `T` and names the variant it holds;
-/// then that name goes on `skipped`, once.
-fn skip<T: DeserializeOwned>(part: Option<&Value>, skipped: &mut Vec<String>) -> bool {
-    let Some(name) = part.filter(|part| !decodes::<T>(part)).and_then(variant) else {
+/// Whether `want` fails to decode as a [`Want`] and names the variant it
+/// holds; then that name goes on `skipped`, once. The writes want goes as
+/// `--writes`, the option that asks for it, because the name `Writes` is
+/// also the name of the query test, which [`typed_parts`] would expand.
+fn skip_want(want: &Value, skipped: &mut Vec<String>) -> bool {
+    let Some(name) = Some(want)
+        .filter(|want| !decodes::<Want>(want))
+        .and_then(variant)
+    else {
         return false;
     };
-    note(name, skipped);
+    note(if name == "Writes" { "--writes" } else { name }, skipped);
     true
 }
 
@@ -172,7 +177,8 @@ fn note(name: &str, skipped: &mut Vec<String>) {
 /// The parts of `query` that a reply skipped ([`Decoded::skipped`]), as the
 /// person typed them, for a message: a part that names a query term's test
 /// becomes each such term of `query`, typed ([`Test::typed`]), and a part
-/// that names no term, a want, keeps its name.
+/// that names no term, a want, keeps its name, or the option that asks for
+/// it (`skip_want`).
 pub fn typed_parts(query: &ParsedQuery, skipped: &[String]) -> Vec<String> {
     let mut parts = Vec::new();
     for part in skipped {

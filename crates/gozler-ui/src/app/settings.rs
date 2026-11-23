@@ -108,7 +108,7 @@ fn heading(page: SettingsPage) -> ControlId {
 type Field<T> = fn(&mut SettingsValues) -> &mut T;
 
 /// Each check box, its page, and the value it shows.
-const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 10] = [
+const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 11] = [
     (SettingsPage::General, ControlId::GeneralSignIn, |v| {
         &mut v.start_at_sign_in
     }),
@@ -120,6 +120,9 @@ const CHECK_BOXES: [(SettingsPage, ControlId, Field<bool>); 10] = [
     }),
     (SettingsPage::General, ControlId::GeneralOneWindow, |v| {
         &mut v.choices.one_window
+    }),
+    (SettingsPage::General, ControlId::GeneralWarnRepeats, |v| {
+        &mut v.choices.warn_repeats
     }),
     (SettingsPage::General, ControlId::GeneralShowIcons, |v| {
         &mut v.choices.show_icons
@@ -579,6 +582,7 @@ impl<'a> SettingsDialog<'a> {
                     if let (Some(list), Some(place)) = (self.date_list(), place) {
                         list.select(place);
                     }
+                    self.show_wear_note();
                 }
             }
             SettingsPage::ContextMenu => self.fill_context_menu(&mut values),
@@ -970,6 +974,20 @@ impl<'a> SettingsDialog<'a> {
         if *self.seen.borrow() != text {
             label.set_text(&text);
             self.seen.replace(text);
+        }
+    }
+
+    /// Shows "Needs a newer service" under the copy warning's check box
+    /// while the service refuses the watch. Its caption is not in the
+    /// page's caption table, because a hidden note would make Settings'
+    /// search list the page.
+    fn show_wear_note(&self) {
+        if let Some(note) = self.control(SettingsPage::General, ControlId::GeneralWarnNote) {
+            let refused = self.main.wear.refused();
+            if refused {
+                note.set_text(self.strings.text("settings_general.needs_newer"));
+            }
+            note.set_visible(refused);
         }
     }
 
@@ -1465,10 +1483,8 @@ impl<'a> SettingsDialog<'a> {
             match saving.as_ref().filter(|_| shown) {
                 Some(awaited) => {
                     let waiting = match awaited {
-                        Awaited::Shortcut(applying) => Some(
-                            Interest::Awaited
-                                .after(now.saturating_duration_since(applying.accepted)),
-                        ),
+                        Awaited::Shortcut(applying) => Interest::Awaited
+                            .after(now.saturating_duration_since(applying.accepted)),
                         Awaited::SignIn { id, .. } => self.main.sign_in_waiting(*id, now),
                         Awaited::Service(..) | Awaited::Rebuild => self.main.elevated_waiting(now),
                     };
@@ -2155,12 +2171,31 @@ impl<'a> SettingsDialog<'a> {
             self.refuse(dialog, SettingsPage::Performance, control, &message);
             return false;
         }
-        let (edited, last) = {
+        let (mut edited, last) = {
             let draft = self.draft.borrow();
             (draft.edited.clone(), draft.last_applied().clone())
         };
         if edited == last {
             return true;
+        }
+        // The warning comes only while Gozler runs, so turning it on asks
+        // to turn on what keeps Gozler running.
+        let (sign_in, keep_running) = (edited.start_at_sign_in, edited.choices.keep_running);
+        if edited.choices.warn_repeats
+            && !last.choices.warn_repeats
+            && !(sign_in && keep_running)
+            && dialog::ask(
+                dialog,
+                &captions::keep_running_question(&self.strings, sign_in, keep_running),
+            )
+        {
+            {
+                let mut draft = self.draft.borrow_mut();
+                draft.edited.start_at_sign_in = true;
+                draft.edited.choices.keep_running = true;
+                edited = draft.edited.clone();
+            }
+            self.fill(SettingsPage::General);
         }
         let registration = match self.main.shortcuts.prepare(
             self.main,
@@ -2849,6 +2884,7 @@ impl DialogProc for SettingsDialog<'_> {
                     self.fill_visibility(selected);
                 }
                 self.show_seen();
+                self.show_wear_note();
                 if self.main.settings.take_include_summary_changed()
                     && self.include_folders().is_some()
                 {

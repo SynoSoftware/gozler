@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 use gozler_core::include::IndexSettings;
 use gozler_core::proto::{
     DaemonStatus, FrameDecoder, MAX_SERVER_FRAME, PROTO_VERSION, ProtoError, QueryResults,
-    QueryTotals, Request, Response, ResultSnapshotId, SERVICE_NAME, SearchRequest,
-    decode_response_frame, encode_request,
+    QueryTotals, Request, Response, ResultSnapshotId, SERVICE_NAME, SearchRequest, WearReply,
+    WearRequest, decode_response_frame, encode_request,
 };
 use gozler_core::query::ResultNames;
 use gozler_winfs::ServiceState;
@@ -310,6 +310,33 @@ impl Client {
         }
     }
 
+    /// Sends a [`Request::Wear`] and waits for its reply. The service holds
+    /// the request until it has something to warn about, so the wait has no
+    /// deadline. It is one blocking read of the pipe, which uses no CPU while
+    /// it waits; `CancelSynchronousIo` on the waiting thread ends it, and so
+    /// does the cancel token set before the read starts.
+    ///
+    /// A cancel that arrives after the token check but before the read
+    /// starts finds no read to end, so the read then blocks until the
+    /// service sends something or the pipe closes. A caller never waits for
+    /// a cancelled call: it sends its next request on a new connection.
+    ///
+    /// Fails with [`ClientError::Cancelled`] when cancelled,
+    /// [`ClientError::Lost`] when the service stops, and
+    /// [`ClientError::Refused`] when it cannot read the request. After a
+    /// failure the connection may still hold the request unanswered, so the
+    /// caller drops it and sends the next request on a new one.
+    pub fn wear(&mut self, request: WearRequest) -> Result<WearReply, ClientError> {
+        self.send(&Request::Wear(request))?;
+        match self.held_response()? {
+            Response::Wear(reply) => Ok(reply),
+            Response::Error { code, message } => Err(ClientError::Refused { code, message }),
+            _ => Err(ClientError::Communication(
+                "unexpected reply to wear".into(),
+            )),
+        }
+    }
+
     /// Writes one request. It never waits for the daemon: a request is a few
     /// hundred bytes, and the pipe holds 64 KiB that the daemon has not read.
     fn send(&mut self, request: &Request) -> Result<(), ClientError> {
@@ -360,6 +387,38 @@ impl Client {
             }
             self.decoder.feed(&self.buf[..n]);
             deadline = Instant::now() + READ_DEADLINE;
+        }
+    }
+
+    /// Reads the next framed response of a request that the daemon holds,
+    /// with blocking reads, so it waits without a deadline and without a
+    /// poll. A read that `CancelSynchronousIo` stops is
+    /// [`ClientError::Cancelled`], and every other failed read is
+    /// [`ClientError::Lost`], as a failed peek is in [`Self::next_response`]:
+    /// a service that stops or disconnects the pipe fails the read.
+    fn held_response(&mut self) -> Result<Response, ClientError> {
+        const ERROR_OPERATION_ABORTED: i32 = 995;
+        loop {
+            if self.cancel.is_cancelled() {
+                return Err(ClientError::Cancelled);
+            }
+            match self.decoder.next_frame() {
+                Ok(Some(frame)) => {
+                    return decode_response_frame(&frame, &mut self.names)
+                        .map_err(|e| ClientError::Communication(e.to_string()));
+                }
+                Ok(None) => {}
+                Err(e) => return Err(ClientError::Communication(e.to_string())),
+            }
+            let n = match self.pipe.read(&mut self.buf) {
+                Ok(0) => return Err(ClientError::Lost),
+                Ok(n) => n,
+                Err(e) if e.raw_os_error() == Some(ERROR_OPERATION_ABORTED) => {
+                    return Err(ClientError::Cancelled);
+                }
+                Err(_) => return Err(ClientError::Lost),
+            };
+            self.decoder.feed(&self.buf[..n]);
         }
     }
 }
@@ -487,5 +546,85 @@ mod tests {
         });
         assert!(matches!(result, Err(ClientError::Cancelled)), "{result:?}");
         assert_eq!(pages, 1);
+    }
+
+    /// The service holds a wear request until it has something to warn
+    /// about, so only `CancelSynchronousIo` ends the wait. A wait it cannot
+    /// end, or that it ends as another failure, would hold the window's Exit
+    /// and each change of the limits behind a reply that may never come.
+    #[test]
+    fn a_held_wear_request_ends_at_cancel_synchronous_io() {
+        use gozler_core::proto::RepeatsAfter;
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_io()
+            .build()
+            .expect("a tokio runtime");
+        let name = pipe_name("held");
+        let mut server = {
+            let _reactor = runtime.enter();
+            ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&name)
+                .expect("the test pipe is created")
+        };
+        let (read, wear_read) = std::sync::mpsc::channel();
+        runtime.spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            server.connect().await.expect("the client connects");
+            let mut hello = Vec::new();
+            let reply = Response::Hello {
+                proto: PROTO_VERSION,
+                server: "test".into(),
+                ready: true,
+            };
+            gozler_core::proto::encode_response_frame(&reply, &mut hello);
+            server.write_all(&hello).await.expect("the hello is sent");
+            // The client's Hello, then its wear request.
+            let mut frames = FrameDecoder::new(gozler_core::proto::MAX_CLIENT_FRAME);
+            let mut buffer = [0; 4096];
+            let mut count = 0;
+            while count < 2 {
+                let n = server.read(&mut buffer).await.expect("the client writes");
+                if n == 0 {
+                    // The client closed the pipe; the test reports its error.
+                    return;
+                }
+                frames.feed(&buffer[..n]);
+                while frames.next_frame().expect("a valid frame").is_some() {
+                    count += 1;
+                }
+            }
+            read.send(()).expect("the test waits for the wear request");
+            // Holds every request, as the service holds a wear request.
+            std::future::pending::<()>().await;
+        });
+
+        let (sent, handle) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let io = gozler_winfs::current_thread_io_handle().expect("a handle to this thread");
+            sent.send(io).expect("the test waits for the handle");
+            let mut client = Client::connect(&name, false, CancelToken::default())?;
+            client.wear(WearRequest {
+                after: RepeatsAfter { run: 0, number: 0 },
+                copies: 4,
+            })
+        });
+        let thread = handle.recv().expect("the waiting thread sends its handle");
+        // `Client::connect` and the request's write are synchronous I/O too,
+        // and a cancel there ends them as another failure, so the cancels
+        // start once the service has read the request. From then on, the
+        // thread waits only in the held read, which a cancel finds once the
+        // thread is in it. A thread that fails before ends the wait too, so
+        // the assert shows its error.
+        while wear_read.try_recv().is_err() && !waiter.is_finished() {
+            std::thread::yield_now();
+        }
+        while !waiter.is_finished() {
+            let _ = gozler_winfs::cancel_synchronous_io(&thread);
+            std::thread::yield_now();
+        }
+        let result = waiter.join().expect("the waiting thread does not panic");
+        assert!(matches!(result, Err(ClientError::Cancelled)), "{result:?}");
     }
 }

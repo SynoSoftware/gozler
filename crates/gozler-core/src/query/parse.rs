@@ -241,6 +241,25 @@ pub enum Test {
         kind: Option<Kind>,
         range: SizeRange,
     },
+    /// A folder whose path ends in the same group of folder names, of any
+    /// length, this many times in a row ([`RepeatTest`]). An addition within
+    /// protocol 22, so an older gozlerd skips it.
+    ///
+    /// [`RepeatTest`]: crate::index::repeats::RepeatTest
+    Repeats {
+        range: SizeRange,
+    },
+    /// How many times the file's name in its folder, or the files directly
+    /// in a folder, were written in the last hour (`docs/DESIGN.md`,
+    /// "Writes"). An addition within protocol 22, so an older gozlerd skips
+    /// it.
+    Writes {
+        range: SizeRange,
+    },
+    /// How many bytes those writes put on the disk, as for [`Test::Writes`].
+    Written {
+        range: SizeRange,
+    },
     /// The nearest of these folders at or above the entry's real full path,
     /// if there is one, is not left out. A link does not reach a folder,
     /// because a caller that leaves a folder out means the files in it.
@@ -316,6 +335,9 @@ impl Test {
             Test::Child(text) => function(Function::Child) + text,
             Test::Depth(_) => function(Function::Depth),
             Test::ChildCount { kind, .. } => function(Function::ChildCount(*kind)),
+            Test::Repeats { .. } => function(Function::Repeats),
+            Test::Writes { .. } => function(Function::Writes),
+            Test::Written { .. } => function(Function::Written),
             // Only options make this test, and a list of folders is too long
             // for the message that names a skipped term.
             Test::Folders(_) => "--leave-out".to_owned(),
@@ -333,6 +355,15 @@ impl ParsedQuery {
                 Test::Size(_) | Test::DateModified(_) | Test::DateCreated(_) | Test::Unknown(_)
             )
         })
+    }
+
+    /// Whether a term tests the writes or the Written, which a volume whose
+    /// writes cover only part of the last hour can leave matches out of.
+    pub fn tests_writes(&self) -> bool {
+        self.clauses
+            .iter()
+            .flat_map(|c| &c.terms)
+            .any(|t| matches!(t.test, Test::Writes { .. } | Test::Written { .. }))
     }
 
     /// Whether a term tests the date created, which only an index with
@@ -475,6 +506,9 @@ enum Function {
     Child,
     Depth,
     ChildCount(Option<Kind>),
+    Repeats,
+    Writes,
+    Written,
     Empty,
     Date(DateField),
     Path,
@@ -597,6 +631,31 @@ pub(crate) const SEARCH_FUNCTIONS: &[SearchFunction] = &[
         example: "2",
         help: "How many folders are above the file or folder, counting the drive's root, so C:\\Windows has 1; \
                accepts comparisons and ranges",
+    },
+    SearchFunction {
+        names: &["repeats"],
+        function: Function::Repeats,
+        example: "4",
+        help: "Folders whose path ends in the same group of folder names this many times in a \
+               row, such as a\\b\\a\\b\\a\\b\\a\\b, which a step that copies a folder into itself \
+               leaves; `repeats:4` means at least 4 times, `repeats:` alone at least twice, and \
+               a range such as `repeats:2..3` an exact count",
+    },
+    SearchFunction {
+        names: &["writes"],
+        function: Function::Writes,
+        example: ">100",
+        help: "Files and folders written this many times in the last hour: a file's name in \
+               its folder, a folder's files directly in it; accepts comparisons and ranges such \
+               as `writes:10..50`; a value that may be counted low matches only when every \
+               value it may be matches",
+    },
+    SearchFunction {
+        names: &["written"],
+        function: Function::Written,
+        example: ">1gb",
+        help: "Files and folders whose writes in the last hour put this many bytes on the \
+               disk, counted as `writes:` counts; accepts the values of `size:`",
     },
     SearchFunction {
         names: &["ww"],
@@ -1046,6 +1105,19 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
                 let range = count_range(value)?;
                 return Ok(Operand::Text(Test::ChildCount { kind, range }));
             }
+            Some(Function::Repeats) => {
+                return Ok(Operand::Text(Test::Repeats {
+                    range: repeats_range(value)?,
+                }));
+            }
+            Some(Function::Writes) => {
+                let range = count_range(value)?;
+                return Ok(Operand::Text(Test::Writes { range }));
+            }
+            Some(Function::Written) => {
+                let range = parse_size(value)?;
+                return Ok(Operand::Text(Test::Written { range }));
+            }
             Some(Function::Empty) => {
                 if !value.trim().is_empty() {
                     return Err(QueryError::Malformed(Malformed::Count(value.to_owned())));
@@ -1123,6 +1195,23 @@ fn operand(word: &Word, options: &ParseOptions) -> Result<Operand, QueryError> {
 fn count_range(value: &str) -> Result<SizeRange, QueryError> {
     parse_range(value, |s| s.trim().parse().ok())
         .ok_or_else(|| QueryError::Malformed(Malformed::Count(value.to_owned())))
+}
+
+/// The copies a `repeats:` value accepts. A copy into itself is found by its
+/// least number of copies, so a plain number is that many or more, and no
+/// value is 2 or more; a comparison or a range counts as in `depth:`.
+fn repeats_range(value: &str) -> Result<SizeRange, QueryError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(SizeRange {
+            min: 2,
+            max: u64::MAX,
+        });
+    }
+    if let Ok(min) = value.parse() {
+        return Ok(SizeRange { min, max: u64::MAX });
+    }
+    count_range(value)
 }
 
 fn whole_name(value: &str, options: &ParseOptions) -> Result<Operand, QueryError> {
@@ -1419,6 +1508,9 @@ fn lex(input: &str) -> Result<Vec<Lexeme>, QueryError> {
                                         | Function::Length(_)
                                         | Function::Depth
                                         | Function::ChildCount(_)
+                                        | Function::Repeats
+                                        | Function::Writes
+                                        | Function::Written
                                 )
                             )
                     })

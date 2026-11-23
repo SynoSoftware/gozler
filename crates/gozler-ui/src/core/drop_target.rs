@@ -244,6 +244,7 @@ mod tests {
             attributes: None,
             counts: None,
             identity: None,
+            writes: None,
         }
     }
 

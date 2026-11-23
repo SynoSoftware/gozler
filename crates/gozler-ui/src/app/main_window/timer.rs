@@ -26,6 +26,8 @@ pub(super) enum Timer {
     SelectionWait,
     /// The selected folder's count shows busy text.
     Calculating,
+    /// The wear request that failed is sent again.
+    WearRetry,
 }
 
 const IDS: &[(Timer, usize)] = &[
@@ -60,6 +62,7 @@ const IDS: &[(Timer, usize)] = &[
     (Timer::ColumnFill(List::Panel(Side::Right)), 31),
     (Timer::SelectionWait, 32),
     (Timer::Calculating, 33),
+    (Timer::WearRetry, 34),
 ];
 
 impl Timer {

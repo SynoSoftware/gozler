@@ -36,6 +36,7 @@ fn record(frn: Frn, parent: Frn, name: &str, is_dir: bool, reason: u32) -> Parse
         reason,
         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
         name: name.as_bytes().to_vec(),
+        time: 0,
     }
 }
 
@@ -173,7 +174,12 @@ fn directory_rename_touches_exactly_one_entry() {
     let mut idx = index_from_enum(&recs);
     idx.take_write_count(); // reset the counter after bootstrap
 
-    let outcome = idx.apply_batch(&[rename(frn(100), root_frn(), "RENAMED", true)]);
+    let outcome = idx.apply_batch(&settle::Batch::of(&[rename(
+        frn(100),
+        root_frn(),
+        "RENAMED",
+        true,
+    )]));
     assert!(outcome.needs_link_reconcile.is_empty());
     assert_eq!(
         idx.take_write_count(),
@@ -224,7 +230,12 @@ fn slot_reuse_never_aliases() {
     );
 
     // Missed delete of the old file; the new tenant arrives on the same record.
-    idx.apply_batch(&[create(frn_seq(100, 4), root_frn(), "new.txt", false)]);
+    idx.apply_batch(&settle::Batch::of(&[create(
+        frn_seq(100, 4),
+        root_frn(),
+        "new.txt",
+        false,
+    )]));
     assert_eq!(idx.stats().stale_slots, 1);
     assert_eq!(path_of_frn(&idx, frn_seq(100, 3)), None);
     assert_eq!(
@@ -256,7 +267,12 @@ fn parent_slot_reuse_never_leaks_the_stale_chain() {
     // The delete is missed and NTFS re-tenants record 100. The new file arrives
     // naming the reused record as its PARENT, so the only path that sees the
     // stale slot is the parent resolver.
-    idx.apply_batch(&[create(frn(201), frn_seq(100, 4), "new.txt", false)]);
+    idx.apply_batch(&settle::Batch::of(&[create(
+        frn(201),
+        frn_seq(100, 4),
+        "new.txt",
+        false,
+    )]));
 
     assert_eq!(
         idx.stats().stale_slots,
@@ -282,10 +298,20 @@ fn parent_slot_reuse_never_leaks_the_stale_chain() {
 #[test]
 fn a_parent_that_is_its_own_records_previous_tenant_leaves_no_freed_parent() {
     let mut idx = new_index();
-    idx.apply_batch(&[create(frn_seq(1003, 1), root_frn(), "a", false)]);
+    idx.apply_batch(&settle::Batch::of(&[create(
+        frn_seq(1003, 1),
+        root_frn(),
+        "a",
+        false,
+    )]));
     // A second name of the same file, so its chain holds two links.
     idx.insert_listed(&listed(frn_seq(1003, 1), root_frn(), "b", false));
-    idx.apply_batch(&[create(frn_seq(1003, 2), frn_seq(1003, 1), "c", false)]);
+    idx.apply_batch(&settle::Batch::of(&[create(
+        frn_seq(1003, 2),
+        frn_seq(1003, 1),
+        "c",
+        false,
+    )]));
     assert!(idx.child_chains_match_rebuild());
     assert_eq!(
         path_of_frn(&idx, frn_seq(1003, 2)),
@@ -321,10 +347,10 @@ fn layout_pass_never_leaks_a_retenanted_record() {
         }],
     });
     // The journal replay from the cursor captured before the build.
-    idx.apply_batch(&[
+    idx.apply_batch(&settle::Batch::of(&[
         delete(gone),
         create(tenant, root_frn(), "tenant.txt", false),
-    ]);
+    ]));
 
     assert_eq!(path_set(&idx), BTreeSet::from(["tenant.txt".to_string()]));
 }
@@ -340,14 +366,14 @@ fn removed_entry_has_no_path_after_compaction() {
         .map(|i| create(frn(1000 + i), root_frn(), &format!("{i:040}"), false))
         .collect();
     batch.push(create(frn(100), root_frn(), "proj", true));
-    idx.apply_batch(&batch);
+    idx.apply_batch(&settle::Batch::of(&batch));
     let proj = idx.head_of(frn(100)).unwrap();
 
     let deletes: Vec<_> = (0..400)
         .map(|i| delete(frn(1000 + i)))
         .chain([delete(frn(100))])
         .collect();
-    idx.apply_batch(&deletes);
+    idx.apply_batch(&settle::Batch::of(&deletes));
     let plan = idx
         .plan_compaction()
         .expect("every deleted name is garbage");
@@ -367,7 +393,10 @@ fn children_of_a_removed_folder_move_to_lost_found() {
         create(frn(101), frn(100), "sub", true),
     ]);
     // The delete of `sub` is missed; `old` goes, and `new` reuses its slot.
-    idx.apply_batch(&[delete(frn(100)), create(frn(102), root_frn(), "new", true)]);
+    idx.apply_batch(&settle::Batch::of(&[
+        delete(frn(100)),
+        create(frn(102), root_frn(), "new", true),
+    ]));
     let new = idx.head_of(frn(102)).unwrap();
     assert_eq!(path_set(&idx), BTreeSet::from(["new".to_string()]));
     assert_eq!(idx.child_dir(new, b"sub"), None);
@@ -379,7 +408,12 @@ fn children_of_a_removed_folder_move_to_lost_found() {
     assert!(idx.child_chains_match_rebuild());
 
     // The child's own record re-parents it.
-    idx.apply_batch(&[rename(frn(101), frn(102), "sub", true)]);
+    idx.apply_batch(&settle::Batch::of(&[rename(
+        frn(101),
+        frn(102),
+        "sub",
+        true,
+    )]));
     assert_eq!(
         path_set(&idx),
         BTreeSet::from(["new".to_string(), "new\\sub".to_string()])
@@ -396,7 +430,9 @@ fn growth_after_the_trim_keeps_little_slack() {
     let file = |i: u64| create(frn(100 + i), root_frn(), &format!("{i}.txt"), false);
     let mut idx = index_from_enum(&(0..10_000).map(file).collect::<Vec<_>>());
     idx.optimize_storage();
-    idx.apply_batch(&(10_000..10_500).map(file).collect::<Vec<_>>());
+    idx.apply_batch(&settle::Batch::of(
+        &(10_000..10_500).map(file).collect::<Vec<_>>(),
+    ));
     let memory = idx.memory();
     for (column, bytes) in [
         ("entries", memory.entries),
@@ -423,7 +459,12 @@ fn far_record_number_does_not_grow_the_dense_map() {
     assert_eq!(idx.memory().frn_map_kind, "dense");
 
     let far = frn((1 << 48) - 1);
-    idx.apply_batch(&[create(far, root_frn(), "far.txt", false)]);
+    idx.apply_batch(&settle::Batch::of(&[create(
+        far,
+        root_frn(),
+        "far.txt",
+        false,
+    )]));
     assert_eq!(path_of_frn(&idx, far).as_deref(), Some("far.txt"));
     assert_eq!(path_of_frn(&idx, frn(100)).as_deref(), Some("0.txt"));
 }
@@ -439,9 +480,9 @@ fn double_apply_equals_single_apply() {
     ];
     let mut twice = index_from_enum(&[create(frn(100), root_frn(), "dir", true)]);
 
-    once.apply_batch(&batch);
-    twice.apply_batch(&batch);
-    twice.apply_batch(&batch); // idempotent replay
+    once.apply_batch(&settle::Batch::of(&batch));
+    twice.apply_batch(&settle::Batch::of(&batch));
+    twice.apply_batch(&settle::Batch::of(&batch)); // idempotent replay
 
     assert_eq!(path_set(&once), path_set(&twice));
     assert_eq!(
@@ -453,7 +494,7 @@ fn double_apply_equals_single_apply() {
 #[test]
 fn delete_of_unknown_is_counted_not_fatal() {
     let mut idx = new_index();
-    let outcome = idx.apply_batch(&[delete(frn(999))]);
+    let outcome = idx.apply_batch(&settle::Batch::of(&[delete(frn(999))]));
     assert_eq!(idx.stats().delete_of_unknown, 1);
     assert_eq!(
         outcome.anomalies,
@@ -464,10 +505,10 @@ fn delete_of_unknown_is_counted_not_fatal() {
 #[test]
 fn created_and_deleted_in_same_batch_nets_to_nothing() {
     let mut idx = index_from_enum(&[create(frn(100), root_frn(), "dir", true)]);
-    idx.apply_batch(&[
+    idx.apply_batch(&settle::Batch::of(&[
         create(frn(101), frn(100), "temp.tmp", false),
         delete(frn(101)),
-    ]);
+    ]));
     assert_eq!(path_set(&idx), BTreeSet::from(["dir".to_string()]));
 }
 
@@ -478,13 +519,18 @@ fn created_and_deleted_in_same_batch_nets_to_nothing() {
 #[test]
 fn a_name_change_asks_for_its_folder_but_not_for_removed_entries() {
     let mut idx = index_from_enum(&[create(frn(10), root_frn(), "dir", true)]);
-    let outcome = idx.apply_batch(&[create(frn(100), frn(10), "a.txt", false)]);
+    let outcome = idx.apply_batch(&settle::Batch::of(&[create(
+        frn(100),
+        frn(10),
+        "a.txt",
+        false,
+    )]));
     assert_eq!(outcome.needs_stat, [frn(10), frn(100)]);
 
-    let outcome = idx.apply_batch(&[
+    let outcome = idx.apply_batch(&settle::Batch::of(&[
         record(frn(100), frn(10), "a.txt", false, USN_REASON_FILE_DELETE),
         record(frn(10), root_frn(), "dir", true, USN_REASON_FILE_DELETE),
-    ]);
+    ]));
     assert_eq!(outcome.needs_stat, [root_frn()]);
 }
 
@@ -497,10 +543,10 @@ fn a_hard_link_change_is_reported_once_per_batch() {
     use crate::usn::record::{USN_REASON_CLOSE, USN_REASON_HARD_LINK_CHANGE};
     let mut idx = index_from_enum(&[create(frn(100), root_frn(), "a.txt", false)]);
     let change = |reason| record(frn(100), root_frn(), "b.txt", false, reason);
-    let outcome = idx.apply_batch(&[
+    let outcome = idx.apply_batch(&settle::Batch::of(&[
         change(USN_REASON_HARD_LINK_CHANGE),
         change(USN_REASON_HARD_LINK_CHANGE | USN_REASON_CLOSE),
-    ]);
+    ]));
     assert_eq!(outcome.needs_link_reconcile, vec![frn(100)]);
 }
 
@@ -514,10 +560,21 @@ fn a_hard_link_change_is_reported_once_per_batch() {
 #[test]
 fn a_renamed_folder_the_index_lacks_is_reported_for_a_walk() {
     let mut idx = new_index();
-    let created = idx.apply_batch(&[create(frn(100), root_frn(), "new", true)]);
+    let created = idx.apply_batch(&settle::Batch::of(&[create(
+        frn(100),
+        root_frn(),
+        "new",
+        true,
+    )]));
     assert!(created.needs_walk.is_empty());
     let moved_in = |idx: &mut VolumeIndex, f: Frn, is_dir: bool, reason: u32| {
-        idx.apply_batch(&[record(f, root_frn(), "moved", is_dir, reason)])
+        idx.apply_batch(&settle::Batch::of(&[record(
+            f,
+            root_frn(),
+            "moved",
+            is_dir,
+            reason,
+        )]))
     };
     let folder = moved_in(
         &mut idx,
@@ -554,28 +611,31 @@ fn the_descriptor_column_follows_each_folder() {
 
     let mut idx = new_index();
     let (changed, file, becomes_dir, new) = (frn(100), frn(101), frn(102), frn(103));
-    idx.apply_batch(&[
+    idx.apply_batch(&settle::Batch::of(&[
         create(changed, root, "changed", true),
         create(file, root, "f.txt", false),
         create(becomes_dir, root, "x", false),
-    ]);
+    ]));
     idx.set_folder_descriptor(changed, b"changed");
-    let outcome = idx.apply_batch(&[
+    let outcome = idx.apply_batch(&settle::Batch::of(&[
         create(new, root, "new", true),
         security(changed, true),
         security(file, false),
         rename(becomes_dir, root, "x", true),
         security(changed, true),
-    ]);
+    ]));
     assert_eq!(outcome.needs_descriptor, vec![changed, becomes_dir, new]);
     assert_eq!(idx.folder_descriptor(changed), None);
 
     let mut idx = new_index();
     let (gone, reborn) = (frn(200), frn(201));
-    idx.apply_batch(&[create(gone, root, "gone", true)]);
+    idx.apply_batch(&settle::Batch::of(&[create(gone, root, "gone", true)]));
     idx.set_folder_descriptor(gone, b"gone");
     let slot = idx.head_of(gone);
-    let outcome = idx.apply_batch(&[delete(gone), create(reborn, root, "reborn", true)]);
+    let outcome = idx.apply_batch(&settle::Batch::of(&[
+        delete(gone),
+        create(reborn, root, "reborn", true),
+    ]));
     assert_eq!(
         idx.head_of(reborn),
         slot,
@@ -586,26 +646,26 @@ fn the_descriptor_column_follows_each_folder() {
 
     let mut idx = new_index();
     let (a, b, c) = (frn(300), frn(301), frn(302));
-    idx.apply_batch(&[
+    idx.apply_batch(&settle::Batch::of(&[
         create(a, root, "a", true),
         create(b, root, "b", true),
         create(c, root, "c", true),
-    ]);
+    ]));
     let own = |f: Frn| f.0.to_le_bytes();
     for f in [a, b, c] {
         idx.set_folder_descriptor(f, &own(f));
     }
-    idx.apply_batch(&[delete(b)]);
+    idx.apply_batch(&settle::Batch::of(&[delete(b)]));
     idx.optimize_storage();
     assert_eq!(idx.folder_descriptor(a), Some(&own(a)[..]));
     assert_eq!(idx.folder_descriptor(c), Some(&own(c)[..]));
 
     let mut idx = new_index();
     let (extend, metadata) = (frn(11), frn(400));
-    let outcome = idx.apply_batch(&[
+    let outcome = idx.apply_batch(&settle::Batch::of(&[
         create(extend, root, "$Extend", true),
         create(metadata, extend, "$RmMetadata", true),
-    ]);
+    ]));
     assert!(outcome.needs_descriptor.is_empty(), "{outcome:?}");
 }
 
@@ -619,10 +679,10 @@ fn changed_descriptors_keep_the_table_bounded() {
     let root = root_frn();
     let mut idx = new_index();
     let (changing, steady) = (frn(100), frn(101));
-    idx.apply_batch(&[
+    idx.apply_batch(&settle::Batch::of(&[
         create(changing, root, "changing", true),
         create(steady, root, "steady", true),
-    ]);
+    ]));
     idx.set_folder_descriptor(steady, b"steady");
     let instance = idx.instance();
     let changed = |n: u32| {
@@ -788,7 +848,7 @@ fn file_delete_removes_the_whole_link_chain() {
     assert_eq!(idx.collect_real_paths().len(), 4); // 2 dirs + 2 links
 
     // FILE_DELETE = the file record died: every link disappears.
-    idx.apply_batch(&[delete(frn(100))]);
+    idx.apply_batch(&settle::Batch::of(&[delete(frn(100))]));
     assert_eq!(
         path_set(&idx),
         BTreeSet::from(["dirA".to_string(), "dirB".to_string()])
@@ -929,7 +989,7 @@ fn attributes_reach_every_link_of_a_file() {
         USN_REASON_BASIC_INFO_CHANGE,
     );
     hide.attributes = 0x2 | 0x20;
-    idx.apply_batch(&[hide]);
+    idx.apply_batch(&settle::Batch::of(&[hide]));
     idx.reconcile_links(
         frn(100),
         &[
@@ -968,6 +1028,7 @@ fn lone_surrogate_names_round_trip_through_the_index() {
         reason: USN_REASON_FILE_CREATE,
         attributes: 0,
         name: name.clone(),
+        time: 0,
     };
     idx.insert_enum(&rec);
     let head = idx.head_of(frn(100)).unwrap();
@@ -1314,12 +1375,12 @@ proptest! {
         let mut next_frn: u64 = 1000;
         for action in &actions {
             if let Some(rec) = step_model(&mut model, &mut next_frn, ids, action) {
-                idx.apply_batch(std::slice::from_ref(&rec));
+                idx.apply_batch(&settle::Batch::of(std::slice::from_ref(&rec)));
                 prop_assert_eq!(path_set(&idx), model.path_set());
                 prop_assert!(idx.dir_index_matches_rebuild(), "dir index drifted after apply");
                 prop_assert!(idx.name_chains_match_rebuild(), "name chains drifted after apply");
                 prop_assert!(idx.child_chains_match_rebuild(), "child chains drifted after apply");
-                idx.apply_batch(std::slice::from_ref(&rec)); // idempotent replay
+                idx.apply_batch(&settle::Batch::of(std::slice::from_ref(&rec))); // idempotent replay
                 prop_assert_eq!(path_set(&idx), model.path_set());
                 prop_assert!(idx.dir_index_matches_rebuild(), "dir index drifted after replay");
                 prop_assert!(idx.name_chains_match_rebuild(), "name chains drifted after replay");
@@ -1394,7 +1455,7 @@ proptest! {
                 idx.insert_enum(r);
             }
         }
-        idx.apply_batch(&journal);
+        idx.apply_batch(&settle::Batch::of(&journal));
 
         prop_assert_eq!(path_set(&idx), model.path_set());
         prop_assert!(idx.dir_index_matches_rebuild(), "dir index drifted after bootstrap race");
@@ -1469,7 +1530,7 @@ proptest! {
             let settled = settle::settle_batch(
                 &index,
                 &mut reads,
-                settle::Batch { records: &batch, replaying_walk: true },
+                settle::Batch { replaying_walk: true, detects_repeats: false, ..settle::Batch::of(&batch) },
                 || false,
             );
             prop_assert!(settled.is_ok());
@@ -1531,7 +1592,12 @@ fn enrich_with_renamed_directory_never_orphans_children() {
         create(frn(100), root_frn(), "docs", true),
         create(frn(101), frn(100), "a.txt", false),
     ]);
-    idx.apply_batch(&[rename(frn(100), root_frn(), "documents", true)]);
+    idx.apply_batch(&settle::Batch::of(&[rename(
+        frn(100),
+        root_frn(),
+        "documents",
+        true,
+    )]));
     assert_eq!(
         path_of_frn(&idx, frn(101)).as_deref(),
         Some("documents\\a.txt")
@@ -1553,7 +1619,12 @@ fn enrich_with_renamed_directory_never_orphans_children() {
 
     // The child is still correctly under the (renamed) directory, and a later
     // allocation reusing any freed slot cannot misparent it.
-    idx.apply_batch(&[create(frn(200), root_frn(), "unrelated.txt", false)]);
+    idx.apply_batch(&settle::Batch::of(&[create(
+        frn(200),
+        root_frn(),
+        "unrelated.txt",
+        false,
+    )]));
     assert_eq!(
         path_of_frn(&idx, frn(101)).as_deref(),
         Some("documents\\a.txt")
@@ -1664,16 +1735,26 @@ fn apply_change(idx: &mut VolumeIndex, change: &IndexChange) {
             is_dir,
         } => {
             let name = format!("c{target}");
-            idx.apply_batch(&[create(pool_id(target), pool_parent(parent), &name, is_dir)]);
+            idx.apply_batch(&settle::Batch::of(&[create(
+                pool_id(target),
+                pool_parent(parent),
+                &name,
+                is_dir,
+            )]));
         }
         IndexChange::Rename { target, parent } => {
             let id = pool_id(target);
             let is_dir = idx.head_of(id).is_some_and(|h| idx.entry(h).is_dir());
             let name = format!("r{target}");
-            idx.apply_batch(&[rename(id, pool_parent(parent), &name, is_dir)]);
+            idx.apply_batch(&settle::Batch::of(&[rename(
+                id,
+                pool_parent(parent),
+                &name,
+                is_dir,
+            )]));
         }
         IndexChange::Delete { target } => {
-            idx.apply_batch(&[delete(pool_id(target))]);
+            idx.apply_batch(&settle::Batch::of(&[delete(pool_id(target))]));
         }
         IndexChange::Stat { target, size } => idx.set_stat(pool_id(target), size.into(), 0),
         IndexChange::Links {
@@ -1835,14 +1916,14 @@ fn journal_records_follow_the_include_rules() {
     let mut idx = include_fixture();
     idx.apply_rules(include_rules(true, &[("Windows", false)], "*.tmp"));
 
-    let outcome = idx.apply_batch(&[
+    let outcome = idx.apply_batch(&settle::Batch::of(&[
         create(frn(30), frn(11), "new.dll", false),
         create(frn(31), frn(11), "Sub", true),
         create(frn(32), frn(31), "deep.txt", false),
         rename(frn(22), frn(21), "doc.tmp", false),
         rename(frn(21), frn(10), "ana", true),
         rename(frn(13), frn(20), "Temp", true),
-    ]);
+    ]));
 
     assert_eq!(idx.stats().placeholders_created, 0);
     assert!(!idx.has_orphans());
@@ -1871,7 +1952,7 @@ fn an_entry_that_is_no_longer_hidden_comes_back() {
         attributes: FILE_ATTRIBUTE_DIRECTORY,
         ..record(frn(10), r, "secret", true, USN_REASON_BASIC_INFO_CHANGE)
     };
-    let outcome = idx.apply_batch(&[shown]);
+    let outcome = idx.apply_batch(&settle::Batch::of(&[shown]));
 
     assert_eq!(path_set(&idx), paths(&["secret"]));
     assert_eq!(outcome.needs_walk, vec![frn(10)]);
@@ -1919,7 +2000,7 @@ fn a_hard_linked_file_that_becomes_hidden_leaves_the_index() {
             USN_REASON_BASIC_INFO_CHANGE,
         )
     };
-    let outcome = idx.apply_batch(&[hidden]);
+    let outcome = idx.apply_batch(&settle::Batch::of(&[hidden]));
     assert_eq!(outcome.needs_link_reconcile, vec![frn(100)]);
     idx.reconcile_links(frn(100), &names);
 
@@ -1964,7 +2045,12 @@ fn a_move_keeps_the_name_id_of_a_uniquely_named_file() {
         create(frn(102), frn(100), "unique.txt", false),
     ]);
     let id = idx.name_id(idx.head_of(frn(102)).unwrap());
-    idx.apply_batch(&[rename(frn(102), frn(101), "unique.txt", false)]);
+    idx.apply_batch(&settle::Batch::of(&[rename(
+        frn(102),
+        frn(101),
+        "unique.txt",
+        false,
+    )]));
     assert_eq!(idx.name_id(idx.head_of(frn(102)).unwrap()), id);
     assert_eq!(
         path_of_frn(&idx, frn(102)).as_deref(),
@@ -2084,13 +2170,13 @@ fn a_reparse_folder_is_read_on_ntfs_and_not_on_refs() {
 
         // A record whose attributes no longer hold the reparse point makes it
         // a plain folder, which files can now be created in, so it is read.
-        let outcome = idx.apply_batch(&[record(
+        let outcome = idx.apply_batch(&settle::Batch::of(&[record(
             junction,
             ids.root(),
             "junction",
             true,
             USN_REASON_BASIC_INFO_CHANGE,
-        )]);
+        )]));
         assert!(outcome.needs_descriptor.contains(&junction), "{width:?}");
     }
 }

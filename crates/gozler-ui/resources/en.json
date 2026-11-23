@@ -111,6 +111,8 @@
     "date_modified": "&Date modified",
     "date_created": "Date c&reated",
     "extension": "&Extension",
+    "writes": "&Writes",
+    "written": "Wri&tten",
     "attributes": "&Attributes",
     "fit": "&Fit column “{0}”",
     "fit_columns": "Fit &columns",
@@ -125,6 +127,8 @@
     "modified": "Modified",
     "created": "Created",
     "extension": "Extension",
+    "writes": "Writes",
+    "written": "Written",
     "attributes": "Attributes",
     "folder": "Folder"
   },
@@ -135,6 +139,8 @@
     "date_modified": "&Date modified",
     "date_created": "Date c&reated",
     "extension": "&Extension",
+    "writes": "&Writes",
+    "written": "Wri&tten",
     "ascending": "&Ascending",
     "descending": "Des&cending"
   },
@@ -200,6 +206,7 @@
     "volume_offline": "{0} is offline. Results might be incomplete.",
     "volume_failed": "{0} couldn't be indexed. Results might be incomplete.",
     "metadata": "Some sizes and dates on {0} are unknown.",
+    "writes_partial": "Writes cover only part of the last hour. Results might be incomplete.",
     "skipped": "The service skipped {0}, which only a newer version reads. Results might be incomplete.",
     "update_available": "Gozler {0} is available. Select to update.",
     "service_memory": "Service {0}",
@@ -288,6 +295,9 @@
     "date_modified": "Date modified:",
     "attributes": "Attributes:",
     "total_size": "Size of files:",
+    "writes": "Writes:",
+    "written_one": "{0}, {1} in the last hour",
+    "written_other": "{0}, {1} in the last hour",
     "size_exact": "{0} ({1})",
     "calculating": "Calculating…",
     "folder_size_one": "{1} in {0} item",
@@ -447,7 +457,9 @@
   },
   "cell": {
     "gone": "No longer exists",
-    "unknown": "Unknown"
+    "unknown": "Unknown",
+    "up_to": "up to {0}",
+    "at_least": "at least {0}"
   },
   "size": {
     "bytes_one": "{0} byte",
@@ -470,6 +482,13 @@
     "license": "MIT License",
     "credits": "Credits"
   },
+  "wear": {
+    "title": "SSD wear",
+    "text": "A folder copied into itself again and again fills the disk. Stop the program or script that copies it.",
+    "folder": "Folder",
+    "copies_column": "Copies",
+    "show": "&Show"
+  },
   "service_report": {
     "title": "Service report",
     "copy": "&Copy"
@@ -482,7 +501,9 @@
     "close": "Close",
     "ok": "OK",
     "cancel": "Cancel",
-    "continue": "Continue"
+    "continue": "Continue",
+    "yes": "Yes",
+    "no": "No"
   },
   "custom_date": {
     "title": "Custom date",
@@ -542,6 +563,9 @@
     "updates": "Check for &updates at startup",
     "keep_running": "&Keep running in the notification area after I close the window",
     "one_window": "Allow only one &window at a time",
+    "warn_repeats": "Warn me when a folder is &copied into itself",
+    "needs_newer": "Needs a newer service",
+    "warn_question": "The warning comes only while the app runs. Turn these on too?",
     "show_icons": "Show &icons in menus, buttons and lists",
     "show_memory": "Show &memory use in the status bar",
     "selection": "Selection (Num + / Num −)",

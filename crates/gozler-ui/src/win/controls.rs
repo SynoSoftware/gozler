@@ -36,7 +36,7 @@ use windows::Win32::UI::Controls::{
     LVCF_FMT, LVCF_TEXT, LVCF_WIDTH, LVCFMT_LEFT, LVCFMT_RIGHT, LVCOLUMNW, LVIF_IMAGE, LVIF_TEXT,
     LVIR_BOUNDS, LVIS_FOCUSED, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_ENSUREVISIBLE,
     LVM_GETCOLUMNWIDTH, LVM_GETCOUNTPERPAGE, LVM_GETITEMCOUNT, LVM_GETITEMRECT, LVM_GETITEMTEXTW,
-    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNWIDTH,
+    LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW, LVM_SETCOLUMNW, LVM_SETCOLUMNWIDTH,
     LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETIMAGELIST, LVM_SETITEMSTATE, LVM_SETITEMTEXTW,
     LVNI_SELECTED, LVS_EX_DOUBLEBUFFER, LVS_EX_FULLROWSELECT, LVS_EX_INFOTIP, LVS_EX_LABELTIP,
     LVS_NOCOLUMNHEADER, LVS_REPORT, LVS_SHAREIMAGELISTS, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
@@ -1844,20 +1844,24 @@ impl ReportList {
         }
     }
 
+    /// Sets the header of the column `index` and keeps its width.
+    pub(crate) fn set_header(self, index: usize, header: &str) {
+        let mut header = wide(header);
+        let column = LVCOLUMNW {
+            mask: LVCF_TEXT,
+            pszText: PWSTR(header.as_mut_ptr()),
+            ..Default::default()
+        };
+        // SAFETY: `column` and its header outlive the call, which copies
+        // them.
+        unsafe { send_pointer(self.0, LVM_SETCOLUMNW, index, &raw const column) };
+    }
+
     /// Replaces the rows with `rows`, each its cells in the columns' order,
     /// and selects `selected`.
     pub(crate) fn set_rows<R: AsRef<[String]>>(self, rows: &[R], selected: Option<usize>) {
         send(self.0, LVM_DELETEALLITEMS, 0, 0);
-        for (index, row) in rows.iter().enumerate() {
-            for (column, text) in row.as_ref().iter().enumerate() {
-                let message = if column == 0 {
-                    LVM_INSERTITEMW
-                } else {
-                    LVM_SETITEMTEXTW
-                };
-                self.put_cell(message, index, column, text);
-            }
-        }
+        self.add_rows(rows, 0);
         if let Some(index) = selected.filter(|i| *i < rows.len()) {
             let both = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
             let item = LVITEMW {
@@ -1872,11 +1876,17 @@ impl ReportList {
     }
 
     /// Changes the rows from `shown`, which the list holds, to `rows`. With
-    /// as many rows, it sets only the cells that differ, so the list redraws
-    /// only those and keeps its selection; otherwise it replaces the rows as
-    /// [`ReportList::set_rows`] does.
+    /// as many rows, or with `shown`'s rows first in `rows` by their first
+    /// cell, it sets only the cells that differ and adds the rows after
+    /// them, so the list redraws only those and its selection stays on the
+    /// same row; otherwise it replaces the rows as [`ReportList::set_rows`]
+    /// does.
     pub(crate) fn update_rows<R: AsRef<[String]>>(self, shown: &[R], rows: &[R]) {
-        if shown.len() != rows.len() {
+        let kept = shown.len() == rows.len()
+            || (shown.len() < rows.len()
+                && (shown.iter().zip(rows))
+                    .all(|(old, new)| old.as_ref().first() == new.as_ref().first()));
+        if !kept {
             self.set_rows(rows, None);
             return;
         }
@@ -1885,6 +1895,21 @@ impl ReportList {
                 if old != new {
                     self.put_cell(LVM_SETITEMTEXTW, index, column, new);
                 }
+            }
+        }
+        self.add_rows(rows, shown.len());
+    }
+
+    /// Adds `rows` from the row `from` on, after the rows the list holds.
+    fn add_rows<R: AsRef<[String]>>(self, rows: &[R], from: usize) {
+        for (index, row) in rows.iter().enumerate().skip(from) {
+            for (column, text) in row.as_ref().iter().enumerate() {
+                let message = if column == 0 {
+                    LVM_INSERTITEMW
+                } else {
+                    LVM_SETITEMTEXTW
+                };
+                self.put_cell(message, index, column, text);
             }
         }
     }

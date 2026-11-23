@@ -777,8 +777,13 @@ fn compare(sort: SortSpec, a: &Entry, a_key: &[u8], b: &Entry, b_key: &[u8]) -> 
     b.is_folder()
         .cmp(&a.is_folder())
         .then_with(|| match sort.key {
-            // A panel lists no date created, so it sorts by name.
-            SortKey::Name | SortKey::Path | SortKey::DateCreated => directed(by_name()),
+            // A panel lists no date created and no writes, so it sorts by
+            // name.
+            SortKey::Name
+            | SortKey::Path
+            | SortKey::DateCreated
+            | SortKey::Writes
+            | SortKey::Written => directed(by_name()),
             SortKey::Extension => {
                 directed(extension_key(a_key, a).cmp(extension_key(b_key, b))).then_with(by_name)
             }
@@ -839,6 +844,7 @@ mod tests {
             total: 0,
             volumes_incomplete: false,
             metadata_pending: false,
+            writes_partial: false,
             sums: None,
             skipped: Vec::new(),
             rest_follows: false,

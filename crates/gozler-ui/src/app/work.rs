@@ -35,6 +35,7 @@ mod settings;
 mod shell;
 pub(super) mod tray;
 pub(super) mod viewers;
+pub(super) mod wear;
 
 pub(super) use clipboard::{CopyFailure, CopyNotice};
 pub(super) use operations::{Chosen, PathAction, PathPurpose, PreparedPaths};
@@ -130,6 +131,7 @@ pub(super) struct Work {
     pub(super) shell: shell::Work,
     pub(super) operations: operations::Work,
     pub(super) queue: queue::Work,
+    pub(super) wear: wear::Watch,
     releases: [Task<ReleasePurpose, ReleaseAnswer>; 2],
     retiring: Option<Task<Retirement, ()>>,
     diagnostics: Option<Task<Diagnostics, ()>>,
@@ -167,6 +169,7 @@ impl Work {
             shell: shell::Work::new(waker.clone()),
             operations: operations::Work::new(waker.clone()),
             queue: queue::Work::new(waker.clone()),
+            wear: wear::Watch::new(waker.clone()),
             releases: [
                 Task::new(waker.clone(), Replacement::Cancel, check_release).background(),
                 Task::new(waker.clone(), Replacement::Cancel, check_release),
@@ -383,6 +386,7 @@ impl Work {
         impl FnOnce(&OffThread) + Send + 'static + use<>,
     ) {
         drop(self.watchdog.take());
+        self.wear.stop();
         let export = self.requests.close();
         crate::win::work::spawn(self.paste.close());
         if let Some(tray) = &mut self.tray {

@@ -1985,12 +1985,14 @@ impl MenuItem {
         }
     }
 
-    /// Whether the item shows while `mode` shows: Sort by > Path has no
-    /// column in Commander mode.
+    /// Whether the item shows while `mode` shows: Sort by > Path, Writes and
+    /// Written have no column in Commander mode.
     fn belongs_to(self, mode: Mode) -> bool {
         match self {
             MenuItem::Mode(destination) => destination != mode,
-            MenuItem::SortKey(SortKey::Path) => mode == Mode::Search,
+            MenuItem::SortKey(SortKey::Path | SortKey::Writes | SortKey::Written) => {
+                mode == Mode::Search
+            }
             _ => self.command().row().modes.contains(mode),
         }
     }

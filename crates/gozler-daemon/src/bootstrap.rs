@@ -1103,6 +1103,7 @@ mod tests {
                 reason: 0,
                 attributes,
                 name: name.as_bytes().to_vec(),
+                time: 0,
             });
         }
         index.set_stat(read, 5, 0);
@@ -1181,6 +1182,7 @@ mod tests {
                 reason: 0,
                 attributes: FILE_ATTRIBUTE_DIRECTORY,
                 name: format!("{}", folder.record_number()).into_bytes(),
+                time: 0,
             });
         }
         let security = HashMap::from([

@@ -766,6 +766,15 @@ pub(crate) fn index_status(model: &Model) -> String {
         };
         return strings.format(key, &[volume.mounted().display_prefix()]);
     }
+    // A write test leaves out files written before the writes' hour began.
+    let writes_partial = model.list(list).is_some_and(|shown| {
+        let results = shown.results();
+        results.writes_partial()
+            && (results.shown_search()).is_some_and(|search| search.query.tests_writes())
+    });
+    if writes_partial {
+        return strings.text("status.writes_partial").to_owned();
+    }
     coverage
         .sizes_or_dates_unknown()
         .filter(|volume| volume.phase.is_complete())

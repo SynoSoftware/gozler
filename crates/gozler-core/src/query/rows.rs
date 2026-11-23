@@ -46,6 +46,7 @@ use super::order::{OrderFields, SortRecord, compare, compare_paths};
 use super::paths::{FolderCopy, FolderId, ResultNames, root_name};
 use crate::attributes::Attributes;
 use crate::fold::fold_accents;
+use crate::index::writes::Values;
 use crate::index::{Counts, SeenBy, VolumeIndex};
 use crate::links::Reached;
 use crate::scope::{Scope, VolumeMounts};
@@ -211,7 +212,7 @@ impl VolumeRows {
 }
 
 /// A row as its page shows it, read from the index while the page is built.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct RowView<'a> {
     /// The folder that holds the row, in the reply's [`ResultNames`].
     pub folder: FolderId,
@@ -225,6 +226,20 @@ pub struct RowView<'a> {
     /// For a folder, how many files and folders are below it.
     pub counts: Option<Counts>,
     pub file_id: Frn,
+    /// Where [`Self::writes`] reads, so a page reads the writes only when
+    /// its request asks for them.
+    index: &'a VolumeIndex,
+    idx: EntryIdx,
+    seen_by: &'a SeenBy,
+}
+
+impl RowView<'_> {
+    /// The row's writes of the last hour as its request may read them.
+    pub fn writes(&self) -> Option<Values> {
+        self.index
+            .writes()
+            .of_entry(self.index, self.idx, self.seen_by)
+    }
 }
 
 /// The rows of every volume of one reply, merged in the result order and
@@ -454,6 +469,9 @@ impl Reply {
                 attributes: entry.attributes(),
                 counts: entry.counts(),
                 file_id,
+                index,
+                idx,
+                seen_by: &volume.seen_by,
             };
             if !push(v, volume.next, row, &self.names) {
                 volume.head = Some(folder);
@@ -684,6 +702,7 @@ impl VolumeReader {
             index,
             idx: self.answer.rows.get(self.next).0,
             volume: self.answer.mount_prefix.as_bytes(),
+            seen_by: &self.seen_by,
         }
     }
 }
@@ -719,6 +738,15 @@ struct Live<'a> {
     index: &'a VolumeIndex,
     idx: EntryIdx,
     volume: &'a [u8],
+    seen_by: &'a SeenBy,
+}
+
+impl Live<'_> {
+    fn writes(&self) -> Option<Values> {
+        self.index
+            .writes()
+            .of_entry(self.index, self.idx, self.seen_by)
+    }
 }
 
 impl OrderFields for Live<'_> {
@@ -739,6 +767,12 @@ impl OrderFields for Live<'_> {
     }
     fn created(&self) -> Option<i64> {
         self.index.entry(self.idx).created()
+    }
+    fn writes(&self) -> Option<u64> {
+        Live::writes(self).map(|values| values.writes.into())
+    }
+    fn written(&self) -> Option<u64> {
+        Live::writes(self).map(|values| values.written)
     }
     fn volume(&self) -> &[u8] {
         self.volume
@@ -898,6 +932,8 @@ pub struct SearchTotals {
     /// As [`ResultRows::metadata_pending`]: a file whose size is unknown adds
     /// nothing.
     pub metadata_pending: bool,
+    /// As [`ResultRows::writes_partial`].
+    pub writes_partial: bool,
 }
 
 /// The rows of a search over several volumes, merged in the result order and
@@ -1046,6 +1082,12 @@ impl<V: IndexedVolume> ResultRows<V> {
     pub fn metadata_pending(&self) -> bool {
         self.coverage.metadata_pending
     }
+
+    /// Whether the writes of a volume searched cover only part of the last
+    /// hour, so a test of them can leave matches out.
+    pub fn writes_partial(&self) -> bool {
+        self.coverage.writes_partial
+    }
 }
 
 /// The totals of every match of `query` over `volumes` below `scope`, an
@@ -1090,6 +1132,7 @@ pub fn search_totals<V: IndexedVolume>(
         totals,
         volumes_incomplete: coverage.volumes_incomplete,
         metadata_pending: coverage.metadata_pending,
+        writes_partial: coverage.writes_partial,
     })
 }
 
@@ -1171,6 +1214,7 @@ fn stored_totals<V: IndexedVolume>(
         totals,
         volumes_incomplete: coverage.volumes_incomplete,
         metadata_pending: coverage.metadata_pending,
+        writes_partial: coverage.writes_partial,
     }))
 }
 
@@ -1184,6 +1228,8 @@ struct Coverage {
     volumes_incomplete: bool,
     /// The size and date pass failed or stopped on a volume searched.
     metadata_pending: bool,
+    /// The writes of a volume searched cover only part of the last hour.
+    writes_partial: bool,
 }
 
 /// What a search reads of one volume: all of it, or the folder below its
@@ -1249,6 +1295,7 @@ fn run_held<V: IndexedVolume, T>(
         coverage.volumes_incomplete |= !held.complete;
         coverage.metadata_pending |= held.metadata_pending;
         let index: &VolumeIndex = &held.index;
+        coverage.writes_partial |= index.writes().is_part_of_hour();
         let scope = match scope {
             VolScope::All => None,
             VolScope::Folder(folder) => match resolve_scope(index, folder.as_bytes(), match_case) {
@@ -1346,6 +1393,7 @@ pub fn run_query(
 mod tests {
     use super::*;
     use crate::index::NTFS_ROOT_FRN;
+    use crate::index::settle::Batch;
     use crate::query::parse_query;
     use crate::query::paths::{DirPaths, NameForm};
     use crate::usn::record::{FILE_ATTRIBUTE_DIRECTORY, ParsedUsnRecord, USN_REASON_FILE_CREATE};
@@ -1370,6 +1418,7 @@ mod tests {
             reason: USN_REASON_FILE_CREATE,
             attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { 0 },
             name: name.as_bytes().to_vec(),
+            time: 0,
         };
         for (n, name) in FOLDERS.iter().enumerate() {
             index.insert_enum(&rec(frn(n), NTFS_ROOT_FRN, name, true));
@@ -1466,9 +1515,10 @@ mod tests {
                 };
                 let keyed: Vec<Vec<u8>> = all.iter().map(|&(v, idx)| folder_path(v, idx)).collect();
                 let mut order: Vec<usize> = (0..all.len()).collect();
+                let everything = SeenBy::Everything;
                 let live = |at: usize| {
                     let (v, idx) = all[at];
-                    Live { index: held[v], idx, volume: mounts[v].as_bytes() }
+                    Live { index: held[v], idx, volume: mounts[v].as_bytes(), seen_by: &everything }
                 };
                 order.sort_by(|&a, &b| match sort.key {
                     SortKey::Path => compare_paths(sort.dir, &live(a), &keyed[a], &live(b), &keyed[b]),
@@ -1816,13 +1866,14 @@ mod tests {
         // b.txt, the second file the helper makes after the folders.
         let b = Frn::ntfs(FOLDERS.len() as u64 + 1 + 100, 1);
         let mut changed = volume.index.write().expect("no test panics holding it");
-        changed.apply_batch(&[ParsedUsnRecord {
+        changed.apply_batch(&Batch::of(&[ParsedUsnRecord {
             frn: b,
             parent_frn: NTFS_ROOT_FRN,
             reason: crate::usn::record::USN_REASON_FILE_DELETE,
             attributes: 0,
             name: Vec::new(),
-        }]);
+            time: 0,
+        }]));
         drop(changed);
         let path = |name: &str| Some(format!(r"C:\Data\{name}").into_bytes());
         assert_eq!(
@@ -1896,6 +1947,7 @@ mod tests {
                     0
                 },
                 name: name.as_bytes().to_vec(),
+                time: 0,
             });
             if let Some(size) = size {
                 index.set_stat(frn(n), size, 0);
@@ -1989,6 +2041,7 @@ mod tests {
                 reason: USN_REASON_FILE_CREATE,
                 attributes: if is_file { 0 } else { FILE_ATTRIBUTE_DIRECTORY },
                 name: name.as_bytes().to_vec(),
+                time: 0,
             });
             if let Some(size) = size {
                 index.set_stat(frn(n), size, 0);
@@ -2073,6 +2126,7 @@ mod tests {
                 reason: USN_REASON_FILE_CREATE,
                 attributes: if is_file { 0 } else { FILE_ATTRIBUTE_DIRECTORY },
                 name: name.as_bytes().to_vec(),
+                time: 0,
             });
             if let Some(size) = size {
                 index.set_stat(frn(n), size, 0);
@@ -2268,13 +2322,14 @@ mod tests {
         {
             let mut index = volume.index.write().expect("no test panics holding it");
             index.set_folder_descriptor(Frn::ntfs(101, 1), b"changed");
-            index.apply_batch(&[ParsedUsnRecord {
+            index.apply_batch(&Batch::of(&[ParsedUsnRecord {
                 frn: Frn::ntfs(200, 1),
                 parent_frn: Frn::ntfs(102, 1),
                 reason: crate::usn::record::USN_REASON_RENAME_NEW_NAME,
                 attributes: 0,
                 name: b"a.txt".to_vec(),
-            }]);
+                time: 0,
+            }]));
         }
         let mut names = Vec::new();
         while rows.page(usize::MAX, |row, _| {

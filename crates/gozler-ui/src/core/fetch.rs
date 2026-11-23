@@ -138,6 +138,9 @@ pub(crate) struct ChunkAsk {
     pub(crate) start: u64,
     pub(crate) len: u64,
     pub(crate) snapshot: FromSnapshot,
+    /// Whether the rows carry their writes, which a Writes or Written
+    /// column or the inspector shows.
+    pub(crate) writes: bool,
 }
 
 /// Whether a chunk comes from a result snapshot (DESIGN.md: Result
@@ -164,14 +167,19 @@ impl ChunkAsk {
         let offset = u32::try_from(self.start).unwrap_or(u32::MAX);
         let limit = Some(u32::try_from(self.len).unwrap_or(u32::MAX));
         // Only an index with Dates created on sends them, eight bytes a row,
-        // and attributes four, so showing either column needs no second
-        // request.
+        // and attributes four, so showing one of their columns needs no
+        // second request.
         let mut wants = vec![
             Want::Size,
             Want::DateModified,
             Want::DateCreated,
             Want::Attributes,
         ];
+        // The writes are thirteen bytes a row, and an older service does not
+        // read the want, so only a list that shows them asks.
+        if self.writes {
+            wants.push(Want::Writes);
+        }
         // The status bar shows them beside the total. The service sums every
         // match for them, so only the first chunk asks, and the later chunks
         // keep its sums.
@@ -240,6 +248,8 @@ pub(crate) struct ExportAsk {
     pub(crate) want_attributes: bool,
     /// Whether the file has a Date created column, likewise.
     pub(crate) want_created: bool,
+    /// Whether the file has a Writes or a Written column, likewise.
+    pub(crate) want_writes: bool,
 }
 
 impl ExportAsk {
@@ -250,6 +260,9 @@ impl ExportAsk {
         }
         if self.want_attributes {
             wants.push(Want::Attributes);
+        }
+        if self.want_writes {
+            wants.push(Want::Writes);
         }
         self.search.clone().request(Returns::Rows(Rows {
             sort: self.sort,
@@ -414,6 +427,9 @@ pub(crate) struct Chunk {
     pub(crate) volumes_incomplete: bool,
     /// Some sizes and dates in scope are unknown, as a page says.
     pub(crate) metadata_pending: bool,
+    /// The writes of a volume in scope cover only part of the last hour, as
+    /// a page says.
+    pub(crate) writes_partial: bool,
     /// Every match's files and folders and their sizes; `None` from a
     /// service that does not send them.
     pub(crate) sums: Option<MatchSums>,

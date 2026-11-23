@@ -20,6 +20,7 @@ use crate::core::glyph::Glyph;
 use crate::core::ids::DialogId;
 use crate::core::layout::{self, Px, Rect, Size};
 use std::cell::RefCell;
+use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, S_OK, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Controls::{
@@ -38,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetParent, GetWindowLongPtrW, IDCANCEL, IDOK, MB_ICONERROR, MB_ICONINFORMATION, MB_OK,
     MESSAGEBOX_STYLE, MINMAXINFO, MapDialogRect, MessageBoxW, SendMessageW, SetWindowLongPtrW,
     WINDOW_LONG_PTR_INDEX, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_GETMINMAXINFO, WM_INITDIALOG,
-    WM_NOTIFY, WM_SIZE, WM_TIMER,
+    WM_NCDESTROY, WM_NOTIFY, WM_SIZE, WM_TIMER,
 };
 use windows::core::{BOOL, HRESULT, HSTRING, PCWSTR};
 
@@ -266,6 +267,88 @@ pub(crate) fn run_modal<D: DialogProc>(
         result if result == IDOK.0 as isize => Ok(DialogEnd::Ok),
         _ => Ok(DialogEnd::Cancel),
     }
+}
+
+/// A modeless dialog's [`Running`], with the state and captions it borrows,
+/// which the dialog holds until `WM_NCDESTROY`. `running` comes first, so a
+/// pointer to this is a pointer to it, which [`procedure`] reads.
+#[repr(C)]
+struct Modeless<D: 'static> {
+    running: Running<'static, D>,
+    _state: Rc<D>,
+    _captions: Rc<DialogCaptions>,
+}
+
+/// Creates the dialog `dialog` as a hidden top-level window that no window
+/// owns and that runs in the thread's message loop, such as SSD wear. Its
+/// [`DialogProc`] handles OK and Cancel itself, ending it with
+/// [`Hwnd::destroy`], because `EndDialog` ends only a modal dialog. The
+/// caller names it in [`super::window::own_keys`], so `Tab`, `Enter` and
+/// `Esc` reach it, and shows it.
+pub(crate) fn create_modeless<D: DialogProc + 'static>(
+    dialog: DialogId,
+    captions: DialogCaptions,
+    state: Rc<D>,
+) -> windows::core::Result<Hwnd> {
+    let captions = Rc::new(captions);
+    // SAFETY: both point into heap allocations that the same `Modeless`
+    // keeps alive and never moves, and `running` is dropped with them.
+    let (state_ref, captions_ref) = unsafe { (&*Rc::as_ptr(&state), &*Rc::as_ptr(&captions)) };
+    let modeless = Rc::into_raw(Rc::new(Modeless {
+        running: Running {
+            state: state_ref,
+            captions: captions_ref,
+            fonts: RefCell::new(Vec::new()),
+        },
+        _state: state,
+        _captions: captions,
+    }));
+    // SAFETY: WM_INITDIALOG stores the pointer, and WM_NCDESTROY drops the
+    // dialog's reference after the last message that reads it. A creation
+    // that fails before WM_INITDIALOG leaks this one value.
+    let hwnd = unsafe {
+        CreateDialogParamW(
+            GetModuleHandleW(PCWSTR::null()).ok().map(Into::into),
+            PCWSTR(usize::from(dialog.id()) as *const u16),
+            None,
+            Some(modeless_procedure::<D>),
+            LPARAM(modeless as isize),
+        )
+    }?;
+    Ok(Hwnd(hwnd))
+}
+
+unsafe extern "system" fn modeless_procedure<D: DialogProc + 'static>(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> isize {
+    // Each message holds the dialog's state until it returns, so a handler
+    // that destroys the dialog, such as Close's, still runs on live state
+    // after WM_NCDESTROY drops the dialog's own reference (DESIGN.md:
+    // window rule 2).
+    // SAFETY: DWLP_USER holds the pointer of create_modeless's
+    // `Rc::into_raw` from WM_INITDIALOG until WM_NCDESTROY clears it.
+    let _held = unsafe {
+        let modeless = GetWindowLongPtrW(hwnd, DWLP_USER) as *const Modeless<D>;
+        (!modeless.is_null()).then(|| {
+            Rc::increment_strong_count(modeless);
+            Rc::from_raw(modeless)
+        })
+    };
+    // SAFETY: the original parameters of this native message.
+    let answer = unsafe { procedure::<D>(hwnd, msg, wparam, lparam) };
+    if msg == WM_NCDESTROY {
+        // SAFETY: as above; no message reads the pointer after this one.
+        unsafe {
+            let modeless = SetWindowLongPtrW(hwnd, DWLP_USER, 0) as *const Modeless<D>;
+            if !modeless.is_null() {
+                drop(Rc::from_raw(modeless));
+            }
+        }
+    }
+    answer
 }
 
 unsafe extern "system" fn procedure<D: DialogProc>(
