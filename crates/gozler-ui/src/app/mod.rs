@@ -3,6 +3,7 @@
 
 #![forbid(unsafe_code)]
 
+mod cleanup;
 mod compare;
 mod dialogs;
 mod file_operations;
@@ -17,7 +18,8 @@ pub(crate) mod work;
 
 use crate::core::ids::IconId;
 use crate::core::model::{Instance, Model};
-use crate::core::startup::{self, Arguments, Request};
+use crate::core::settings::WearLine;
+use crate::core::startup::{self, Arguments, Request, SetupChoices};
 use crate::core::text::{LANGUAGES, Language, Strings};
 use crate::win;
 use main_window::MainWindow;
@@ -58,10 +60,12 @@ pub(crate) fn run() {
         }
     };
     if arguments.unregister_shortcut {
-        let result =
-            win::work::spawn(|worker| win::shell::set_windows_shortcut_disabled(&[], worker))
-                .join();
-        std::process::exit(if matches!(result, Ok(Ok(()))) { 0 } else { 1 });
+        // Older uninstall logs retain this command; cleanup now restores the
+        // desktop user's shortcuts before those entries run as administrator.
+        std::process::exit(0);
+    }
+    if let Some(cleanup) = arguments.cleanup {
+        cleanup::run(cleanup);
     }
     if let Some(file) = &arguments.save_include {
         // The copy that Settings starts as administrator saves and exits.
@@ -76,6 +80,37 @@ pub(crate) fn run() {
             .join("Gozler")
     });
     set_panic_report(|report| report.folder = Some(data_dir.clone()));
+    if let Some(output) = arguments.setup_read {
+        let read = win::work::spawn(move |worker| {
+            let path = data_dir.join("ui.json");
+            let settings = match std::fs::read_to_string(&path) {
+                Ok(text) => crate::core::settings::Settings::parse(&text),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    crate::core::settings::Settings::default()
+                }
+                Err(error) => return Err(error),
+            };
+            let choices = settings.choices;
+            let text = format!(
+                "[Setup]\nsign_in={}\nkeep_running={}\ndisk_warning={}\nshortcut={}\n",
+                u8::from(win::shell::starts_at_sign_in(worker)),
+                u8::from(choices.keep_running),
+                u8::from(choices.wear_alarm.line(WearLine::DiskWeek).on),
+                choices
+                    .show_shortcut
+                    .map(|key| key.name())
+                    .unwrap_or_default(),
+            );
+            std::fs::write(output, text)
+        })
+        .join();
+        std::process::exit(if matches!(read, Ok(Ok(()))) { 0 } else { 1 });
+    }
+    if let Some(choices) = arguments.setup {
+        let saved =
+            win::work::spawn(move |worker| save_setup_choices(&data_dir, choices, worker)).join();
+        std::process::exit(if matches!(saved, Ok(Ok(()))) { 0 } else { 1 });
+    }
     if let Some(files) = &arguments.compare {
         compare_alone(files, &data_dir.join("ui.json"));
         return;
@@ -359,6 +394,31 @@ fn hand_over(window: win::Hwnd, message: u32, request: Option<&Request>) {
         );
         std::process::exit(1);
     }
+}
+
+fn save_setup_choices(
+    data_dir: &Path,
+    choices: SetupChoices,
+    worker: &win::work::OffThread,
+) -> std::io::Result<()> {
+    let path = data_dir.join("ui.json");
+    let saved = work::load_settings(&path);
+    let mut settings = saved.clone();
+    settings.choices.keep_running = choices.keep_running;
+    settings.choices.show_shortcut = choices.shortcut;
+    settings.choices.wear_alarm.line_mut(WearLine::DiskWeek).on = choices.disk_warning;
+    let result = work::write_settings(&path, settings.changes(&saved), worker).and_then(|()| {
+        win::shell::set_windows_shortcut_disabled(&[], worker)?;
+        let program = std::env::current_exe()?;
+        win::shell::set_start_at_sign_in(choices.sign_in, &program, worker)
+    });
+    if let Err(error) = &result {
+        write_log(
+            &data_dir.join("ui-error.log"),
+            &format!("Setup settings were not saved: {error}"),
+        );
+    }
+    result
 }
 
 /// Settings' Reset all, after the window exited: deletes `ui.json` and the

@@ -11,11 +11,16 @@ use std::ffi::OsStr;
 use std::io;
 use std::marker::PhantomData;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use windows::Win32::Foundation::{
     CloseHandle, E_POINTER, ERROR_CANCELLED, ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, FILETIME, HANDLE,
     HWND, POINT, PROPERTYKEY, WAIT_OBJECT_0, WAIT_TIMEOUT, WIN32_ERROR,
+};
+use windows::Win32::Security::{
+    DuplicateTokenEx, SecurityImpersonation, TOKEN_ALL_ACCESS, TOKEN_ASSIGN_PRIMARY,
+    TOKEN_DUPLICATE, TOKEN_QUERY, TokenPrimary,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, GetVolumeInformationW, WIN32_FIND_DATAW,
@@ -32,7 +37,11 @@ use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_ROUTINE_FLAGS, REG_SZ, RRF_RT_REG_BINARY,
     RRF_RT_REG_SZ, RegDeleteKeyValueW, RegDeleteTreeW, RegGetValueW, RegSetKeyValueW,
 };
-use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CREATE_NO_WINDOW, CreateProcessWithTokenW, GetExitCodeProcess, INFINITE, LOGON_WITH_PROFILE,
+    OpenProcess, OpenProcessToken, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    STARTUPINFOW, WaitForSingleObject,
+};
 use windows::Win32::System::Variant::{VARIANT, VT_BSTR, VariantClear};
 use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
 use windows::Win32::UI::Shell::{
@@ -49,8 +58,10 @@ use windows::Win32::UI::Shell::{
     STR_FILE_SYS_BIND_DATA, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH, ShellExecuteExW,
     ShellWindows,
 };
-use windows::Win32::UI::WindowsAndMessaging::{SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL};
-use windows::core::{BSTR, GUID, HSTRING, IUnknown, Interface, PCWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetShellWindow, GetWindowThreadProcessId, SHOW_WINDOW_CMD, SW_HIDE, SW_SHOWNORMAL,
+};
+use windows::core::{BSTR, GUID, HSTRING, IUnknown, Interface, PCWSTR, PWSTR, w};
 
 mod windows_shortcut;
 
@@ -267,7 +278,7 @@ pub(crate) struct Session {
 }
 
 impl Session {
-    pub(super) fn new(_worker: &super::work::OffThread) -> Self {
+    pub(crate) fn new(_worker: &super::work::OffThread) -> Self {
         // SAFETY: a fresh worker thread initializes its own STA once.
         let initialized =
             unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).ok() };
@@ -772,6 +783,21 @@ fn delete_value(key: &str, name: &str) -> io::Result<()> {
     })
 }
 
+fn delete_key(key: &str) -> io::Result<()> {
+    // SAFETY: the name outlives the call.
+    registry(unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(key)) })
+}
+
+pub(crate) fn remove_settings(worker: &super::work::OffThread) -> io::Result<()> {
+    windows_shortcut::set_disabled(&[], worker)?;
+    delete_value(RUN_KEY, GOZLER)?;
+    delete_value(STARTUP_APPROVED_KEY, GOZLER)?;
+    for key in VERB_KEYS {
+        delete_key(key)?;
+    }
+    delete_key(r"Software\Gozler")
+}
+
 /// Whether Windows starts Gozler at sign-in: the `Run` value exists, and
 /// Task Manager did not turn it off. An odd first byte of the
 /// `StartupApproved` value is off (DESIGN.md: The General page).
@@ -813,19 +839,18 @@ pub(crate) fn set_start_at_sign_in(
 /// there (DESIGN.md: The Context menu page). Keys that are gone stay gone.
 pub(crate) fn remove_search_with() {
     for key in VERB_KEYS {
-        // SAFETY: the name outlives the call.
-        let _ = unsafe { RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(key)) };
+        let _ = delete_key(key);
     }
 }
 
-/// A program that runs as administrator. Dropping it closes the handle,
+/// A child program. Dropping it closes the handle,
 /// not the program.
-pub(crate) struct ElevatedProcess(HANDLE);
+pub(crate) struct Process(HANDLE);
 
 // SAFETY: any thread may wait on and close a process handle.
-unsafe impl Send for ElevatedProcess {}
+unsafe impl Send for Process {}
 
-impl ElevatedProcess {
+impl Process {
     /// Waits up to `timeout_ms` for the program to end, and gives its exit
     /// code; `None` while it still runs.
     pub(crate) fn wait(&self, timeout_ms: u32) -> io::Result<Option<u32>> {
@@ -844,9 +869,9 @@ impl ElevatedProcess {
     }
 }
 
-impl Drop for ElevatedProcess {
+impl Drop for Process {
     fn drop(&mut self) {
-        // SAFETY: ShellExecuteExW opened the handle, which this closes once.
+        // SAFETY: this process owns the handle and closes it once.
         let _ = unsafe { CloseHandle(self.0) };
     }
 }
@@ -858,7 +883,7 @@ impl Session {
         &self,
         program: &str,
         parameters: &str,
-    ) -> io::Result<ElevatedProcess> {
+    ) -> io::Result<Process> {
         self.ready()?;
         let process = execute(
             HWND::default(),
@@ -872,7 +897,7 @@ impl Session {
         if process.is_invalid() {
             return Err(io_error(windows::Win32::Foundation::E_FAIL.into()));
         }
-        Ok(ElevatedProcess(process))
+        Ok(Process(process))
     }
 
     /// Starts `program` with `parameters` as administrator, with its window
@@ -914,6 +939,76 @@ impl Session {
 /// prompt.
 pub(crate) fn refused(error: &io::Error) -> bool {
     error.raw_os_error() == Some(ERROR_CANCELLED.0 as i32)
+}
+
+/// Runs as the desktop user and waits for exit, so Setup can remove the
+/// executable afterward; requires administrator rights and a running shell.
+pub(crate) fn run_as_user(
+    program: &Path,
+    parameters: &OsStr,
+    _worker: &super::work::OffThread,
+) -> io::Result<u32> {
+    gozler_winfs::enable_desktop_privileges()
+        .map_err(|error| io::Error::from_raw_os_error(error.code as i32))?;
+    let mut program: Vec<u16> = program.as_os_str().encode_wide().collect();
+    let mut command: Vec<u16> = [u16::from(b'"')]
+        .into_iter()
+        .chain(program.iter().copied())
+        .chain([u16::from(b'"'), u16::from(b' ')])
+        .chain(parameters.encode_wide())
+        .chain([0])
+        .collect();
+    program.push(0);
+    // SAFETY: the shell HWND belongs to this session; each opened handle has
+    // one owner, and the mutable command and startup data outlive creation.
+    unsafe {
+        let mut id = 0;
+        GetWindowThreadProcessId(GetShellWindow(), Some(&mut id));
+        let shell = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id).map_err(io_error)?;
+        let shell = OwnedHandle::from_raw_handle(shell.0);
+        let mut token = HANDLE::default();
+        OpenProcessToken(
+            HANDLE(shell.as_raw_handle()),
+            TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY,
+            &mut token,
+        )
+        .map_err(io_error)?;
+        let token = OwnedHandle::from_raw_handle(token.0);
+        // Windows can refuse process creation with the shell's original token.
+        let mut primary = HANDLE::default();
+        DuplicateTokenEx(
+            HANDLE(token.as_raw_handle()),
+            TOKEN_ALL_ACCESS,
+            None,
+            SecurityImpersonation,
+            TokenPrimary,
+            &mut primary,
+        )
+        .map_err(io_error)?;
+        let primary = OwnedHandle::from_raw_handle(primary.0);
+        let startup = STARTUPINFOW {
+            cb: size_of::<STARTUPINFOW>() as u32,
+            ..Default::default()
+        };
+        let mut info = PROCESS_INFORMATION::default();
+        CreateProcessWithTokenW(
+            HANDLE(primary.as_raw_handle()),
+            LOGON_WITH_PROFILE,
+            PCWSTR(program.as_ptr()),
+            Some(PWSTR(command.as_mut_ptr())),
+            CREATE_NO_WINDOW,
+            None,
+            PCWSTR::null(),
+            &startup,
+            &mut info,
+        )
+        .map_err(io_error)?;
+        let _ = CloseHandle(info.hThread);
+        let process = Process(info.hProcess);
+        Ok(process
+            .wait(INFINITE)?
+            .expect("an infinite wait cannot time out"))
+    }
 }
 
 /// Starts `program` with `parameters` as the desktop's File Explorer does,

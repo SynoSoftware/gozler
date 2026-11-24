@@ -43,7 +43,6 @@ pub(super) use panels::{Load, LoadFailure, Loaded, Save, Source};
 pub(super) use queue::{
     Accepted as QueueAccepted, CheckPurpose, Client as QueueClient, Ready as QueueReady,
 };
-#[cfg(test)]
 pub(crate) use settings::write_settings;
 pub(super) use settings::{RegistryAnswer, RegistryRead, Transparency, load_settings};
 pub(super) use shell::{

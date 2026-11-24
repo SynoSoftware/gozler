@@ -9,7 +9,7 @@ This release gives TinyTorrent's Library the search options it needs to find med
 #### Find what's wearing out your SSD
 
 - **See what's writing.** Turn on **Writes** and **Written** under **View > Columns** in Search or Commander. They show how often a file was written and how many bytes are known to have been written in the last hour. A folder's write totals cover the files directly inside it. The window shows `≥` when it knows only part of the amount and leaves the cell blank when it knows no byte count.
-- **Get a warning when writes cross a limit.** In **File > Settings > SSD wear**, set limits for writes to a file, data written to a file or folder, and weekly writes to a disk. You can also turn on a limit for each program. Warnings appear in their own window without taking focus, even while Gozler runs in the notification area. Select **Show** to inspect the item or find the busiest files on the disk.
+- **Get a warning when an SSD writes much more than usual.** Gozler starts with alerts for 3,600 writes to one file per hour and for a whole drive writing ten times a typical user's weekly data. Turn on hourly data limits for files, folders or programs in **File > Settings > SSD wear** to investigate where writes come from. Alerts appear without taking focus, including while Gozler runs in the notification area.
 - **Catch runaway folder copies.** The same window warns when a folder is repeatedly copied into itself. Search for `folder: repeats:4` to find existing folders whose paths end in four or more repeats of the same group of names.
 - **See what the disk reports.** **Settings > SSD wear** lists the estimated lifetime used and total data written for disks that report those figures.
 
@@ -37,7 +37,9 @@ This release gives TinyTorrent's Library the search options it needs to find med
 
 #### Setup
 
-- **Read the release notes after an update.** Select **What's new** on the last page to read these notes in Setup. **Launch Gozler** is a separate choice on the same page.
+- **Install with fewer decisions.** Standard setup enables weekly SSD write alerts, sign-in startup and the **Win+S** Search shortcut. Choose **Advanced install** to change them or allow your account to see every file name. Alerts work only while Gozler is running. Win+S replaces Windows Search and Win+Shift+S; choose other shortcuts under **File > Settings > Keyboard**. You can choose the install folder, including another drive, and see both required and available space in MB.
+- **Keep or change your settings.** Updates keep the installed folder and your settings by default. Choose **Change settings** to review your saved choices. A custom Search shortcut stays unless you choose Win+S instead. Uninstall removes your settings so installing again starts fresh. Later visibility changes belong in **Settings > Visibility**.
+- **Read the release notes in Setup.** Select **What's new** before an update or on the last page to read these notes with headings and bold text in a window you can resize or maximize. **Launch Gozler** is a separate choice on the last page.
 - **Install without an agreement screen.** Gozler's own code now uses the Mozilla Public License 2.0. The download includes both that license and the MIT notice for code from goz.
 
 #### Fixed

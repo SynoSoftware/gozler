@@ -143,6 +143,8 @@ fn exception(file: &str, function: &str) -> bool {
                 | "write_log"
         ),
         "app/include.rs" => function == "save_as_administrator",
+        // Setup cleanup exits before any window or its work dispatcher exists.
+        "app/cleanup.rs" => matches!(function, "run" | "remove"),
         // The low-level keyboard hook inherently owns a native message loop.
         "win/shortcut.rs" => function == "run_hook",
         // Private native helpers are reached through the worker-only Session,
@@ -154,6 +156,7 @@ fn exception(file: &str, function: &str) -> bool {
                 | "set_string_in"
                 | "get_value"
                 | "delete_value"
+                | "delete_key"
                 | "remove_search_with"
         ),
         _ => false,

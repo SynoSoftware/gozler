@@ -97,7 +97,7 @@ pub use time_zone::local_time_zone;
 pub use working_set::{SelfMemory, pin_working_set, self_memory, trim_working_set};
 
 #[cfg(windows)]
-pub use elevation::{enable_volume_privileges, is_elevated};
+pub use elevation::{enable_desktop_privileges, enable_volume_privileges, is_elevated};
 
 #[cfg(windows)]
 pub use volume::{

@@ -53,11 +53,34 @@ try {
     if ($notes) {
         $output = New-Item -ItemType Directory -Path 'target/release-notes' -Force
         Set-Content -LiteralPath (Join-Path $output.FullName "gozler-v$($package.version).md") -Value $notes -Encoding utf8
-        $page = Join-Path $output.FullName 'WhatsNew.txt'
-        $plain = $notes -replace '(?m)^#{1,6} '
-        $plain = $plain -replace '`([^`\r\n]+)`|\*\*([^*\r\n]+)\*\*', '$1$2'
-        $plain = $plain -replace '\[([^\]\r\n]+)\]\((https?://[^)\s]+)\)', '$1 ($2)'
-        Set-Content -LiteralPath $page -Encoding utf8BOM -Value "Gozler $($package.version)`n`n$plain"
+        $page = Join-Path $output.FullName 'WhatsNew.rtf'
+        # Format this release's headings, emphasis and code for Inno's native viewer.
+        $rtf = [regex]::Replace($notes, '[\\{}]|[^\x00-\x7F]', {
+            param($match)
+            $character = [int][char]$match.Value
+            if ($character -gt 127) {
+                if ($character -gt 32767) { $character -= 65536 }
+                return '\u{0}?' -f $character
+            }
+            return '\' + $match.Value
+        })
+        $rtf = $rtf -replace '\[([^\]\r\n]+)\]\((https?://[^)\s]+)\)', '$1 ($2)'
+        $rtf = $rtf -replace '`([^`\r\n]+)`', '{\f1 $1}'
+        $rtf = $rtf -replace '\*\*([^*\r\n]+)\*\*', '{\b $1}'
+        $paragraphs = foreach ($line in $rtf -split '\r?\n') {
+            if (-not $line.Trim()) { continue }
+            if ($line -match '^#{1,6} (.+)$') {
+                '\pard\sb180\sa120\b\fs26 ' + $Matches[1] + '\b0\fs22\par'
+            } elseif ($line.StartsWith('- ')) {
+                '\pard\li240\fi-240\tx240\sa120\bullet\tab ' + $line.Substring(2) + '\par'
+            } else {
+                '\pard\sa160 ' + $line + '\par'
+            }
+        }
+        $document = '{\rtf1\ansi\deff0{\fonttbl{\f0 Segoe UI;}{\f1 Consolas;}}' +
+            '\fs22\pard\sa160\b Gozler ' + $package.version + '\b0\par' +
+            ($paragraphs -join "`n") + '}'
+        Set-Content -LiteralPath $page -Encoding ascii -Value $document
         $notesArgs = @("/DWhatsNewFile=$page")
     }
 

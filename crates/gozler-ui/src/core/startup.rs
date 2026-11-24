@@ -1,6 +1,7 @@
 //! Explicit requests from another program, shared by startup and window handoff.
 
 use super::query::MatchMode;
+use super::shortcuts::ShowShortcut;
 use gozler_core::types::{SortDir, SortKey};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -13,6 +14,10 @@ pub(crate) const KEEP_ADMINISTRATOR_ARGUMENT: &str = "--keep-administrator";
 /// Opens only the compare window for two files (DESIGN.md: Compare by
 /// content).
 pub(crate) const COMPARE_ARGUMENT: &str = "--compare";
+const SETUP_ARGUMENT: &str = "--setup-settings";
+const SETUP_READ_ARGUMENT: &str = "--read-setup-settings";
+const CLEANUP_ARGUMENT: &str = "--remove-settings";
+pub(crate) const USER_CLEANUP_ARGUMENT: &str = "--remove-user-settings";
 pub(crate) const REQUEST_TAG: usize = 0x475a_0001;
 pub(crate) const MAX_HANDOFF_BYTES: usize = 256 * 1024;
 
@@ -88,6 +93,9 @@ pub(crate) struct Arguments {
     pub(crate) save_include: Option<PathBuf>,
     pub(crate) rebuild_index: bool,
     pub(crate) unregister_shortcut: bool,
+    pub(crate) setup: Option<SetupChoices>,
+    pub(crate) setup_read: Option<PathBuf>,
+    pub(crate) cleanup: Option<Cleanup>,
     /// The copy that a failure report's Retry starts as administrator. It
     /// is no [`Request`], because a window that runs as administrator
     /// accepts requests from every program, which could then delete any
@@ -97,6 +105,48 @@ pub(crate) struct Arguments {
     /// because it opens a process of its own that the first window never
     /// sees.
     pub(crate) compare: Option<[PathBuf; 2]>,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum Cleanup {
+    Desktop,
+    User,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct SetupChoices {
+    pub(crate) sign_in: bool,
+    pub(crate) keep_running: bool,
+    pub(crate) disk_warning: bool,
+    pub(crate) shortcut: Option<ShowShortcut>,
+}
+
+impl SetupChoices {
+    fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Self, Error> {
+        let mut toggle = || match value(&mut args, SETUP_ARGUMENT)?.as_str() {
+            "0" => Ok(false),
+            "1" => Ok(true),
+            _ => Err(Error::Value(SETUP_ARGUMENT.into())),
+        };
+        let sign_in = toggle()?;
+        let keep_running = toggle()?;
+        let disk_warning = toggle()?;
+        let shortcut = match value(&mut args, SETUP_ARGUMENT)?.as_str() {
+            "-" => None,
+            keys => Some(
+                ShowShortcut::from_name(keys).ok_or_else(|| Error::Value(SETUP_ARGUMENT.into()))?,
+            ),
+        };
+        if args.next().is_some() {
+            return Err(Error::Conflict);
+        }
+        Ok(Self {
+            sign_in,
+            keep_running,
+            disk_warning,
+            shortcut,
+        })
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -129,6 +179,39 @@ impl Error {
 
 impl Arguments {
     pub(crate) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self, Error> {
+        let mut args = args.into_iter().peekable();
+        if let Some(option) =
+            args.next_if(|arg| arg == CLEANUP_ARGUMENT || arg == USER_CLEANUP_ARGUMENT)
+        {
+            let option = option.to_string_lossy();
+            if args.next().is_some() {
+                return Err(Error::Conflict);
+            }
+            return Ok(Self {
+                cleanup: Some(if option == CLEANUP_ARGUMENT {
+                    Cleanup::Desktop
+                } else {
+                    Cleanup::User
+                }),
+                ..Self::default()
+            });
+        }
+        if args.next_if(|arg| arg == SETUP_READ_ARGUMENT).is_some() {
+            let output = value(&mut args, SETUP_READ_ARGUMENT)?.into();
+            if args.next().is_some() {
+                return Err(Error::Conflict);
+            }
+            return Ok(Self {
+                setup_read: Some(output),
+                ..Self::default()
+            });
+        }
+        if args.next_if(|arg| arg == SETUP_ARGUMENT).is_some() {
+            return Ok(Self {
+                setup: Some(SetupChoices::parse(args)?),
+                ..Self::default()
+            });
+        }
         let mut result = Self::default();
         let mut search = Search::default();
         let mut has_search = false;
@@ -137,7 +220,6 @@ impl Arguments {
         let mut open = None;
         let mut delete_list = None;
         let mut keeps_administrator = false;
-        let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             let arg = arg.to_string_lossy();
             match arg.as_ref() {
@@ -279,6 +361,68 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Arguments, Error> {
         Arguments::parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn setup_choices_are_a_standalone_startup_action() {
+        let arguments = parse(&[SETUP_ARGUMENT, "1", "1", "1", "Ctrl+Alt+G"]).unwrap();
+        let choices = arguments.setup.unwrap();
+        assert!(choices.sign_in);
+        assert!(choices.keep_running);
+        assert!(choices.disk_warning);
+        assert_eq!(
+            serde_json::to_string(&choices.shortcut).unwrap(),
+            "\"Ctrl+Alt+G\""
+        );
+        assert!(parse(&[SETUP_ARGUMENT, "0", "1", "0", "Ctrl+Alt+G"]).is_ok());
+        let independent = parse(&[SETUP_ARGUMENT, "0", "0", "1", "Win+S"])
+            .unwrap()
+            .setup
+            .unwrap();
+        assert!(!independent.sign_in);
+        assert!(!independent.keep_running);
+        assert!(independent.disk_warning);
+        assert_eq!(independent.shortcut.unwrap().name(), "Win+S");
+        assert!(matches!(
+            parse(&[SETUP_ARGUMENT, "1", "1", "1", "-", "--sign-in"]),
+            Err(Error::Conflict)
+        ));
+    }
+
+    #[test]
+    fn removing_settings_is_standalone_and_cannot_start_another_action() {
+        assert_eq!(
+            parse(&[CLEANUP_ARGUMENT]).unwrap().cleanup,
+            Some(Cleanup::Desktop)
+        );
+        assert_eq!(
+            parse(&[USER_CLEANUP_ARGUMENT]).unwrap().cleanup,
+            Some(Cleanup::User)
+        );
+        for option in [CLEANUP_ARGUMENT, USER_CLEANUP_ARGUMENT] {
+            assert!(matches!(
+                parse(&[option, "--sign-in"]),
+                Err(Error::Conflict)
+            ));
+        }
+    }
+
+    #[test]
+    fn reading_setup_settings_does_not_open_a_window_or_accept_other_actions() {
+        let arguments = parse(&[SETUP_READ_ARGUMENT, r"C:\Temp\setup.ini"]).unwrap();
+        assert_eq!(
+            arguments.setup_read,
+            Some(PathBuf::from(r"C:\Temp\setup.ini"))
+        );
+        assert!(arguments.request.is_none());
+        assert!(matches!(
+            parse(&[SETUP_READ_ARGUMENT, r"C:\Temp\setup.ini", "--sign-in"]),
+            Err(Error::Conflict)
+        ));
+        assert!(matches!(
+            parse(&[SETUP_READ_ARGUMENT]),
+            Err(Error::Missing(_))
+        ));
     }
 
     #[test]

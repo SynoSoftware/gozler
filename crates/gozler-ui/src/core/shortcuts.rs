@@ -438,7 +438,7 @@ impl ShowShortcut {
     }
 
     /// Its name in `ui.json`, such as "Win+S".
-    fn name(self) -> String {
+    pub(crate) fn name(self) -> String {
         let keys = self.keystroke.name();
         if self.windows {
             format!("Win+{keys}")
@@ -447,7 +447,7 @@ impl ShowShortcut {
         }
     }
 
-    fn from_name(name: &str) -> Option<ShowShortcut> {
+    pub(crate) fn from_name(name: &str) -> Option<ShowShortcut> {
         let (windows, keys) = match name.strip_prefix("Win+") {
             Some(keys) => (true, keys),
             None => (false, name),

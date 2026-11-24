@@ -229,16 +229,15 @@ pub(crate) struct WearAlarm {
 }
 
 impl Default for WearAlarm {
-    /// The owner's defaults: well above the busiest file, folder and
-    /// program of a heavy PC's normal hour, and the program line off,
-    /// because its counter also counts pipes (DESIGN.md: Wear alarm).
+    /// The weekly disk limit and the count of writes to one file start on.
+    /// Hourly byte limits are available for investigation (DESIGN.md: Wear alarm).
     fn default() -> WearAlarm {
         let limit = |on, value| WearLimit { on, value };
         WearAlarm {
             lines: WearLine::ALL.map(|line| match line {
                 WearLine::FileWrites => limit(true, 3_600),
-                WearLine::FileWritten => limit(true, 2),
-                WearLine::FolderWritten => limit(true, 10),
+                WearLine::FileWritten => limit(false, 2),
+                WearLine::FolderWritten => limit(false, 10),
                 WearLine::ProgramWritten => limit(false, 8),
                 WearLine::DiskWeek => limit(true, 10),
             }),
@@ -1392,6 +1391,18 @@ mod tests {
     use crate::core::query::{DateModified, DateRange, Day, Kind, SizeFilter, SizeWord};
     use crate::core::speed;
     use gozler_fileops::Count;
+
+    #[test]
+    fn new_settings_watch_frequent_file_writes_and_weekly_disk_writes() {
+        assert_eq!(
+            Choices::default().wear_alarm.limits(),
+            WearLimits {
+                file_writes: Some(3_600),
+                disk_week: Some(10),
+                ..WearLimits::default()
+            }
+        );
+    }
 
     fn values() -> SettingsValues {
         SettingsValues {

@@ -56,6 +56,17 @@ pub fn enable_volume_privileges() -> Result<(), WinError> {
     result
 }
 
+/// Enables the privileges an elevated Setup helper needs to open another
+/// account's desktop token and start a process with it; fails if either is absent.
+pub fn enable_desktop_privileges() -> Result<(), WinError> {
+    let token = open_current_process_token(TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES)?;
+    let result = enable_privilege(token, "SeDebugPrivilege")
+        .and_then(|()| enable_privilege(token, "SeImpersonatePrivilege"));
+    // SAFETY: this function owns the token and closes it once on every outcome.
+    unsafe { CloseHandle(token) };
+    result
+}
+
 pub(crate) fn open_current_process_token(access: u32) -> Result<HANDLE, WinError> {
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: GetCurrentProcess returns a valid pseudo-handle; `token` is a
