@@ -7,6 +7,9 @@
 
 #define AppName "Gozler"
 #define AppId "gozler"
+#define DefaultShortcut "Win+S"
+; The first version whose gozler-ui.exe accepts --read-setup-settings.
+#define SettingsReader "0.6.2"
 
 ; The service name, gozler_core::proto::SERVICE_NAME. It stays "gozler" across
 ; versions, and it is not "goz", the upstream service installed beside it.
@@ -36,6 +39,8 @@ UninstallDisplayIcon={app}\gozler-ui.exe
 VersionInfoVersion={#AppVersion}
 DefaultDirName={#AppFolder}
 UsePreviousAppDir=yes
+UsePreviousSetupType=no
+AlwaysShowComponentsList=no
 ; Installing the service and the machine PATH entry needs administrator rights.
 PrivilegesRequired=admin
 ; The x86 setup engine is smaller; the installed binaries stay x64.
@@ -50,7 +55,7 @@ AllowNetworkDrive=no
 DisableProgramGroupPage=yes
 DisableWelcomePage=yes
 WizardStyle=modern dynamic
-WizardSizePercent=120,150
+WizardSizePercent=120,120
 OutputDir=..\target\installer
 OutputBaseFilename=gozler-{#AppVersion}-x64-Setup
 Compression=lzma2/max
@@ -62,37 +67,21 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 DiskSpaceMBLabel=[mb] MB required.
+WizardSelectComponents=Choose settings
+SelectComponentsDesc=Which settings do you want on?
+SelectComponentsLabel2=Standard warns about heavy SSD writes, starts when you sign in, keeps running after you close the window and makes {#DefaultShortcut} show Search instead of Windows Search. Select Advanced to change these.
 UninstallAppRunningError={#AppName} is running. To close it, choose File > Exit in its window, or Exit on the menu of its icon in the notification area.%n%nThen click OK to continue, or Cancel to stop uninstalling.
 
 [CustomMessages]
 WhatsNew=What's new
 CloseNotes=Close
-KeepSettings=Keep current settings
-ChangeSettings=Change settings
-InstallTitle=Welcome to Gozler
-UpdateTitle=Update Gozler
-InstallDescription=Find files instantly on your PC. Install version {#AppVersion}.
-UpdateDescription=Install version {#AppVersion}.
-KeepHint=Your search index and settings will be kept. The search service will restart during installation.
-ReadSettingsFailed=Setup couldn't read your settings. Your current settings will be kept. You can change them under File > Settings.
-AvailableSpace=%1 MB available.
-SpaceUnknown=Available space couldn't be read.
-InstallFolder=Install folder
 StandardInstall=Standard install (recommended)
 AdvancedInstall=Advanced install
-StandardNames=Weekly SSD write alerts%nStart at sign-in%nAfter closing%nShow Search shortcut
-OnValue=On
-KeepRunningValue=Keep running in the notification area
-WindowsShortcutSummary=%1 (replaces Windows Search and Win+Shift+S)
-ServiceSummary=File indexing continues when the app is closed.
-StartupHeading=Startup and alerts
-AlertHint=Alerts work only while Gozler is running.
-StartAtSignIn=Start Gozler when I &sign in
-SearchShortcut=&Use %1 to show Search (replaces Windows Search and Win+Shift+S)
-SearchShortcutHint=For other shortcuts, open File > Settings > Keyboard.
-KeepShortcut=Keep %1 unless you select %2.
-KeepRunning=&Keep running in the notification area after I close the window
-DiskWarning=&Warn me about heavy weekly SSD writes
+StartAtSignIn=Start when I sign in to Windows
+SearchShortcut=Show Search with %1%n%1 no longer opens Windows Search, and Win+Shift+S stops working.%nChoose other shortcuts in File > Settings > Keyboard.
+KeepShortcut=Another shortcut is set. It stays unless you select %1.
+KeepRunning=Keep running in the notification area after I close the window
+DiskWarning=Warn me about heavy weekly SSD writes%nWarnings come only while the app runs.
 SetupSettingsFailed=Your selected settings couldn't be saved.
 CommandLineFailed=Command-line setup couldn't be completed.
 ResetSettingsFailed=Your saved settings couldn't be removed.
@@ -106,10 +95,19 @@ CleanGoz=Remove goz from %1
 CleanOldGozler=Remove the other copy of {#AppName} from %1
 CleaningUp=Finishing installation...
 GozFailed=Setup couldn't remove goz (error code %1).%n%nTo remove goz's service, open a terminal as administrator and run:%n  pushd "%2"%n  .\gozd.exe uninstall%n%nIf the command succeeds, delete goz.exe and gozd.exe from that folder.
-SeeEveryFileCaption=Search visibility
-SeeEveryFileText=Includes names in folders you can't open. It doesn't give you access to those files.
-SeeEveryFileItem=Let %1 see the names of every file on this PC
+SeeEveryFileItem=Let %1 see every file name%nShows names in folders you can't open, without access to their files.
 WindowStays={#AppName} is still running, so Setup can't replace it.%n%nExit {#AppName}, then try again.
+
+[Types]
+Name: "standard"; Description: "{cm:StandardInstall}"
+Name: "advanced"; Description: "{cm:AdvancedInstall}"; Flags: iscustom
+
+[Components]
+Name: "alerts"; Description: "{cm:DiskWarning}"; Types: standard; Flags: disablenouninstallwarning
+Name: "signin"; Description: "{cm:StartAtSignIn}"; Types: standard; Flags: disablenouninstallwarning
+Name: "running"; Description: "{cm:KeepRunning}"; Types: standard; Flags: disablenouninstallwarning
+Name: "shortcut"; Description: "{cm:SearchShortcut,{#DefaultShortcut}}"; Types: standard; Flags: disablenouninstallwarning
+Name: "visibility"; Description: "{code:VisibilityCaption}"; Flags: disablenouninstallwarning; Check: OfferVisibility
 
 [Files]
 #ifdef WhatsNewFile
@@ -147,10 +145,7 @@ const
   // include module.
   SettingsKey = 'SOFTWARE\Gozler';
   SeeEveryFileValue = 'SeeEveryFile';
-  DefaultShortcut = 'Win+S';
-  RowSpacing = 26;
-  HeadingSpacing = 32;
-  SectionSpacing = 20;
+  DefaultShortcut = '{#DefaultShortcut}';
   WTS_CURRENT_SESSION = $FFFFFFFF;
   WTSUserName = 5;
   WTSDomainName = 7;
@@ -171,32 +166,17 @@ var
   Found: array of TFound;
   // Created only when something is found.
   CleanupPage: TInputOptionWizardPage;
-  // Created only when the setup offers SignedInUser a place on the list of
-  // users who see every file.
-  SeeEveryFile: TNewCheckBox;
-  VisibilityHeading, VisibilityHint: TNewStaticText;
   SignedInUser: String;
-  StartAtSignIn, KeepRunning, DiskWarning, SearchShortcut: TNewCheckBox;
-  AlertHint, ShortcutHint: TNewStaticText;
-  SavedShortcut: String;
+  // The choices that ReadSetupChoices read, which an update keeps unless the
+  // person changes them.
+  SavedSignIn, SavedRunning, SavedAlerts, SavedShortcut: Boolean;
   Upgrade: Boolean;
   SettingsLoaded: Boolean;
-  VisibilityTop: Integer;
   WizardShown: Boolean;
-  SetupChoice: TNewComboBox;
-  StartupHeading, KeepHint: TNewStaticText;
-  StandardNames, StandardValues: array of TNewStaticText;
-  SpaceLabel: TNewStaticText;
-  SpaceTimer: NativeUInt;
-  SpaceCallback: NativeInt;
 #ifdef WhatsNewFile
   WhatsNewButton: TNewButton;
 #endif
 
-function SetTimer(Window: HWND; Id: NativeUInt; Interval: Cardinal; Callback: NativeInt): NativeUInt;
-  external 'SetTimer@user32.dll stdcall';
-function KillTimer(Window: HWND; Id: NativeUInt): BOOL;
-  external 'KillTimer@user32.dll stdcall';
 #ifdef WhatsNewFile
 procedure ShowWhatsNew(Sender: TObject);
 var
@@ -245,233 +225,69 @@ begin
 end;
 #endif
 
-function GetDriveType(Root: String): Cardinal;
-  external 'GetDriveTypeW@kernel32.dll stdcall';
-
-procedure SpaceTick(Window: HWND; Message: Cardinal; Id: NativeUInt; Time: DWORD);
-var
-  Folder, Parent, Available: String;
-  Free, Total: Int64;
-begin
-  if SpaceTimer <> 0 then KillTimer(0, SpaceTimer);
-  SpaceTimer := 0;
-  Available := CustomMessage('SpaceUnknown');
-  Folder := Trim(WizardForm.DirEdit.Text);
-  if (Length(Folder) >= 3) and (Folder[2] = ':') and (Folder[3] = '\') then
-    if GetDriveType(Copy(Folder, 1, 3)) in [2, 3, 6] then
-    begin
-      while not DirExists(Folder) do
-      begin
-        Parent := ExtractFileDir(RemoveBackslashUnlessRoot(Folder));
-        if (Parent = '') or (Parent = Folder) then break;
-        Folder := Parent;
-      end;
-      if GetSpaceOnDisk64(Folder, Free, Total) then
-      begin
-        Available := Format('%.0n', [(Free div 1048576) * 1.0]);
-        Available := FmtMessage(CustomMessage('AvailableSpace'), [Available]);
-      end;
-    end;
-  SpaceLabel.Caption := WizardForm.DiskSpaceLabel.Caption + '  ' + Available;
-end;
-
-procedure DirectoryChanged(Sender: TObject);
-begin
-  if SpaceTimer <> 0 then KillTimer(0, SpaceTimer);
-  SpaceTimer := SetTimer(0, 0, 250, SpaceCallback);
-end;
-
 function ReadSetupChoices: Boolean;
 var
-  Code, SignIn, Running, Warning: Integer;
-  SettingsOutput, Version: String;
+  Code: Integer;
+  Executable, Version: String;
   Installed, Minimum: Int64;
 begin
   Result := False;
-  if not GetVersionNumbersString(ExpandConstant('{app}\gozler-ui.exe'), Version) or
-    not StrToVersion(Version, Installed) or not StrToVersion('0.6.2', Minimum) then exit;
+  // {app} is set only once the folder page is passed, so this reads the
+  // folder that page shows.
+  Executable := AddBackslash(WizardDirValue) + 'gozler-ui.exe';
+  if not GetVersionNumbersString(Executable, Version) or not StrToVersion(Version, Installed) or
+    not StrToVersion('{#SettingsReader}', Minimum) then exit;
   if ComparePackedVersion(Installed, Minimum) < 0 then exit;
-  SettingsOutput := ExpandConstant('{tmp}') + '-settings.ini';
-  if not SaveStringToFile(SettingsOutput, '', False) then exit;
+  // The app answers in its exit code: 256 plus one bit for each saved choice
+  // (setup_answer in gozler-ui's startup module). Any other code is a
+  // failure. It writes no file, so no folder permission can block it.
   try
-    try
-      if not ExecAsOriginalUser(ExpandConstant('{app}\gozler-ui.exe'),
-        '--read-setup-settings "' + SettingsOutput + '"', '', SW_HIDE,
-        ewWaitUntilTerminated, Code) or (Code <> 0) then exit;
-      SignIn := StrToIntDef(GetIniString('Setup', 'sign_in', '', SettingsOutput), -1);
-      Running := StrToIntDef(GetIniString('Setup', 'keep_running', '', SettingsOutput), -1);
-      Warning := StrToIntDef(GetIniString('Setup', 'disk_warning', '', SettingsOutput), -1);
-      if (SignIn < 0) or (SignIn > 1) or (Running < 0) or (Running > 1) or
-        (Warning < 0) or (Warning > 1) then exit;
-      StartAtSignIn.Checked := SignIn = 1;
-      KeepRunning.Checked := Running = 1;
-      DiskWarning.Checked := Warning = 1;
-      SavedShortcut := GetIniString('Setup', 'shortcut', '', SettingsOutput);
-      SearchShortcut.Checked := SavedShortcut = DefaultShortcut;
-      if (SavedShortcut <> '') and (SavedShortcut <> DefaultShortcut) then
-      begin
-        ShortcutHint.Caption := FmtMessage(CustomMessage('KeepShortcut'),
-          [SavedShortcut, DefaultShortcut]) + #13#10 + CustomMessage('SearchShortcutHint');
-        ShortcutHint.AdjustHeight;
-      end;
-      Result := True;
-    except
-      Log(GetExceptionMessage);
-    end;
-  finally
-    DeleteFile(SettingsOutput);
+    if not ExecAsOriginalUser(Executable, '--read-setup-settings ' + DefaultShortcut, '',
+      SW_HIDE, ewWaitUntilTerminated, Code) then exit;
+  except
+    Log(GetExceptionMessage);
+    exit;
   end;
+  if (Code < 256) or (Code > 511) then
+  begin
+    Log(Format('Reading setup choices failed: code=%d', [Code]));
+    exit;
+  end;
+  SavedSignIn := (Code and 1) <> 0;
+  SavedRunning := (Code and 2) <> 0;
+  SavedAlerts := (Code and 4) <> 0;
+  SavedShortcut := (Code and 8) <> 0;
+  WizardSelectComponents('!alerts,!signin,!running,!shortcut');
+  if SavedAlerts then WizardSelectComponents('alerts');
+  if SavedSignIn then WizardSelectComponents('signin');
+  if SavedRunning then WizardSelectComponents('running');
+  if SavedShortcut then WizardSelectComponents('shortcut');
+  WizardForm.TypesCombo.ItemIndex := 1;
+  // Setting ItemIndex skips Inno's TypesComboChange, which shows the list for
+  // Advanced, and an update always shows the saved choices.
+  WizardForm.ComponentsList.Visible := True;
+  WizardForm.ComponentsDiskSpaceLabel.Visible := True;
+  // Another shortcut is saved.
+  if (Code and 16) <> 0 then
+  begin
+    // The list holds the components in their [Components] order, so item 3
+    // is shortcut; only visibility, which comes last, can be left out.
+    WizardForm.ComponentsList.ItemCaption[3] :=
+      FmtMessage(CustomMessage('SearchShortcut'), [DefaultShortcut]) + #13#10 +
+      FmtMessage(CustomMessage('KeepShortcut'), [DefaultShortcut]);
+  end;
+  Result := True;
 end;
 
-procedure SetupChanged(Sender: TObject);
+function SetupValue(const Component: String; const Saved: Boolean): String;
 var
-  Expanded: Boolean;
-  I: Integer;
+  Selected: Boolean;
 begin
-  Expanded := SetupChoice.ItemIndex = 1;
-  if Upgrade and Expanded and not SettingsLoaded then
-  begin
-    SetupChoice.ItemIndex := 0;
-    Expanded := False;
-    MsgBox(CustomMessage('ReadSettingsFailed'), mbError, MB_OK);
-  end;
-  if Upgrade then
-    KeepHint.Caption := CustomMessage('KeepHint');
-  if not Upgrade then
-  begin
-    if not Expanded then
-    begin
-      DiskWarning.Checked := True;
-      StartAtSignIn.Checked := True;
-      KeepRunning.Checked := True;
-      SearchShortcut.Checked := True;
-      if SeeEveryFile <> nil then SeeEveryFile.Checked := False;
-    end;
-    KeepHint.Caption := CustomMessage('ServiceSummary');
-    KeepHint.Top := StandardNames[GetArrayLength(StandardNames) - 1].Top + ScaleY(38);
-  end;
-  KeepHint.AdjustHeight;
-  StartupHeading.Visible := Expanded or not Upgrade;
-  for I := 0 to GetArrayLength(StandardNames) - 1 do
-  begin
-    StandardNames[I].Visible := not Upgrade and not Expanded;
-    StandardValues[I].Visible := StandardNames[I].Visible;
-  end;
-  DiskWarning.Visible := Expanded;
-  KeepHint.Visible := not Expanded;
-  StartAtSignIn.Visible := Expanded;
-  KeepRunning.Visible := Expanded;
-  AlertHint.Visible := Expanded;
-  SearchShortcut.Visible := Expanded;
-  ShortcutHint.Visible := Expanded;
-  if SeeEveryFile <> nil then
-  begin
-    VisibilityHeading.Visible := Expanded;
-    SeeEveryFile.Visible := Expanded;
-    VisibilityHint.Visible := Expanded;
-  end;
-end;
-
-procedure DeinitializeSetup;
-begin
-  if SpaceTimer <> 0 then KillTimer(0, SpaceTimer);
-end;
-
-function SetupText(const Caption: String; Left, Top, Width: Integer): TNewStaticText;
-begin
-  Result := TNewStaticText.Create(WizardForm);
-  Result.Parent := WizardForm.SelectDirPage;
-  Result.AutoSize := False;
-  Result.Caption := Caption;
-  Result.SetBounds(Left, Top, Width, ScaleY(18));
-end;
-
-function SetupOption(const MessageName: String; Top: Integer): TNewCheckBox;
-begin
-  Result := TNewCheckBox.Create(WizardForm);
-  Result.Parent := WizardForm.SelectDirPage;
-  Result.Caption := CustomMessage(MessageName);
-  Result.SetBounds(WizardForm.ReadyMemo.Left, Top, WizardForm.ReadyMemo.Width, ScaleY(19));
-end;
-
-procedure CreateSetupOptions;
-var
-  Left, Width, Top, I: Integer;
-  Names, Values: TStringList;
-begin
-  Left := WizardForm.ReadyMemo.Left;
-  Width := WizardForm.ReadyMemo.Width;
-  WizardForm.SelectDirBitmapImage.Visible := False;
-  WizardForm.SelectDirBrowseLabel.Visible := False;
-  WizardForm.DiskSpaceLabel.Visible := False;
-  WizardForm.SelectDirLabel.Caption := CustomMessage('InstallFolder');
-  WizardForm.SelectDirLabel.Font.Style := [fsBold];
-  WizardForm.SelectDirLabel.SetBounds(Left, 0, Width, ScaleY(18));
-  WizardForm.SelectDirLabel.FocusControl := WizardForm.DirEdit;
-  WizardForm.DirBrowseButton.SetBounds(Left + Width - ScaleX(75), ScaleY(20), ScaleX(75), WizardForm.DirEdit.Height);
-  WizardForm.DirBrowseButton.Enabled := not Upgrade;
-  WizardForm.DirEdit.SetBounds(Left, ScaleY(20), Width - ScaleX(85), WizardForm.DirEdit.Height);
-  WizardForm.DirEdit.ReadOnly := Upgrade;
-  SpaceCallback := CreateCallback(@SpaceTick);
-  WizardForm.DirEdit.OnChange := @DirectoryChanged;
-  SetupChoice := TNewComboBox.Create(WizardForm);
-  SetupChoice.Parent := WizardForm.SelectDirPage;
-  SetupChoice.Style := csDropDownList;
-  SetupChoice.SetBounds(Left, ScaleY(58), Width, ScaleY(23));
-  if Upgrade then
-  begin
-    SetupChoice.Items.Add(CustomMessage('KeepSettings'));
-    SetupChoice.Items.Add(CustomMessage('ChangeSettings'));
-  end
+  Selected := WizardIsComponentSelected(Component);
+  if Upgrade and (Selected = Saved) then
+    Result := 'keep'
   else
-  begin
-    SetupChoice.Items.Add(CustomMessage('StandardInstall'));
-    SetupChoice.Items.Add(CustomMessage('AdvancedInstall'));
-  end;
-  SetupChoice.ItemIndex := 0;
-  SetupChoice.OnChange := @SetupChanged;
-  Top := SetupChoice.Top + SetupChoice.Height + ScaleY(SectionSpacing);
-  KeepHint := SetupText('', Left, Top, Width);
-  KeepHint.WordWrap := True;
-  StartupHeading := SetupText(CustomMessage('StartupHeading'), Left, Top, Width);
-  StartupHeading.Font.Style := [fsBold];
-  Top := Top + ScaleY(HeadingSpacing);
-  Names := TStringList.Create;
-  Values := TStringList.Create;
-  try
-    Names.Text := CustomMessage('StandardNames');
-    Values.Text := CustomMessage('OnValue') + #13#10 + CustomMessage('OnValue') + #13#10 +
-      CustomMessage('KeepRunningValue') + #13#10 +
-      FmtMessage(CustomMessage('WindowsShortcutSummary'), [DefaultShortcut]);
-    SetArrayLength(StandardNames, Names.Count);
-    SetArrayLength(StandardValues, Names.Count);
-    for I := 0 to Names.Count - 1 do
-    begin
-      StandardNames[I] := SetupText(Names[I], Left, Top + ScaleY(I * RowSpacing), ScaleX(160));
-      StandardValues[I] := SetupText(Values[I], Left + ScaleX(170),
-        Top + ScaleY(I * RowSpacing), Width - ScaleX(170));
-    end;
-  finally
-    Names.Free;
-    Values.Free;
-  end;
-  DiskWarning := SetupOption('DiskWarning', Top);
-  StartAtSignIn := SetupOption('StartAtSignIn', Top + ScaleY(RowSpacing));
-  KeepRunning := SetupOption('KeepRunning', Top + ScaleY(2 * RowSpacing));
-  Top := KeepRunning.Top + KeepRunning.Height + ScaleY(8);
-  AlertHint := SetupText(CustomMessage('AlertHint'), Left + ScaleX(18), Top, Width - ScaleX(18));
-  AlertHint.AdjustHeight;
-  Top := AlertHint.Top + AlertHint.Height + ScaleY(16);
-  SearchShortcut := SetupOption('SearchShortcut', Top);
-  SearchShortcut.Caption := FmtMessage(CustomMessage('SearchShortcut'), [DefaultShortcut]);
-  ShortcutHint := SetupText(CustomMessage('SearchShortcutHint'), Left + ScaleX(18),
-    Top + SearchShortcut.Height + ScaleY(4), Width - ScaleX(18));
-  ShortcutHint.WordWrap := True;
-  ShortcutHint.AdjustHeight;
-  VisibilityTop := ShortcutHint.Top + ShortcutHint.Height + ScaleY(SectionSpacing);
-  SpaceLabel := SetupText('', Left, WizardForm.SelectDirPage.Height - ScaleY(20), Width);
-  SetupChanged(nil);
-  SpaceTick(0, 0, 0, 0);
+    Result := IntToStr(Ord(Selected));
 end;
 
 function SaveSetupChoices: Boolean;
@@ -480,16 +296,14 @@ var
   Shortcut, Parameters: String;
 begin
   Result := True;
-  if DiskWarning = nil then exit;
-  if Upgrade then
-    if (SetupChoice.ItemIndex = 0) or not SettingsLoaded then exit;
-  Shortcut := '-';
-  if SearchShortcut.Checked then
+  if WizardSilent or (Upgrade and not SettingsLoaded) then exit;
+  Shortcut := SetupValue('shortcut', SavedShortcut);
+  if Shortcut = '1' then
     Shortcut := DefaultShortcut
-  else if (SavedShortcut <> '') and (SavedShortcut <> DefaultShortcut) then
-    Shortcut := SavedShortcut;
-  Parameters := Format('--setup-settings %d %d %d %s', [Ord(StartAtSignIn.Checked),
-    Ord(KeepRunning.Checked), Ord(DiskWarning.Checked), Shortcut]);
+  else if Shortcut = '0' then
+    Shortcut := '-';
+  Parameters := Format('--setup-settings %s %s %s %s', [SetupValue('signin', SavedSignIn),
+    SetupValue('running', SavedRunning), SetupValue('alerts', SavedAlerts), Shortcut]);
   try
     Result := ExecAsOriginalUser(ExpandConstant('{app}\gozler-ui.exe'), Parameters, '', SW_HIDE,
       ewWaitUntilTerminated, Code) and (Code = 0);
@@ -701,26 +515,21 @@ begin
     Result := Domain + '\' + Name;
 end;
 
-procedure CreateVisibilityChoice;
-var
-  Left, Width: Integer;
+function InitializeSetup: Boolean;
 begin
-  if WizardSilent or Upgrade or (SignedInUser = '') then exit;
-  Left := WizardForm.ReadyMemo.Left;
-  Width := WizardForm.ReadyMemo.Width;
-  VisibilityHeading := SetupText(CustomMessage('SeeEveryFileCaption'), Left, VisibilityTop, Width);
-  VisibilityHeading.Font.Style := [fsBold];
-  VisibilityHeading.Visible := False;
-  SeeEveryFile := TNewCheckBox.Create(WizardForm);
-  SeeEveryFile.Parent := WizardForm.SelectDirPage;
-  SeeEveryFile.Caption := FmtMessage(CustomMessage('SeeEveryFileItem'), [SignedInUser]);
-  SeeEveryFile.SetBounds(Left, VisibilityTop + ScaleY(HeadingSpacing), Width, ScaleY(19));
-  SeeEveryFile.Visible := False;
-  VisibilityHint := SetupText(CustomMessage('SeeEveryFileText'), Left + ScaleX(18),
-    SeeEveryFile.Top + SeeEveryFile.Height, Width - ScaleX(18));
-  VisibilityHint.WordWrap := True;
-  VisibilityHint.Visible := False;
-  VisibilityHint.AdjustHeight;
+  Upgrade := RegKeyExists(HKLM64, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1');
+  SignedInUser := SessionUser;
+  Result := True;
+end;
+
+function OfferVisibility: Boolean;
+begin
+  Result := not WizardSilent and not Upgrade and (SignedInUser <> '');
+end;
+
+function VisibilityCaption(Param: String): String;
+begin
+  Result := FmtMessage(CustomMessage('SeeEveryFileItem'), [SignedInUser]);
 end;
 
 // The page that offers to remove each goz and earlier gozler in Found.
@@ -751,8 +560,8 @@ procedure InitializeWizard;
 var
   Daemon: String;
 begin
-  Upgrade := RegKeyExists(HKLM64, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#AppId}_is1');
-  SignedInUser := SessionUser;
+  WizardForm.DirBrowseButton.Enabled := not Upgrade;
+  WizardForm.DirEdit.ReadOnly := Upgrade;
 #ifdef WhatsNewFile
   if not WizardSilent and Upgrade then
   begin
@@ -766,8 +575,6 @@ begin
     WhatsNewButton.Visible := False;
   end;
 #endif
-  if not WizardSilent then
-    CreateSetupOptions;
   // Services first, so a folder that both a service and a PATH name keeps its
   // service.
   Daemon := ServiceProgram('goz');
@@ -780,9 +587,13 @@ begin
   FindOnPath(HKCU, 'Environment');
   if GetArrayLength(Found) > 0 then
     CreateCleanupPage(wpWelcome);
-  CreateVisibilityChoice;
   if not WizardSilent and Upgrade then
     SettingsLoaded := ReadSetupChoices;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = wpSelectComponents) and Upgrade and not SettingsLoaded;
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
@@ -792,25 +603,10 @@ begin
     WizardShown := True;
     BringToFrontAndRestore;
   end;
-  if (CurPageID = wpSelectDir) and (DiskWarning <> nil) then
-  begin
-    if Upgrade then
-    begin
-      WizardForm.PageNameLabel.Caption := CustomMessage('UpdateTitle');
-      WizardForm.PageDescriptionLabel.Caption := CustomMessage('UpdateDescription');
-    end
-    else
-    begin
-      WizardForm.PageNameLabel.Caption := CustomMessage('InstallTitle');
-      WizardForm.PageDescriptionLabel.Caption := CustomMessage('InstallDescription');
-    end;
-    WizardForm.NextButton.Caption := SetupMessage(msgButtonInstall);
-    SetupChanged(nil);
-    SpaceTick(0, 0, 0, 0);
-  end;
 #ifdef WhatsNewFile
   if WhatsNewButton <> nil then
-    WhatsNewButton.Visible := (CurPageID = wpSelectDir) or (CurPageID = wpFinished);
+    WhatsNewButton.Visible := (CurPageID = wpSelectDir) or
+      (CurPageID = wpSelectComponents) or (CurPageID = wpFinished);
 #endif
 end;
 
@@ -981,8 +777,8 @@ begin
   // gozlerd.exe, and starts it. With --see-every-file it first stores the
   // visibility choice, so the first search follows it.
   Parameters := 'install';
-  if (SeeEveryFile <> nil) and not RegValueExists(HKLM64, SettingsKey, SeeEveryFileValue) then
-    if SeeEveryFile.Checked then
+  if OfferVisibility and not RegValueExists(HKLM64, SettingsKey, SeeEveryFileValue) then
+    if WizardIsComponentSelected('visibility') then
       Parameters := Parameters + ' --see-every-file "' + SignedInUser + '"'
     else
       Parameters := Parameters + ' --see-every-file none';

@@ -1,6 +1,7 @@
 //! Explicit requests from another program, shared by startup and window handoff.
 
 use super::query::MatchMode;
+use super::settings::{Choices, WearLine};
 use super::shortcuts::ShowShortcut;
 use gozler_core::types::{SortDir, SortKey};
 use serde::{Deserialize, Serialize};
@@ -94,7 +95,9 @@ pub(crate) struct Arguments {
     pub(crate) rebuild_index: bool,
     pub(crate) unregister_shortcut: bool,
     pub(crate) setup: Option<SetupChoices>,
-    pub(crate) setup_read: Option<PathBuf>,
+    /// The Search shortcut that Setup offers, which the answer compares
+    /// with the saved one.
+    pub(crate) setup_read: Option<ShowShortcut>,
     pub(crate) cleanup: Option<Cleanup>,
     /// The copy that a failure report's Retry starts as administrator. It
     /// is no [`Request`], because a window that runs as administrator
@@ -115,27 +118,30 @@ pub(crate) enum Cleanup {
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct SetupChoices {
-    pub(crate) sign_in: bool,
-    pub(crate) keep_running: bool,
-    pub(crate) disk_warning: bool,
-    pub(crate) shortcut: Option<ShowShortcut>,
+    pub(crate) sign_in: Option<bool>,
+    pub(crate) keep_running: Option<bool>,
+    pub(crate) disk_warning: Option<bool>,
+    /// The outer `None` keeps the saved shortcut; `Some(None)` clears it.
+    pub(crate) shortcut: Option<Option<ShowShortcut>>,
 }
 
 impl SetupChoices {
     fn parse(mut args: impl Iterator<Item = OsString>) -> Result<Self, Error> {
         let mut toggle = || match value(&mut args, SETUP_ARGUMENT)?.as_str() {
-            "0" => Ok(false),
-            "1" => Ok(true),
+            "keep" => Ok(None),
+            "0" => Ok(Some(false)),
+            "1" => Ok(Some(true)),
             _ => Err(Error::Value(SETUP_ARGUMENT.into())),
         };
         let sign_in = toggle()?;
         let keep_running = toggle()?;
         let disk_warning = toggle()?;
         let shortcut = match value(&mut args, SETUP_ARGUMENT)?.as_str() {
-            "-" => None,
-            keys => Some(
+            "keep" => None,
+            "-" => Some(None),
+            keys => Some(Some(
                 ShowShortcut::from_name(keys).ok_or_else(|| Error::Value(SETUP_ARGUMENT.into()))?,
-            ),
+            )),
         };
         if args.next().is_some() {
             return Err(Error::Conflict);
@@ -147,6 +153,19 @@ impl SetupChoices {
             shortcut,
         })
     }
+}
+
+/// The exit code of `--read-setup-settings`, which `ReadSetupChoices` in
+/// `installer\Setup.iss` decodes: 256 plus a bit for each saved choice.
+/// Setup reads any code outside 256..=511 as a failure, so an error exit,
+/// a crash or a blocked start never reads as an answer.
+pub(crate) fn setup_answer(choices: &Choices, sign_in: bool, offered: ShowShortcut) -> i32 {
+    let saved = choices.show_shortcut;
+    256 | i32::from(sign_in)
+        | i32::from(choices.keep_running) << 1
+        | i32::from(choices.wear_alarm.line(WearLine::DiskWeek).on) << 2
+        | i32::from(saved == Some(offered)) << 3
+        | i32::from(saved.is_some_and(|key| key != offered)) << 4
 }
 
 #[derive(Debug, PartialEq)]
@@ -197,12 +216,13 @@ impl Arguments {
             });
         }
         if args.next_if(|arg| arg == SETUP_READ_ARGUMENT).is_some() {
-            let output = value(&mut args, SETUP_READ_ARGUMENT)?.into();
+            let offered = ShowShortcut::from_name(&value(&mut args, SETUP_READ_ARGUMENT)?)
+                .ok_or_else(|| Error::Value(SETUP_READ_ARGUMENT.into()))?;
             if args.next().is_some() {
                 return Err(Error::Conflict);
             }
             return Ok(Self {
-                setup_read: Some(output),
+                setup_read: Some(offered),
                 ..Self::default()
             });
         }
@@ -367,22 +387,32 @@ mod tests {
     fn setup_choices_are_a_standalone_startup_action() {
         let arguments = parse(&[SETUP_ARGUMENT, "1", "1", "1", "Ctrl+Alt+G"]).unwrap();
         let choices = arguments.setup.unwrap();
-        assert!(choices.sign_in);
-        assert!(choices.keep_running);
-        assert!(choices.disk_warning);
+        assert_eq!(choices.sign_in, Some(true));
+        assert_eq!(choices.keep_running, Some(true));
+        assert_eq!(choices.disk_warning, Some(true));
         assert_eq!(
             serde_json::to_string(&choices.shortcut).unwrap(),
             "\"Ctrl+Alt+G\""
         );
-        assert!(parse(&[SETUP_ARGUMENT, "0", "1", "0", "Ctrl+Alt+G"]).is_ok());
+        assert_eq!(
+            parse(&[SETUP_ARGUMENT, "keep", "keep", "keep", "keep"])
+                .unwrap()
+                .setup,
+            Some(SetupChoices {
+                sign_in: None,
+                keep_running: None,
+                disk_warning: None,
+                shortcut: None,
+            })
+        );
         let independent = parse(&[SETUP_ARGUMENT, "0", "0", "1", "Win+S"])
             .unwrap()
             .setup
             .unwrap();
-        assert!(!independent.sign_in);
-        assert!(!independent.keep_running);
-        assert!(independent.disk_warning);
-        assert_eq!(independent.shortcut.unwrap().name(), "Win+S");
+        assert_eq!(independent.sign_in, Some(false));
+        assert_eq!(independent.keep_running, Some(false));
+        assert_eq!(independent.disk_warning, Some(true));
+        assert_eq!(independent.shortcut.flatten().unwrap().name(), "Win+S");
         assert!(matches!(
             parse(&[SETUP_ARGUMENT, "1", "1", "1", "-", "--sign-in"]),
             Err(Error::Conflict)
@@ -409,20 +439,44 @@ mod tests {
 
     #[test]
     fn reading_setup_settings_does_not_open_a_window_or_accept_other_actions() {
-        let arguments = parse(&[SETUP_READ_ARGUMENT, r"C:\Temp\setup.ini"]).unwrap();
+        let arguments = parse(&[SETUP_READ_ARGUMENT, "Win+S"]).unwrap();
         assert_eq!(
-            arguments.setup_read,
-            Some(PathBuf::from(r"C:\Temp\setup.ini"))
+            arguments.setup_read.map(ShowShortcut::name).as_deref(),
+            Some("Win+S")
         );
         assert!(arguments.request.is_none());
         assert!(matches!(
-            parse(&[SETUP_READ_ARGUMENT, r"C:\Temp\setup.ini", "--sign-in"]),
+            parse(&[SETUP_READ_ARGUMENT, "Win+S", "--sign-in"]),
             Err(Error::Conflict)
         ));
         assert!(matches!(
             parse(&[SETUP_READ_ARGUMENT]),
             Err(Error::Missing(_))
         ));
+        assert!(matches!(
+            parse(&[SETUP_READ_ARGUMENT, r"C:\Temp\setup.ini"]),
+            Err(Error::Value(_))
+        ));
+    }
+
+    /// Setup decodes these bits, so a change here breaks every installer
+    /// that reads them.
+    #[test]
+    fn setup_answer_sets_one_bit_for_each_saved_choice() {
+        let win_s = ShowShortcut::from_name("Win+S").unwrap();
+        let mut choices = Choices {
+            keep_running: false,
+            show_shortcut: None,
+            ..Choices::default()
+        };
+        choices.wear_alarm.line_mut(WearLine::DiskWeek).on = false;
+        assert_eq!(setup_answer(&choices, false, win_s), 256);
+        choices.show_shortcut = Some(win_s);
+        assert_eq!(setup_answer(&choices, true, win_s), 256 + 1 + 8);
+        choices.keep_running = true;
+        choices.wear_alarm.line_mut(WearLine::DiskWeek).on = true;
+        choices.show_shortcut = ShowShortcut::from_name("Ctrl+Alt+G");
+        assert_eq!(setup_answer(&choices, false, win_s), 256 + 2 + 4 + 16);
     }
 
     #[test]

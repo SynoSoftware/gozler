@@ -80,7 +80,7 @@ pub(crate) fn run() {
             .join("Gozler")
     });
     set_panic_report(|report| report.folder = Some(data_dir.clone()));
-    if let Some(output) = arguments.setup_read {
+    if let Some(offered) = arguments.setup_read {
         let read = win::work::spawn(move |worker| {
             let path = data_dir.join("ui.json");
             let settings = match std::fs::read_to_string(&path) {
@@ -90,21 +90,14 @@ pub(crate) fn run() {
                 }
                 Err(error) => return Err(error),
             };
-            let choices = settings.choices;
-            let text = format!(
-                "[Setup]\nsign_in={}\nkeep_running={}\ndisk_warning={}\nshortcut={}\n",
-                u8::from(win::shell::starts_at_sign_in(worker)),
-                u8::from(choices.keep_running),
-                u8::from(choices.wear_alarm.line(WearLine::DiskWeek).on),
-                choices
-                    .show_shortcut
-                    .map(|key| key.name())
-                    .unwrap_or_default(),
-            );
-            std::fs::write(output, text)
+            let sign_in = win::shell::starts_at_sign_in(worker);
+            Ok(startup::setup_answer(&settings.choices, sign_in, offered))
         })
         .join();
-        std::process::exit(if matches!(read, Ok(Ok(()))) { 0 } else { 1 });
+        std::process::exit(match read {
+            Ok(Ok(answer)) => answer,
+            _ => 1,
+        });
     }
     if let Some(choices) = arguments.setup {
         let saved =
@@ -401,16 +394,37 @@ fn save_setup_choices(
     choices: SetupChoices,
     worker: &win::work::OffThread,
 ) -> std::io::Result<()> {
-    let path = data_dir.join("ui.json");
-    let saved = work::load_settings(&path);
-    let mut settings = saved.clone();
-    settings.choices.keep_running = choices.keep_running;
-    settings.choices.show_shortcut = choices.shortcut;
-    settings.choices.wear_alarm.line_mut(WearLine::DiskWeek).on = choices.disk_warning;
-    let result = work::write_settings(&path, settings.changes(&saved), worker).and_then(|()| {
-        win::shell::set_windows_shortcut_disabled(&[], worker)?;
-        let program = std::env::current_exe()?;
-        win::shell::set_start_at_sign_in(choices.sign_in, &program, worker)
+    // `keep` leaves ui.json untouched: writing rewrites a file it cannot read
+    // with the defaults.
+    let edits_file = choices.keep_running.is_some()
+        || choices.disk_warning.is_some()
+        || choices.shortcut.is_some();
+    let written = if edits_file {
+        let path = data_dir.join("ui.json");
+        let saved = work::load_settings(&path);
+        let mut settings = saved.clone();
+        if let Some(keep_running) = choices.keep_running {
+            settings.choices.keep_running = keep_running;
+        }
+        if let Some(shortcut) = choices.shortcut {
+            settings.choices.show_shortcut = shortcut;
+        }
+        if let Some(disk_warning) = choices.disk_warning {
+            settings.choices.wear_alarm.line_mut(WearLine::DiskWeek).on = disk_warning;
+        }
+        work::write_settings(&path, settings.changes(&saved), worker)
+    } else {
+        Ok(())
+    };
+    let result = written.and_then(|()| {
+        if choices.shortcut.is_some() {
+            win::shell::set_windows_shortcut_disabled(&[], worker)?;
+        }
+        if let Some(sign_in) = choices.sign_in {
+            let program = std::env::current_exe()?;
+            win::shell::set_start_at_sign_in(sign_in, &program, worker)?;
+        }
+        Ok(())
     });
     if let Err(error) = &result {
         write_log(
