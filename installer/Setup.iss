@@ -172,7 +172,6 @@ var
   SavedSignIn, SavedRunning, SavedAlerts, SavedShortcut: Boolean;
   Upgrade: Boolean;
   SettingsLoaded: Boolean;
-  WizardShown: Boolean;
 #ifdef WhatsNewFile
   WhatsNewButton: TNewButton;
 #endif
@@ -556,6 +555,21 @@ begin
     end;
 end;
 
+function SetTimer(Window: HWND; Id: NativeUInt; Interval: Cardinal; Callback: NativeInt): NativeUInt;
+  external 'SetTimer@user32.dll stdcall';
+function KillTimer(Window: HWND; Id: NativeUInt): BOOL;
+  external 'KillTimer@user32.dll stdcall';
+function SetForegroundWindow(Window: HWND): BOOL;
+  external 'SetForegroundWindow@user32.dll stdcall';
+
+procedure BringWizardToFront(Window: HWND; Message: Cardinal; Id: NativeUInt; Time: DWORD);
+begin
+  if not WizardForm.Visible then exit;
+  KillTimer(0, Id);
+  BringToFrontAndRestore;
+  SetForegroundWindow(WizardForm.Handle);
+end;
+
 procedure InitializeWizard;
 var
   Daemon: String;
@@ -589,6 +603,10 @@ begin
     CreateCleanupPage(wpWelcome);
   if not WizardSilent and Upgrade then
     SettingsLoaded := ReadSetupChoices;
+  // Inno shows the wizard only after InitializeWizard and the first
+  // CurPageChanged, so the window comes to the front from a timer.
+  if not WizardSilent then
+    SetTimer(0, 0, 100, CreateCallback(@BringWizardToFront));
 end;
 
 function ShouldSkipPage(PageID: Integer): Boolean;
@@ -598,11 +616,6 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if not WizardSilent and not WizardShown then
-  begin
-    WizardShown := True;
-    BringToFrontAndRestore;
-  end;
 #ifdef WhatsNewFile
   if WhatsNewButton <> nil then
     WhatsNewButton.Visible := (CurPageID = wpSelectDir) or

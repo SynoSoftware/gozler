@@ -27,7 +27,7 @@ use crate::names::Names;
 use crate::operation::{Found, Pause, Progress};
 use crate::place::Target;
 use crate::prepare::{Preparation, Work};
-use crate::receive::{receive, verbatim};
+use crate::receive::{read_listed, receive, verbatim};
 use crate::ring_plan::{Layout, OVERLAPPED_FROM};
 use crate::saved::{self, Saved};
 use crate::totals::Index;
@@ -946,6 +946,41 @@ fn paths_compare_by_what_they_name() {
     junction(&out, &folder.join("build"));
     let refused = receive(std::slice::from_ref(&folder), Some(&out), &cancel, None);
     assert_eq!(refused.err(), Some(Refusal::DestinationInsideSource));
+}
+
+/// Many entries of one folder are read from one listing of it, and each
+/// gets the identity its own open gives: a second spelling of one of them,
+/// which is opened on its own, is still one entry, and a name that is gone
+/// counts as missing (#138).
+#[test]
+fn many_entries_of_one_folder_are_read_from_its_listing() {
+    let scratch = Scratch::new("listed");
+    let mut sources: Vec<PathBuf> = (0..20)
+        .map(|n| scratch.write(format!(r"many\file {n:02}.txt"), b"data"))
+        .collect();
+    sources.push(sources[0].with_file_name("FILE 00.TXT"));
+    let gone = scratch.path(r"many\gone.txt");
+    sources.push(gone.clone());
+    let cancel = AtomicBool::new(false);
+    let paths: Vec<Vec<u16>> = (sources.iter())
+        .map(|source| source.as_os_str().encode_wide().collect())
+        .collect();
+
+    let listed = read_listed(&paths, &cancel, None);
+    for (path, entry) in paths.iter().zip(&listed).take(20) {
+        let entry = entry.as_ref().expect("read from the listing");
+        let opened = open_entry(&verbatim(path), Access::Inspect, Reparse::Open).expect("opens");
+        let final_path = opened.final_path().expect("a final path");
+        assert_eq!(entry.identity, Identity::new(final_path));
+        assert_eq!(entry.stat.size, 4);
+    }
+    // The other spelling and the name that is gone are left to their opens.
+    assert!(listed[20].is_none() && listed[21].is_none());
+
+    let (received, _) = receive(&sources, None, &cancel, None).expect("no destination");
+    assert_eq!(received.entries.len(), 20);
+    let gone: Vec<u16> = gone.as_os_str().encode_wide().collect();
+    assert_eq!(received.missing, [gone]);
 }
 
 /// Each method copies a whole tree: the plans of a share, a hard disk, USB

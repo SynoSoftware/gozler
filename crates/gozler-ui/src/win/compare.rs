@@ -282,7 +282,7 @@ impl RichText {
 
     /// Replaces `rows`, which are not empty, with the rows of `rtf`, which
     /// holds one row or more and ends without a paragraph mark, as
-    /// [`crate::core::compare::rtf::Patch`] gives them. The control tells
+    /// a slice of a [`crate::core::compare::rtf::Patch`] does. The control tells
     /// nothing of the change, and the selection ends after the new rows.
     pub(crate) fn replace_rows(self, rows: Range<usize>, rtf: &str) {
         let last = rows.end.saturating_sub(1).max(rows.start);
@@ -306,6 +306,44 @@ impl RichText {
                 )
             };
             self.stream_in(&[rtf.as_bytes()], SF_RTF | SFF_SELECTION);
+        });
+    }
+
+    /// Replaces the last row with the rows of `rtf`, which start with it
+    /// again, as a slice of a [`crate::core::compare::rtf::Patch`] after the
+    /// first does.
+    /// The selection and the view stay, so rows that stream in below do not
+    /// move what the person sees.
+    pub(crate) fn extend(self, rtf: &str) {
+        let selection = self.selection();
+        let position = self.scroll_position();
+        let last = self.row_count().saturating_sub(1);
+        self.replace_rows(last..last + 1, rtf);
+        let position = POINT {
+            x: position.0,
+            y: position.1,
+        };
+        let at = |at: usize| i32::try_from(at).unwrap_or(i32::MAX);
+        let selection = CHARRANGE {
+            cpMin: at(selection.start),
+            cpMax: at(selection.end),
+        };
+        self.quietly(|| {
+            // SAFETY: `selection` and `position` outlive the calls.
+            unsafe {
+                SendMessageW(
+                    self.0.0,
+                    EM_EXSETSEL,
+                    None,
+                    Some(LPARAM(&raw const selection as isize)),
+                );
+                SendMessageW(
+                    self.0.0,
+                    EM_SETSCROLLPOS,
+                    None,
+                    Some(LPARAM(&raw const position as isize)),
+                );
+            }
         });
     }
 

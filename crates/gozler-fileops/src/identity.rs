@@ -49,8 +49,8 @@ impl Identity {
 
     /// The volume part: `\\?\Volume{...}` or `\\?\UNC\server\share`.
     pub(crate) fn volume(&self) -> &[u16] {
-        let unc: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
-        let separators = if self.0.starts_with(&unc) { 6 } else { 4 };
+        let unc = (self.0.iter().copied().take(8)).eq(r"\\?\UNC\".encode_utf16());
+        let separators = if unc { 6 } else { 4 };
         let end = (self.0.iter().enumerate())
             .filter(|&(_, &unit)| unit == BACKSLASH)
             .nth(separators - 1)
@@ -80,12 +80,21 @@ pub(crate) struct PathTrie {
 }
 
 impl PathTrie {
-    pub(crate) fn insert(&mut self, path: &Identity) {
+    /// Adds `path`, unless it equals or is below a path of the set; `true`
+    /// when it was added. Only a part that is new is copied, because 100,000
+    /// files of one folder walk the same parts 100,000 times.
+    pub(crate) fn insert(&mut self, path: &Identity) -> bool {
         let mut node = self;
         for part in path.components() {
-            node = node.children.entry(part.to_vec()).or_default();
+            if node.end {
+                return false;
+            }
+            if !node.children.contains_key(part) {
+                node.children.insert(part.to_vec(), PathTrie::default());
+            }
+            node = node.children.get_mut(part).expect("the part is in the set");
         }
-        node.end = true;
+        !std::mem::replace(&mut node.end, true)
     }
 
     /// Whether `path` equals or is below a path of the set.
@@ -112,14 +121,11 @@ pub(crate) fn outermost(sources: &[Identity]) -> (Vec<usize>, PathTrie) {
     let mut order: Vec<usize> = (0..sources.len()).collect();
     // An outer folder has fewer components than anything below it, so it is
     // in the trie before them.
-    order.sort_by_key(|&i| sources[i].components().count());
+    order.sort_by_cached_key(|&i| sources[i].components().count());
     let mut trie = PathTrie::default();
     let mut kept = vec![false; sources.len()];
     for i in order {
-        if !trie.covers(&sources[i]) {
-            trie.insert(&sources[i]);
-            kept[i] = true;
-        }
+        kept[i] = trie.insert(&sources[i]);
     }
     let kept = (0..sources.len()).filter(|&i| kept[i]).collect();
     (kept, trie)

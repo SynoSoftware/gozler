@@ -41,6 +41,12 @@ pub(crate) const EDIT_LIMIT: u64 = 4 << 20;
 /// each one out.
 pub(crate) const SHOWN_LIMIT: usize = 200_000;
 
+/// The most marked parts that the rows that show hold, both sides
+/// together: RichEdit lays out each one on the window's thread, so the rows
+/// of two files that differ in every byte would take it far longer to load
+/// than rows of text (issue #160).
+pub(crate) const MARKS_LIMIT: usize = 600_000;
+
 /// The rows around a difference that Show only differences keeps.
 pub(crate) const DEFAULT_EXTRA_LINES: u32 = 2;
 
@@ -752,7 +758,7 @@ pub(crate) struct ShownRows {
     /// Only differences show because all the rows would be more than
     /// [`SHOWN_LIMIT`].
     pub(crate) forced: bool,
-    /// The rows stop after [`SHOWN_LIMIT`].
+    /// The rows stop after [`SHOWN_LIMIT`], or [`MARKS_LIMIT`].
     pub(crate) truncated: bool,
     /// The runs of `rows` that differ, in order, which the caret's moves
     /// search instead of the rows.
@@ -774,6 +780,12 @@ impl ShownRows {
             truncated,
             differences,
         }
+    }
+
+    /// Only the first `rows` of the rows, which then stop.
+    pub(crate) fn cut(mut self, rows: usize) -> ShownRows {
+        self.rows.truncate(rows);
+        ShownRows::new(self.rows, self.forced, true)
     }
 
     /// The sides swapped, as Swap sides shows them.
@@ -1793,6 +1805,16 @@ mod tests {
         assert_eq!(shown.previous_difference(9), Some(5));
         assert_eq!(shown.difference_at(1), 0..2);
         assert_eq!(shown.difference_at(3), 3..4);
+    }
+
+    /// Rows cut at a limit say so, and their differences end at the cut,
+    /// so Next difference never goes to a row that does not show.
+    #[test]
+    fn cut_rows_end_their_differences_at_the_cut() {
+        let cut = hex_shown_rows([10, 10], &[0, 1, 5, 9], true, None, SHOWN_LIMIT).cut(1);
+        assert!(cut.truncated);
+        assert_eq!(cut.differences(), [0..1]);
+        assert_eq!(cut.next_difference(0), None);
     }
 
     /// Hex rows fold as lines do, and the rows past the shorter file show

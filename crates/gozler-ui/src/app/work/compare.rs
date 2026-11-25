@@ -5,7 +5,7 @@
 
 use crate::core::compare::rtf::{self, Font, Palette, Patch, Style, row_rtf};
 use crate::core::compare::{
-    self, Chosen, LINES_LIMIT, Matching, Needle, SHOWN_LIMIT, Shown, ShownRows, Text,
+    self, Chosen, LINES_LIMIT, MARKS_LIMIT, Matching, Needle, SHOWN_LIMIT, Shown, ShownRows, Text,
 };
 use crate::core::compare_window::session::{
     AlignInput, Compared, Content, Fresh, HexFound, SaveFile, View,
@@ -676,7 +676,9 @@ fn hex_view(
     let mut readers = [0, 1].map(|side| RowReader::new(files[side]));
     let length = sizes[0].max(sizes[1]);
     let digits = offset_digits(length);
-    for each in &shown.rows {
+    let mut marked = 0;
+    let mut cut = None;
+    for (index, each) in shown.rows.iter().enumerate() {
         if cancel.is_cancelled() {
             return Ok(None);
         }
@@ -698,6 +700,11 @@ fn hex_view(
                 } else {
                     [Vec::new(), Vec::new()]
                 };
+                marked += marks[0].len() + marks[1].len();
+                if marked > MARKS_LIMIT && index > 0 {
+                    cut = Some(index);
+                    break;
+                }
                 for side in 0..2 {
                     let row = [left, right][side];
                     let text = match (row, &bytes[side]) {
@@ -715,6 +722,10 @@ fn hex_view(
             }
         }
     }
+    let shown = match cut {
+        Some(rows) => shown.cut(rows),
+        None => shown,
+    };
     let view = View {
         rows: Arc::new(shown),
         differences: found.differences,
@@ -785,7 +796,9 @@ fn realign(
     drop(rows);
     let look = &options.look;
     let mut sides = [0, 1].map(|_| Vec::with_capacity(shown.rows.len()));
-    for each in &shown.rows {
+    let mut marked = 0;
+    let mut cut = None;
+    for (index, each) in shown.rows.iter().enumerate() {
         if cancel.is_cancelled() {
             return None;
         }
@@ -805,6 +818,11 @@ fn realign(
                 } else {
                     [Vec::new(), Vec::new()]
                 };
+                marked += marks[0].len() + marks[1].len();
+                if marked > MARKS_LIMIT && index > 0 {
+                    cut = Some(index);
+                    break;
+                }
                 for side in 0..2 {
                     let text = texts[side].unwrap_or("");
                     sides[side].push(row_rtf(text, Style::Text, &marks[side]));
@@ -818,6 +836,10 @@ fn realign(
             }
         }
     }
+    let shown = match cut {
+        Some(rows) => shown.cut(rows),
+        None => shown,
+    };
     let view = View {
         rows: Arc::new(shown),
         differences,

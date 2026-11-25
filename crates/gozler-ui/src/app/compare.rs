@@ -46,10 +46,11 @@ use crate::win::wake::OpenWaker;
 use crate::win::window::{self, Message, WindowProc};
 use crate::win::{self, Hwnd};
 use std::cell::{Cell, OnceCell, RefCell};
+use std::collections::VecDeque;
 use std::os::windows::ffi::OsStrExt;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::LRESULT;
 
 const WINDOW_CLASS: &str = "gozler.ui.compare";
@@ -63,6 +64,12 @@ const REALIGN_TIMER: usize = 3;
 const REALIGN_DELAY: u32 = 300;
 /// Tries the clipboard again while another program holds it.
 const CLIPBOARD_TIMER: usize = 4;
+/// Streams the next slices of rows into the sides, after the messages that
+/// wait, such as input and painting.
+const LOAD_TIMER: usize = 5;
+/// How long one message streams slices of rows before the window answers
+/// again.
+const LOAD_BUDGET: Duration = Duration::from_millis(30);
 /// The rows above a difference that going to it keeps in view.
 const CONTEXT_ROWS: usize = 3;
 /// The digits of the extra lines box: those of [`compare::MAX_EXTRA_LINES`].
@@ -485,6 +492,25 @@ enum Place {
     },
 }
 
+/// Rows that still stream into the sides, some at each turn of the message
+/// loop, so a large comparison never holds the window.
+struct Loading {
+    /// Each side's slices still to stream. Only a patch of all the rows
+    /// has more than one, so each one goes below all the rows the side
+    /// holds and replaces its last row.
+    slices: [VecDeque<String>; 2],
+    /// Each side whose patch replaced all its rows.
+    whole: [bool; 2],
+    /// The sides took patches, whose rows are checked once all are in.
+    patched: bool,
+    /// Where the caret goes once the rows around it are in, unless the
+    /// person moves it first.
+    place: Option<Place>,
+    /// The commands that read the rows, in order, which wait until all are
+    /// in and then go to the session again, as if given then.
+    commands: VecDeque<CompareCommand>,
+}
+
 /// A window's controls, created in Tab order.
 struct Controls {
     paths: [Edit; 2],
@@ -690,6 +716,7 @@ struct CompareWindow {
     numbered: Cell<[(usize, usize); 2]>,
     /// The patches of the worker's rows, until the session shows them.
     rendering: RefCell<Option<Rendering>>,
+    loading: RefCell<Option<Loading>>,
 }
 
 impl CompareWindow {
@@ -728,6 +755,7 @@ impl CompareWindow {
             prints: RefCell::new([Arc::default(), Arc::default()]),
             numbered: Cell::new([(0, 0); 2]),
             rendering: RefCell::new(None),
+            loading: RefCell::new(None),
         }
     }
 
@@ -1331,9 +1359,154 @@ impl CompareWindow {
         }
     }
 
-    /// Streams the rows of the worker's patches that changed into the
-    /// sides, numbers the rows in view, and places the caret.
+    /// Streams the first slice of each of the worker's patches into its
+    /// side, and the rest through [`Self::load`], which numbers the rows in
+    /// view and places the caret.
     fn present(&self, hwnd: Hwnd, place: Place) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        if self.session.borrow().showing().is_none() {
+            return;
+        }
+        hwnd.kill_timer(LOAD_TIMER);
+        // A side that the worker gives no new rows goes on with the slices
+        // of an earlier load, which are still its rows.
+        let mut loading = match self.loading.take() {
+            Some(earlier) => Loading {
+                place: Some(place),
+                ..earlier
+            },
+            None => Loading {
+                slices: [VecDeque::new(), VecDeque::new()],
+                whole: [false; 2],
+                patched: false,
+                place: Some(place),
+                commands: VecDeque::new(),
+            },
+        };
+        let mut unknown = [false; 2];
+        // Swap sides gives no patches: the controls keep their rows.
+        if let Some(Rendering { patches, prints }) = self.rendering.take() {
+            loading.patched = true;
+            for (side, patch) in Side::BOTH.into_iter().zip(patches) {
+                let Some(patch) = patch else {
+                    continue;
+                };
+                let index = side.index();
+                let control = c.sides()[index];
+                let mut slices = VecDeque::from(patch.slices);
+                let first = slices.pop_front().expect("a patch holds a row or more");
+                if patch.whole {
+                    control.set_rtf(&first);
+                    loading.slices[index] = slices;
+                    loading.whole[index] = true;
+                } else if loading.slices[index].is_empty() {
+                    // A patch that keeps rows is one slice.
+                    control.replace_rows(patch.rows, &first);
+                    loading.whole[index] = false;
+                } else {
+                    // It changes rows that have not streamed in yet, so the
+                    // side streams again whole.
+                    loading.slices[index].clear();
+                    unknown[index] = true;
+                }
+            }
+            self.prints.replace(prints.map(Arc::new));
+        }
+        for side in Side::BOTH {
+            if unknown[side.index()] {
+                self.forget_prints(side);
+            }
+        }
+        let streaming = loading.slices.iter().any(|slices| !slices.is_empty());
+        self.loading.replace(Some(loading));
+        if unknown.contains(&true) {
+            self.send(hwnd, Event::Outdated);
+            if self.hwnd.get() != Some(hwnd) {
+                return;
+            }
+        }
+        if !streaming {
+            self.load(hwnd);
+            return;
+        }
+        self.show_loaded();
+        hwnd.set_timer(LOAD_TIMER, 1);
+        // The line numbers take the width of the rows that will show.
+        self.layout(hwnd);
+    }
+
+    /// Streams the slices of rows that wait, the side with fewer rows
+    /// first, for [`LOAD_BUDGET`], and the rest after the messages that
+    /// wait; once all are in, ends [`Self::present`], and gives `true`.
+    fn load(&self, hwnd: Hwnd) -> bool {
+        let Some(c) = self.controls() else {
+            return false;
+        };
+        let started = Instant::now();
+        loop {
+            let next = {
+                let mut loading = self.loading.borrow_mut();
+                let Some(loading) = loading.as_mut() else {
+                    hwnd.kill_timer(LOAD_TIMER);
+                    return false;
+                };
+                let side = (Side::BOTH.into_iter())
+                    .filter(|side| !loading.slices[side.index()].is_empty())
+                    .min_by_key(|side| c.sides()[side.index()].row_count());
+                side.and_then(|side| Some((side, loading.slices[side.index()].pop_front()?)))
+            };
+            let Some((side, slice)) = next else {
+                break;
+            };
+            c.sides()[side.index()].extend(&slice);
+            if started.elapsed() >= LOAD_BUDGET {
+                break;
+            }
+        }
+        let done = (self.loading.borrow().as_ref())
+            .is_some_and(|loading| loading.slices.iter().all(VecDeque::is_empty));
+        if !done {
+            self.show_loaded();
+            hwnd.set_timer(LOAD_TIMER, 1);
+            return false;
+        }
+        hwnd.kill_timer(LOAD_TIMER);
+        if let Some(loading) = self.loading.take() {
+            self.end_present(hwnd, loading);
+        }
+        true
+    }
+
+    /// The line numbers follow the rows that are in while more stream in,
+    /// and the caret goes to its place once the rows around it are in.
+    fn show_loaded(&self) {
+        let Some(c) = self.controls() else {
+            return;
+        };
+        let held = c.sides().map(RichText::row_count);
+        self.size_numbers(held[0].max(held[1]));
+        self.numbered.set([(0, 0); 2]);
+        let page = self.page_rows();
+        let place = (self.loading.borrow_mut().as_mut()).and_then(|loading| {
+            let row = self.place_row(loading.place.as_ref()?);
+            if row + page < held[0].min(held[1]) {
+                loading.place.take()
+            } else {
+                None
+            }
+        });
+        match place {
+            Some(place) => self.place(place),
+            None => self.sync_from(self.active.get()),
+        }
+    }
+
+    /// Ends [`Self::present`] once all the rows are in: numbers the rows in
+    /// view, places the caret, and gives the session the commands that
+    /// waited for them.
+    fn end_present(&self, hwnd: Hwnd, loading: Loading) {
         let Some(c) = self.controls() else {
             return;
         };
@@ -1341,34 +1514,18 @@ impl CompareWindow {
             Some(showing) => showing.view().rows.rows.len().max(1),
             None => return,
         };
-        // Swap sides gives no patches: the controls keep their rows.
         let mut outdated = false;
-        if let Some(Rendering { patches, prints }) = self.rendering.take() {
-            let mut whole = [false; 2];
-            for (side, patch) in Side::BOTH.into_iter().zip(patches) {
-                let control = c.sides()[side.index()];
-                if let Some(patch) = patch {
-                    let held = self.prints.borrow()[side.index()].len().max(1);
-                    whole[side.index()] = patch.rows.start == 0 && patch.rows.end >= held;
-                    if whole[side.index()] {
-                        control.set_rtf(&patch.rtf);
-                    } else {
-                        control.replace_rows(patch.rows, &patch.rtf);
-                    }
-                }
-            }
-            self.prints.replace(prints.map(Arc::new));
-            for side in Side::BOTH {
-                // A control that took a patch otherwise than it was built
-                // for holds other rows, so its rows stream again whole. A
-                // whole stream that left other rows, as a form feed in a
-                // row does, would leave them again, so it sends no
-                // Outdated, which would stream it again without end.
-                let built = self.prints.borrow()[side.index()].len().max(1);
-                if c.sides()[side.index()].row_count() != built {
-                    self.forget_prints(side);
-                    outdated |= !whole[side.index()];
-                }
+        for side in Side::BOTH {
+            let index = side.index();
+            // A control that took a patch otherwise than it was built
+            // for holds other rows, so its rows stream again whole. A whole
+            // stream that left other rows, as a form feed in a row does,
+            // would leave them again, so it sends no Outdated, which would
+            // stream it again without end.
+            let built = self.prints.borrow()[index].len().max(1);
+            if loading.patched && c.sides()[index].row_count() != built {
+                self.forget_prints(side);
+                outdated |= !loading.whole[index];
             }
         }
         if outdated {
@@ -1379,10 +1536,20 @@ impl CompareWindow {
         self.numbered.set([(0, 0); 2]);
         self.size_numbers(rows);
         self.layout(hwnd);
-        self.place(place);
+        if let Some(place) = loading.place {
+            self.place(place);
+        }
         self.show_list();
         if outdated {
             self.send(hwnd, Event::Outdated);
+        }
+        // A command that changes the lines makes the next one wait for
+        // fresh rows, as when the person gives them one after the other.
+        for command in loading.commands {
+            if self.hwnd.get() != Some(hwnd) {
+                return;
+            }
+            self.send(hwnd, Event::Command(command));
         }
     }
 
@@ -1425,12 +1592,7 @@ impl CompareWindow {
         let Some(c) = self.controls() else {
             return;
         };
-        let page = {
-            let fonts = self.fonts.borrow();
-            let height = c.sides()[0].hwnd().client_size().height.0;
-            let row = fonts.as_ref().map_or(16, |fonts| fonts.row_height.0.max(1));
-            usize::try_from(height / row).unwrap_or(0) + 1
-        };
+        let page = self.page_rows();
         let mut numbered = self.numbered.get();
         for side in Side::BOTH {
             let first = c.sides()[side.index()].first_visible_row();
@@ -1438,6 +1600,8 @@ impl CompareWindow {
             if start <= first && first + page <= end {
                 continue;
             }
+            // While rows stream in, the line numbers hold only as many.
+            let held = c.numbers()[side.index()].row_count();
             let numbers = {
                 let session = self.session.borrow();
                 let Some(showing) = session.showing() else {
@@ -1445,7 +1609,7 @@ impl CompareWindow {
                 };
                 let rows = &showing.view().rows.rows;
                 let from = first.saturating_sub(page).min(rows.len());
-                let to = (first + 2 * page).min(rows.len());
+                let to = (first + 2 * page).min(rows.len()).min(held);
                 let digits = (showing.mode() == Mode::Text).then(|| {
                     let lines = showing.text(side).map_or(0, |text| text.lines.len());
                     lines.max(1).to_string().len()
@@ -1463,6 +1627,17 @@ impl CompareWindow {
             }
         }
         self.numbered.set(numbered);
+    }
+
+    /// The rows that a side shows at a time, and one more.
+    fn page_rows(&self) -> usize {
+        let Some(c) = self.controls() else {
+            return 1;
+        };
+        let fonts = self.fonts.borrow();
+        let height = c.sides()[0].hwnd().client_size().height.0;
+        let row = fonts.as_ref().map_or(16, |fonts| fonts.row_height.0.max(1));
+        usize::try_from(height / row).unwrap_or(0) + 1
     }
 
     /// Where the caret is, which [`Self::place`] restores.
@@ -1485,35 +1660,42 @@ impl CompareWindow {
         })
     }
 
+    /// The row of the rows that show where `place` puts the caret.
+    fn place_row(&self, place: &Place) -> usize {
+        let session = self.session.borrow();
+        let Some(rows) = session.showing().map(|showing| &showing.view().rows) else {
+            return 0;
+        };
+        match place {
+            Place::FirstDifference => rows.differences().first().map_or(0, |range| range.start),
+            Place::Line {
+                side, line, row, ..
+            } => {
+                let found = line.and_then(|line| {
+                    rows.rows
+                        .iter()
+                        .position(|each| each.line(*side) == Some(line))
+                });
+                found.unwrap_or(*row).min(rows.rows.len().saturating_sub(1))
+            }
+        }
+    }
+
     fn place(&self, place: Place) {
         let Some(c) = self.controls() else {
             return;
         };
+        let new_row = self.place_row(&place);
         match place {
-            Place::FirstDifference => {
-                let first = (self.session.borrow().showing()).and_then(|showing| {
-                    let differences = showing.view().rows.differences();
-                    differences.first().map(|difference| difference.start)
-                });
-                self.go_to_row(first.unwrap_or(0));
-            }
+            Place::FirstDifference => self.go_to_row(new_row),
             Place::Line {
                 side,
-                line,
                 row,
                 column,
                 first_visible,
                 x,
+                ..
             } => {
-                let new_row = {
-                    let session = self.session.borrow();
-                    let rows = (session.showing())
-                        .map_or(&[][..], |showing| showing.view().rows.rows.as_slice());
-                    let found = line.and_then(|line| {
-                        rows.iter().position(|each| each.line(side) == Some(line))
-                    });
-                    found.unwrap_or(row).min(rows.len().saturating_sub(1))
-                };
                 let control = c.sides()[side.index()];
                 let start = control.row_start(new_row).unwrap_or(0);
                 let length = control.row_length(new_row);
@@ -1577,6 +1759,11 @@ impl CompareWindow {
         let last = self.scroll.get();
         if now == last {
             return;
+        }
+        // Only the person's input scrolls without telling the window, so a
+        // place that waits for its rows no longer moves the view.
+        if let Some(loading) = self.loading.borrow_mut().as_mut() {
+            loading.place = None;
         }
         let moved = if now[0] != last[0] {
             Side::Left
@@ -1763,7 +1950,9 @@ impl CompareWindow {
             let notes = [
                 showing.note(),
                 view.rows.forced.then_some(Note::OnlyDifferences),
-                view.rows.truncated.then_some(Note::Truncated),
+                view.rows
+                    .truncated
+                    .then_some(Note::Truncated(view.rows.rows.len())),
                 (showing.mode() == Mode::Text
                     && showing
                         .sizes()
@@ -1978,7 +2167,8 @@ impl CompareWindow {
         self.sync_from(self.active.get());
     }
 
-    /// Lets the person type in each side that takes typing now.
+    /// Lets the person type in each side that takes typing now, which no
+    /// side does while its rows stream in.
     fn apply_read_only(&self) {
         let Some(c) = self.controls() else {
             return;
@@ -1987,8 +2177,9 @@ impl CompareWindow {
             let session = self.session.borrow();
             Side::BOTH.map(|side| session.typing(side))
         };
+        let loading = self.loading.borrow().is_some();
         for side in Side::BOTH {
-            c.sides()[side.index()].set_read_only(!typing[side.index()]);
+            c.sides()[side.index()].set_read_only(loading || !typing[side.index()]);
         }
     }
 
@@ -2024,9 +2215,14 @@ impl CompareWindow {
         self.show_list();
     }
 
-    /// Runs a command that reads the rows, which are fresh.
+    /// Runs a command that reads the rows, which are fresh; while rows
+    /// stream in, holds it for [`Self::end_present`].
     fn run_command(&self, hwnd: Hwnd, command: CompareCommand, fresh: Fresh) {
         use CompareCommand as C;
+        if let Some(loading) = self.loading.borrow_mut().as_mut() {
+            loading.commands.push_back(command);
+            return;
+        }
         match command {
             C::CopyToRight => self.copy_to(hwnd, Side::Right, fresh),
             C::CopyToLeft => self.copy_to(hwnd, Side::Left, fresh),
@@ -2948,6 +3144,12 @@ impl WindowProc for CompareWindow {
                 let side = Side::BOTH
                     .into_iter()
                     .find(|side| c.sides()[side.index()].selection_changed(&notification))?;
+                // While a place waits for its rows, the loading moves no
+                // caret and commands wait, so this move is the person's,
+                // and the place gives way to it.
+                if let Some(loading) = self.loading.borrow_mut().as_mut() {
+                    loading.place = None;
+                }
                 self.active.set(side);
                 self.show_list();
                 // "Difference 2 of 3", Next and Previous follow the caret.
@@ -3004,6 +3206,12 @@ impl WindowProc for CompareWindow {
             Message::Timer(REALIGN_TIMER) => {
                 hwnd.kill_timer(REALIGN_TIMER);
                 self.send(hwnd, Event::Timer);
+                Some(LRESULT(0))
+            }
+            Message::Timer(LOAD_TIMER) => {
+                if self.load(hwnd) {
+                    self.refresh(hwnd);
+                }
                 Some(LRESULT(0))
             }
             Message::KeyDown {
@@ -3089,7 +3297,13 @@ impl WindowProc for CompareWindow {
             Message::Destroy => {
                 self.remember_placement(hwnd);
                 self.hwnd.set(None);
-                for timer in [SHOW_TIMER, PROGRESS_TIMER, REALIGN_TIMER, CLIPBOARD_TIMER] {
+                for timer in [
+                    SHOW_TIMER,
+                    PROGRESS_TIMER,
+                    REALIGN_TIMER,
+                    CLIPBOARD_TIMER,
+                    LOAD_TIMER,
+                ] {
                     hwnd.kill_timer(timer);
                 }
                 if let Some(waker) = self.waker.get() {

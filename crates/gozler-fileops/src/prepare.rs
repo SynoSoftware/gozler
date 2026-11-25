@@ -333,25 +333,27 @@ fn transfer(
     };
     let mut renamed = Vec::new();
     let mut copied = Vec::new();
-    let mut named: HashMap<Vec<u16>, usize> = HashMap::new();
-    for selected in &received.entries {
-        *named.entry(fold(&name_of(selected))).or_default() += 1;
+    // Each name is folded once, because a selection can hold 100,000 (#138).
+    let names: Vec<Vec<u16>> = received.entries.iter().map(name_of).collect();
+    let folded: Vec<Vec<u16>> = names.iter().map(|name| fold(name)).collect();
+    let mut named: HashMap<&[u16], usize> = HashMap::new();
+    for name in &folded {
+        *named.entry(name.as_slice()).or_default() += 1;
     }
-    for selected in received.entries {
+    for ((selected, name), folded) in received.entries.into_iter().zip(names).zip(&folded) {
         if let Some(pause) = pause {
             pause.wait(cancel);
         }
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let name = name_of(&selected);
         // Left alone only under its own name; a new name in its own folder
         // is a copy or a rename beside it.
         let own_folder = selected.identity.parent().as_ref() == Some(&destination.identity)
-            && fold(&name) == fold(selected.identity.name());
+            && *folded == fold(selected.identity.name());
         let same_volume = selected.identity.volume() == destination.identity.volume();
         let source = Source {
-            shared: named[&fold(&name)] > 1,
+            shared: named[folded.as_slice()] > 1,
             selected,
             name,
             own_folder,
@@ -370,9 +372,9 @@ fn transfer(
         .map(|source| source.selected.identity.volume())
         .chain(Some(destination.identity.volume()))
     {
-        volumes
-            .entry(volume.to_vec())
-            .or_insert_with(|| read_volume(volume));
+        if !volumes.contains_key(volume) {
+            volumes.insert(volume.to_vec(), read_volume(volume));
+        }
     }
     let target_volume = destination.identity.volume();
     let target_storage = &volumes[target_volume];
@@ -417,19 +419,19 @@ fn transfer(
 
     let entries = renamed.len() + copied.len();
     let mut pairs: BTreeMap<Vec<u16>, (Vec<Source>, Vec<Source>)> = BTreeMap::new();
-    for source in renamed {
-        pairs
-            .entry(source.selected.identity.volume().to_vec())
-            .or_default()
-            .0
-            .push(source);
-    }
-    for source in copied {
-        pairs
-            .entry(source.selected.identity.volume().to_vec())
-            .or_default()
-            .1
-            .push(source);
+    for (source, copies) in (renamed.into_iter().map(|source| (source, false)))
+        .chain(copied.into_iter().map(|source| (source, true)))
+    {
+        let volume = source.selected.identity.volume();
+        if !pairs.contains_key(volume) {
+            pairs.insert(volume.to_vec(), (Vec::new(), Vec::new()));
+        }
+        let pair = pairs.get_mut(volume).expect("the volume was added");
+        if copies {
+            pair.1.push(source);
+        } else {
+            pair.0.push(source);
+        }
     }
     if pairs.is_empty() {
         pairs.insert(target_volume.to_vec(), (Vec::new(), Vec::new()));

@@ -1,6 +1,8 @@
 //! What an operation receives: the selected entries, each read from the
 //! disk with its identity (D12), and the destination.
 
+use std::cell::Cell;
+use std::collections::HashMap;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gozler_winfs::{Access, AttributeTag, Entry, EntryStat, Reparse, open_entry};
 
 use crate::identity::{Identity, PathTrie, outermost};
-use crate::listing::{BACKSLASH, read_names};
+use crate::listing::{BACKSLASH, LISTING_WORDS, list, read_names};
 use crate::names::Names;
 use crate::operation::{Listed, Pause, Reason, Refusal};
 use crate::win32::{FILE_ATTRIBUTE_DIRECTORY, is_gone};
@@ -16,6 +18,15 @@ use crate::win32::{FILE_ATTRIBUTE_DIRECTORY, is_gone};
 /// Windows' "The directory name is invalid", for a destination that is a
 /// file.
 const ERROR_DIRECTORY: u32 = 267;
+
+/// From this many selected entries in one folder, they are read from one
+/// listing of the folder instead of one open each, which takes about 0.2 ms:
+/// 20 s for 100,000 files (#138).
+const LISTED_FROM: usize = 16;
+
+/// The listing stops after this many entries for each name it looks for, so
+/// a few names in a large folder cost no more than their opens.
+const LISTED_PER_NAME: usize = 32;
 
 /// A selected entry that exists and whose identity was read.
 #[derive(Debug)]
@@ -91,15 +102,22 @@ pub(crate) fn receive(
     pause: Option<&Pause>,
 ) -> Result<(Received, Option<Destination>), Refusal> {
     let mut received = Received::default();
+    let paths: Vec<Vec<u16>> = (sources.iter())
+        .map(|source| source.as_os_str().encode_wide().collect())
+        .collect();
+    let mut listed = read_listed(&paths, cancel, pause);
     let mut selected = Vec::new();
-    for source in sources {
+    for (path, from_listing) in paths.into_iter().zip(&mut listed) {
         if let Some(pause) = pause {
             pause.wait(cancel);
         }
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let path: Vec<u16> = source.as_os_str().encode_wide().collect();
+        if let Some(entry) = from_listing.take() {
+            selected.push(entry);
+            continue;
+        }
         let verbatim = verbatim(&path);
         let read = open_entry(&verbatim, Access::Inspect, Reparse::Open)
             .and_then(|entry| Ok((entry.final_path()?, entry.attribute_tag()?, entry.stat()?)));
@@ -127,6 +145,89 @@ pub(crate) fn receive(
         .map(|i| selected[i].take().expect("each kept index is distinct"))
         .collect();
     Ok((received, destination))
+}
+
+/// The selected entries that a listing of their folder names exactly, read
+/// from it, for each folder that holds at least [`LISTED_FROM`] of them:
+/// the identity is the folder's final path and the listed name, which is
+/// the entry's final path. An entry the listing does not name exactly, such
+/// as one given by its short name, stays `None`, for its own open.
+pub(crate) fn read_listed(
+    paths: &[Vec<u16>],
+    cancel: &AtomicBool,
+    pause: Option<&Pause>,
+) -> Vec<Option<Selected>> {
+    let mut read: Vec<Option<Selected>> = paths.iter().map(|_| None).collect();
+    let mut folders: HashMap<&[u16], HashMap<&[u16], Vec<usize>>> = HashMap::new();
+    for (index, path) in paths.iter().enumerate() {
+        if let Some(at) = path.iter().rposition(|&unit| unit == BACKSLASH)
+            && at + 1 < path.len()
+        {
+            let names = folders.entry(&path[..at]).or_default();
+            names.entry(&path[at + 1..]).or_default().push(index);
+        }
+    }
+    let mut page = vec![0u64; LISTING_WORDS];
+    for (folder, mut names) in folders {
+        if names.values().map(Vec::len).sum::<usize>() < LISTED_FROM {
+            continue;
+        }
+        if let Some(pause) = pause {
+            pause.wait(cancel);
+        }
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let mut path = verbatim(folder);
+        // A root opens as a folder only with its backslash.
+        if is_volume_root(&path) {
+            path.push(BACKSLASH);
+        }
+        let Ok(entry) = open_entry(&path, Access::List, Reparse::Follow) else {
+            continue;
+        };
+        let Ok(identity) = entry.final_path().map(Identity::new) else {
+            continue;
+        };
+        let budget = names.len() * LISTED_PER_NAME;
+        let (seen, left) = (Cell::new(0), Cell::new(names.len()));
+        // A folder of a million entries takes seconds, so Pause holds it
+        // between pages.
+        let stopped = || {
+            if let Some(pause) = pause {
+                pause.wait(cancel);
+            }
+            cancel.load(Ordering::Relaxed) || left.get() == 0 || seen.get() > budget
+        };
+        // A folder that cannot be listed leaves its entries to their opens.
+        let _ = list(&entry, &mut page, stopped, |listed| {
+            seen.set(seen.get() + 1);
+            let Ok(listed) = listed else {
+                return;
+            };
+            let Some(indices) = names.remove(listed.name.as_slice()) else {
+                return;
+            };
+            left.set(left.get() - 1);
+            for index in indices {
+                read[index] = Some(Selected {
+                    path: paths[index].clone(),
+                    verbatim: verbatim(&paths[index]),
+                    identity: identity.child(&listed.name),
+                    tag: AttributeTag {
+                        attributes: listed.attributes,
+                        reparse_tag: listed.reparse_tag.unwrap_or(0),
+                    },
+                    stat: EntryStat {
+                        size: listed.size,
+                        created: listed.created,
+                        last_write: listed.last_write,
+                    },
+                });
+            }
+        });
+    }
+    read
 }
 
 /// The destination is a folder the person chose, so it is opened following

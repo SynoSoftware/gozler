@@ -521,15 +521,14 @@ pub(crate) enum Note {
     NotText,
     /// Only differences show, because all rows would be too many.
     OnlyDifferences,
-    /// The rows stop after the most that show.
-    Truncated,
+    /// The rows stop after this many, the most that show.
+    Truncated(usize),
     /// Edit mode is off for a file larger than it works for.
     EditLarge,
 }
 
 /// The text of `note`.
 pub(crate) fn note_text(strings: &Strings, numbers: &dyn Numbers, note: Note) -> String {
-    let rows = numbers.integer(SHOWN_LIMIT as u64);
     match note {
         Note::LargeBytes => strings.format(
             "compare.large_bytes",
@@ -540,8 +539,13 @@ pub(crate) fn note_text(strings: &Strings, numbers: &dyn Numbers, note: Note) ->
             &[&numbers.integer(LINE_COUNT_LIMIT as u64)],
         ),
         Note::NotText => strings.text("compare.not_text").to_owned(),
-        Note::OnlyDifferences => strings.format("compare.only_forced", &[&rows]),
-        Note::Truncated => strings.format("compare.truncated", &[&rows]),
+        Note::OnlyDifferences => strings.format(
+            "compare.only_forced",
+            &[&numbers.integer(SHOWN_LIMIT as u64)],
+        ),
+        Note::Truncated(rows) => {
+            strings.format("compare.truncated", &[&numbers.integer(rows as u64)])
+        }
         Note::EditLarge => strings.format(
             "compare.edit_large",
             &[&text::bytes(strings, numbers, super::compare::EDIT_LIMIT)],

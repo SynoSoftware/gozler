@@ -189,12 +189,31 @@ fn push_run(out: &mut String, run: &str, style: Style) {
 /// one the person typed in; it matches no row.
 pub(crate) const UNKNOWN: u64 = 0;
 
-/// The rows of a control that a document replaces: its rows in `rows` give
-/// way to the rows of `rtf`, which holds one row or more.
+/// About the most bytes of RTF in a slice of a [`Patch`], which the
+/// window's thread streams in one message. 64 KB of hex rows that differ in every byte take
+/// about 40 ms; 16 KB slices made no message shorter and the load twice as
+/// long.
+const SLICE_BYTES: usize = 64 << 10;
+
+/// The most bytes of RTF of a patch that keeps rows, which streams in one
+/// message, so an edit or a check box keeps the view where it is. A larger
+/// change replaces all the rows and streams in slices instead.
+const KEPT_BYTES: usize = 4 * SLICE_BYTES;
+
+/// The rows of a control that a patch replaces: its rows in `rows` give way
+/// to the rows of `slices`, which hold one row or more.
 #[derive(Debug)]
 pub(crate) struct Patch {
     pub(crate) rows: Range<usize>,
-    pub(crate) rtf: String,
+    /// `rows` are all the rows the control held. Only such a patch has
+    /// more than one slice, so the rows of a later slice always go below
+    /// all the rows the control holds, and move none of them; a patch that
+    /// keeps rows is one document of at most [`KEPT_BYTES`].
+    pub(crate) whole: bool,
+    /// Its rows as documents of their own. The first replaces `rows`; each
+    /// later one replaces the last row of the one before, with which it
+    /// starts, because a document replaces a row or more.
+    pub(crate) slices: Vec<String>,
 }
 
 /// Turns a control's rows into `rows`, each written by [`row_rtf`], in
@@ -250,15 +269,48 @@ pub(crate) fn patch(
             after -= 1;
         }
     }
-    let mut rtf = Rtf::new(palette, font);
-    for row in &rows[before..rows.len() - after] {
-        rtf.push(row);
+    let size: usize = rows[before..rows.len() - after]
+        .iter()
+        .map(String::len)
+        .sum();
+    if size > KEPT_BYTES {
+        (before, after) = (0, 0);
     }
+    let whole = before == 0 && after == 0;
+    let slices = if whole {
+        slice(rows, palette, font)
+    } else {
+        let mut rtf = Rtf::new(palette, font);
+        for row in &rows[before..rows.len() - after] {
+            rtf.push(row);
+        }
+        vec![rtf.finish()]
+    };
     let patch = Patch {
         rows: before..shown.len() - after,
-        rtf: rtf.finish(),
+        whole,
+        slices,
     };
     (prints, Some(patch))
+}
+
+/// `rows` as slices of about [`SLICE_BYTES`], each after the first starting
+/// again with the last row of the one before.
+fn slice(rows: &[String], palette: &Palette, font: Font) -> Vec<String> {
+    let mut slices = Vec::new();
+    // The rows that the slices so far hold.
+    let mut end = 0;
+    while end < rows.len() {
+        let mut rtf = Rtf::new(palette, font);
+        let mut to = end.saturating_sub(1);
+        while to < rows.len() && (to <= end || rtf.text.len() < SLICE_BYTES) {
+            rtf.push(&rows[to]);
+            to += 1;
+        }
+        slices.push(rtf.finish());
+        end = to;
+    }
+    slices
 }
 
 #[cfg(test)]
@@ -306,11 +358,61 @@ mod tests {
         let (_, added) = patch(&shown, &rows(&["a", "b", "x", "c"]), &palette, font);
         let added = added.expect("a row was added");
         assert_eq!(added.rows, 1..2);
-        assert!(added.rtf.ends_with("b\\par\nx}"), "{}", added.rtf);
+        let [slice] = added.slices.as_slice() else {
+            panic!("a small patch is one slice");
+        };
+        assert!(slice.ends_with("b\\par\nx}"), "{slice}");
         let (_, removed) = patch(&shown, &rows(&["a", "c"]), &palette, font);
         assert_eq!(removed.map(|patch| patch.rows), Some(0..2));
         let typed = [shown[0], UNKNOWN, shown[2]];
         let (_, again) = patch(&typed, &rows(&["a", "b", "c"]), &palette, font);
         assert_eq!(again.map(|patch| patch.rows), Some(1..2));
+    }
+
+    /// A large patch streams in slices, each after the first starting again
+    /// with the last row of the one before, so the control ends with every
+    /// row once. Rows that change in the middle stream in one document
+    /// while they are few, so an edit keeps the view, and replace all the
+    /// rows when they are many, so no slice goes above rows the control
+    /// keeps, which would move the caret and the view.
+    #[test]
+    fn a_large_patch_streams_in_slices_that_overlap_by_a_row() {
+        let (palette, font) = (Palette::default(), Font::default());
+        let rows: Vec<String> = (0..20_000)
+            .map(|n| row_rtf(&format!("row {n:05} of the file"), Style::Text, &[]))
+            .collect();
+        let (shown, sliced) = patch(&[], &rows, &palette, font);
+        let slices = sliced.expect("no row showed").slices;
+        assert!(slices.len() > 1);
+        let row = |n: usize| format!("row {n:05} of");
+        let mut first = 0;
+        for slice in &slices {
+            assert!(slice.contains(&row(first)));
+            assert!(first == 0 || !slice.contains(&row(first - 1)));
+            let last: usize = slice.rsplit("row ").next().expect("a row")[..5]
+                .parse()
+                .expect("the row's number");
+            assert!(last > first);
+            first = last;
+        }
+        assert_eq!(first + 1, rows.len());
+
+        let changed = |rows_changed: std::ops::Range<usize>| {
+            let mut changed = rows.clone();
+            for (n, row) in changed[rows_changed].iter_mut().enumerate() {
+                *row = row_rtf(&format!("changed row {n:05}"), Style::Text, &[]);
+            }
+            patch(&shown, &changed, &palette, font)
+                .1
+                .expect("rows changed")
+        };
+        let few = changed(10..1_010);
+        assert!(!few.whole);
+        assert_eq!(few.rows, 10..1_010);
+        assert_eq!(few.slices.len(), 1);
+        let many = changed(10..19_990);
+        assert!(many.whole);
+        assert_eq!(many.rows, 0..rows.len());
+        assert!(many.slices.len() > 1);
     }
 }
